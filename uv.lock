@@ -2447,6 +2447,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "ir-datasets" },
     { name = "numpy" },
+    { name = "openai" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "pystemmer" },
@@ -2459,9 +2460,6 @@ dependencies = [
 [package.optional-dependencies]
 eval-rag = [
     { name = "ragas" },
-]
-generate = [
-    { name = "openai" },
 ]
 
 [package.dev-dependencies]
@@ -2476,7 +2474,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.115" },
     { name = "ir-datasets", specifier = ">=0.5" },
     { name = "numpy", specifier = ">=1.26" },
-    { name = "openai", marker = "extra == 'generate'", specifier = ">=1.40" },
+    { name = "openai", specifier = ">=1.40" },
     { name = "pydantic", specifier = ">=2.7" },
     { name = "pydantic-settings", specifier = ">=2.3" },
     { name = "pystemmer", specifier = ">=2.2" },
@@ -2486,7 +2484,7 @@ requires-dist = [
     { name = "sentence-transformers", specifier = ">=3.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
 ]
-provides-extras = ["generate", "eval-rag"]
+provides-extras = ["eval-rag"]
 
 [package.metadata.requires-dev]
 dev = [

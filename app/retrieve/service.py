@@ -6,6 +6,8 @@ depth that gets fused/reranked; `top_k` is how many results come back.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 from app.core.config import settings
 from app.core.interfaces import SearchHit
 from app.index.embedder import Embedder
@@ -19,6 +21,12 @@ MODES = ("bm25", "dense", "hybrid", "hybrid_rerank")
 
 class SearchService:
     def __init__(self):
+        missing = [p for p in (settings.qdrant_location, settings.bm25_path) if not Path(p).exists()]
+        if missing:
+            raise RuntimeError(
+                f"Search index not found ({', '.join(missing)}). Build it first with "
+                "`make index` (uv run python -m app.ingest.build_index)."
+            )
         self.embedder = Embedder()
         self.store = VectorStore()
         self.dense = DenseRetriever(self.embedder, self.store)

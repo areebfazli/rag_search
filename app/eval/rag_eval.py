@@ -33,13 +33,12 @@ from app.generate.generator import LLMGenerator
 from app.ingest.corpus import load_queries_qrels
 from app.retrieve.service import SearchService
 
-# Generator + judge default to the 70B model (settings.llm_model) for quality — the 70B
-# judge follows the JSON scoring reliably, whereas the 8B judge tends to drop fields.
-# Requires Groq free-tier daily token budget (100k TPD); if that is exhausted, drop these
-# to "llama-3.1-8b-instant" for a budget-friendly (lower-quality) sample run.
+# Generator uses the 70B model (settings.llm_model) for answer quality; the judge uses a
+# DIFFERENT, lighter model so it isn't grading its own output (avoids self-evaluation
+# bias) and draws from a separate Groq rate-limit bucket. Both need free-tier budget.
 N = 10
 GEN_MODEL = settings.llm_model
-JUDGE_MODEL = settings.llm_model
+JUDGE_MODEL = "llama-3.1-8b-instant"
 TOP_K = 5
 THROTTLE_S = 15.0  # stay under the free-tier tokens-per-minute budget
 JUDGE_CTX_CHARS = 400

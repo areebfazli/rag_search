@@ -18,6 +18,13 @@ class SearchHit:
     metadata: dict = field(default_factory=dict)
 
 
+def hit_passage(hit: "SearchHit") -> str:
+    """Title + text — the full passage, matching what was embedded / BM25-indexed.
+    Used for reranking and answer context (the vector-store payload keeps text only)."""
+    title = hit.metadata.get("title", "").strip()
+    return f"{title}. {hit.text}".strip() if title else hit.text
+
+
 @dataclass
 class Answer:
     text: str

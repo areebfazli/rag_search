@@ -16,12 +16,14 @@ dependencies = [
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
     "numpy>=1.26",
+    # OpenAI-compatible client for RAG generation (Groq/Ollama/OpenAI). Core because
+    # /answer and app/eval/rag_eval depend on it.
+    "openai>=1.40",
 ]
 
 [project.optional-dependencies]
-# Phase 5 — only needed once an LLM backend is chosen. `openai` also talks to
-# local Ollama (OpenAI-compatible), so it covers both local and hosted.
-generate = ["openai>=1.40"]
+# ragas is a heavier, optional add-on for RAG metrics; the lightweight LLM-as-judge
+# eval in app/eval/rag_eval.py does NOT require it.
 eval-rag = ["ragas==0.4.*"]
 
 [dependency-groups]

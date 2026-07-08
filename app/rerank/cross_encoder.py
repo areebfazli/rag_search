@@ -9,7 +9,7 @@ from __future__ import annotations
 from sentence_transformers import CrossEncoder
 
 from app.core.config import settings
-from app.core.interfaces import SearchHit
+from app.core.interfaces import SearchHit, hit_passage
 
 
 class CrossEncoderReranker:
@@ -19,7 +19,7 @@ class CrossEncoderReranker:
     def rerank(self, query: str, hits: list[SearchHit], top_k: int) -> list[SearchHit]:
         if not hits:
             return []
-        scores = self.model.predict([(query, h.text) for h in hits])
+        scores = self.model.predict([(query, hit_passage(h)) for h in hits])
         order = sorted(range(len(hits)), key=lambda i: scores[i], reverse=True)
         return [
             SearchHit(hits[i].doc_id, float(scores[i]), hits[i].text, hits[i].metadata)

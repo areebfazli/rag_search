@@ -5,6 +5,7 @@ Run:
 """
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
@@ -16,6 +17,10 @@ from app.schemas.api import AnswerResponse, Hit, SearchResponse
 app = FastAPI(title="Semantic Search + RAG")
 _service: SearchService | None = None
 _generator = None
+# Embedded (local-mode) Qdrant and the shared ST models are not thread-safe, and
+# FastAPI runs sync endpoints in a threadpool — serialize retrieval with a lock.
+# (The store also locks to one process: don't run the API and `make eval` at once.)
+_retrieval_lock = threading.Lock()
 _FRONTEND = Path(__file__).resolve().parents[2] / "frontend" / "index.html"
 
 
@@ -53,7 +58,8 @@ def search(
 ) -> SearchResponse:
     if mode not in MODES:
         raise HTTPException(status_code=422, detail=f"mode must be one of {MODES}")
-    hits = get_service().retrieve(q, mode=mode, top_k=top_k)
+    with _retrieval_lock:
+        hits = get_service().retrieve(q, mode=mode, top_k=top_k)
     return SearchResponse(
         query=q,
         mode=mode,
@@ -72,8 +78,9 @@ def answer(
 ) -> AnswerResponse:
     if mode not in MODES:
         raise HTTPException(status_code=422, detail=f"mode must be one of {MODES}")
-    hits = get_service().retrieve(q, mode=mode, top_k=top_k)
-    ans = get_generator().generate(q, hits)
+    with _retrieval_lock:
+        hits = get_service().retrieve(q, mode=mode, top_k=top_k)
+    ans = get_generator().generate(q, hits)  # network call — safe outside the lock
     return AnswerResponse(
         query=q,
         answer=ans.text,

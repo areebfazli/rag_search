@@ -14,7 +14,6 @@ class Settings(BaseSettings):
     embedding_model: str = "BAAI/bge-small-en-v1.5"
     # bge-small is asymmetric: prepend this to QUERIES only, never to documents.
     embedding_query_prefix: str = "Represent this sentence for searching relevant passages: "
-    embedding_dim: int = 384
 
     # --- Reranker ---
     # CPU-friendly default (22M). mxbai-rerank-base-v2 is the GPU-quality upgrade

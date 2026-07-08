@@ -17,6 +17,13 @@ from app.generate.prompts import SYSTEM, build_user_prompt
 _CITE = re.compile(r"\[(\d+)\]")
 
 
+def map_citations(text: str, hits: list[SearchHit]) -> list[str]:
+    """Map [n] markers in the answer to hit doc_ids — 1-based, deduped, ordered,
+    ignoring out-of-range indices the model may hallucinate."""
+    cited = sorted({int(n) for n in _CITE.findall(text)})
+    return [hits[n - 1].doc_id for n in cited if 1 <= n <= len(hits)]
+
+
 class LLMGenerator:
     def __init__(self, model: str | None = None, base_url: str | None = None, api_key: str | None = None):
         self.model = model or settings.llm_model
@@ -39,6 +46,4 @@ class LLMGenerator:
             max_tokens=400,
         )
         text = (resp.choices[0].message.content or "").strip()
-        cited = sorted({int(n) for n in _CITE.findall(text)})
-        citations = [hits[n - 1].doc_id for n in cited if 1 <= n <= len(hits)]
-        return Answer(text=text, citations=citations, hits=hits)
+        return Answer(text=text, citations=map_citations(text, hits), hits=hits)

@@ -1,4 +1,4 @@
-.PHONY: install index api eval test lint
+.PHONY: install index api eval eval-rag test lint
 
 install:  ## create env + install deps
 	uv sync
@@ -11,6 +11,9 @@ api:  ## serve UI + API at http://localhost:8000
 
 eval:  ## reproduce the retrieval metrics table
 	uv run python -m app.eval.retrieval_eval
+
+eval-rag:  ## RAG answer-quality eval (needs SSR_LLM_API_KEY in .env)
+	uv run python -m app.eval.rag_eval
 
 test:  ## run unit tests
 	uv run pytest -q
