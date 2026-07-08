@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Corpora, indices, model caches — large and regenerable
+data/
+!data/.gitkeep
+
+# Secrets
+.env
+.env.local
+
+# OS
+.DS_Store
+
+# NOTE: eval/results/ is intentionally NOT ignored — the metrics tables are the
+# portfolio artifact and must be committed.

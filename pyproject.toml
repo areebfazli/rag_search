@@ -1,0 +1,37 @@
+[project]
+name = "semantic-search-rag"
+version = "0.1.0"
+description = "Hybrid semantic search + RAG engine: BM25 + dense embeddings fused with RRF, cross-encoder reranking, grounded RAG answers, and a retrieval/RAG evaluation harness."
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "sentence-transformers>=3.0",
+    "qdrant-client>=1.12",
+    "bm25s>=0.2",
+    "PyStemmer>=2.2",
+    "ir-datasets>=0.5",
+    "ranx>=0.3",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+# Phase 5 — only needed once an LLM backend is chosen. `openai` also talks to
+# local Ollama (OpenAI-compatible), so it covers both local and hosted.
+generate = ["openai>=1.40"]
+eval-rag = ["ragas==0.4.*"]
+
+[dependency-groups]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
+[tool.uv]
+# This is an application, not a library — manage the env + deps but don't build
+# and install the `app` package itself. Run modules from the project root.
+package = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
