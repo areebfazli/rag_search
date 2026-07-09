@@ -34,6 +34,8 @@ class LexicalIndex:
         (p / "docs.json").write_text(json.dumps(self.docs))
 
     def load(self, path: str | None = None) -> "LexicalIndex":
+        # Security: only load an index you built yourself. bm25s deserializes on-disk
+        # arrays, so pointing this at an untrusted index dir is a code-exec surface.
         p = Path(path or settings.bm25_path)
         self.retriever = bm25s.BM25.load(str(p))
         self.docs = json.loads((p / "docs.json").read_text())

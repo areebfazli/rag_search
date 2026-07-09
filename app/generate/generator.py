@@ -31,6 +31,7 @@ class LLMGenerator:
             base_url=base_url or settings.llm_base_url,
             api_key=api_key or settings.llm_api_key,
             max_retries=5,  # backoff through transient Groq free-tier 429s
+            timeout=30.0,  # don't let a hung request tie up a worker for minutes
         )
 
     def generate(self, query: str, hits: list[SearchHit]) -> Answer:
