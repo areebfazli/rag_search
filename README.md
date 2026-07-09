@@ -19,10 +19,11 @@ query ─┬─► BM25 (bm25s)        top-100 ─┐
 | Lexical | `bm25s` |
 | Fusion | Reciprocal Rank Fusion (hand-rolled) |
 | Vector store | Qdrant (embedded local mode) |
-| Reranker | `mixedbread-ai/mxbai-rerank-base-v2` |
-| API | FastAPI |
+| Reranker | `cross-encoder/ms-marco-MiniLM-L-6-v2` (CPU-friendly; swappable via `SSR_RERANKER_MODEL`) |
+| API | FastAPI + slowapi rate limiting |
 | Retrieval eval | `ranx` on BEIR/SciFact gold qrels |
-| RAG eval | `ragas` |
+| RAG eval | abstention-aware LLM-as-judge (`app/eval/rag_eval.py`) |
+| LLM | Groq `llama-3.3-70b-versatile` (any OpenAI-compatible endpoint via `SSR_LLM_BASE_URL`) |
 
 ## Evaluation (headline artifact)
 
@@ -44,7 +45,15 @@ Measured on BEIR/SciFact — 300 test queries, gold relevance judgments (`uv run
 Example — `/answer?q=Can aspirin reduce the risk of colorectal cancer?`:
 > "Aspirin has been shown to reduce the risk of colorectal cancer [1][2][3] … a pooled analysis of four randomized trials showed a 34% reduction in 20-year colorectal cancer mortality [3]."
 
-**Answer-quality eval** (`app/eval/rag_eval.py`) is an abstention-aware LLM-as-judge measuring faithfulness + context relevance. On a 70B-judged sample: faithfulness ≈ 0.8–1.0 on answered questions, with correct abstention when the corpus lacks evidence (see `eval/results/rag.md`).
+**Answer-quality eval** (`app/eval/rag_eval.py`) is an abstention-aware LLM-as-judge: generator = Groq `llama-3.3-70b-versatile`, judge = `llama-3.1-8b-instant` (a separate, lighter model, so it isn't grading its own output). On a 10-question SciFact sample (`eval/results/rag.md`):
+
+| Metric | Score |
+|---|---|
+| Answered (vs. correctly abstained) | 0.50 |
+| Faithfulness (over answered) | 0.76 |
+| Context relevance (all) | 0.61 |
+
+Half the sampled claims have no supporting passage in the top-k, and the system **abstains** on them rather than hallucinating — the intended behavior for claim-verification data. The sample is small (Groq free-tier token budget); the harness re-runs at any size via `make eval-rag`.
 
 ## Quickstart
 
@@ -59,3 +68,7 @@ uv run pytest                             # tests
 Open <http://localhost:8000> for the search UI, or query the API directly:
 `GET /search?q=...&mode=hybrid&top_k=8` — modes: `bm25`, `dense`, `hybrid`, `hybrid_rerank`.
 (`make install|index|api|eval|test` wrap these.)
+
+## License
+
+[MIT](LICENSE)

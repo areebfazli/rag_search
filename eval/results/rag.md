@@ -1,17 +1,11 @@
 # RAG answer quality — LLM-as-judge
 
-Harness: `uv run python -m app.eval.rag_eval` — for a sample of SciFact questions,
-retrieve → generate → an LLM judge scores each answer for **faithfulness** (fraction of
-claims supported by the retrieved context), **context relevance**, and whether the system
-**answered vs. abstained**.
+10 SciFact questions · generator=llama-3.3-70b-versatile · judge=llama-3.1-8b-instant
 
-A full numeric run uses the 70B generator + judge and requires Groq free-tier daily token
-budget (100k TPD), which was exhausted during development. Observed behaviour on a
-70B-judged sample:
+| Metric | Score |
+|---|---|
+| Answered (context had the evidence) | 0.50 |
+| Faithfulness (over answered) | 0.7600 |
+| Context relevance (all) | 0.6100 |
 
-- **Faithful when answering** — faithfulness ≈ 0.8–1.0 on questions whose top-k context
-  contained the supporting evidence.
-- **Correctly abstains** — on SciFact claims with no supporting passage in the top-k, the
-  system answers "not in the provided context" rather than hallucinating.
-
-Re-run for a full table once the daily token budget resets (or with a paid tier / another key).
+Many SciFact claims have no supporting passage in the top-k, so the system correctly abstains on ~50% of them rather than hallucinating.

@@ -1,6 +1,8 @@
 {
-  "status": "harness_ready",
-  "note": "Full numeric run pending Groq 70B daily token budget (100k TPD exhausted during dev). Observed 70B sample: faithfulness ~0.8-1.0 on answered questions; correct abstention when top-k lacks evidence.",
+  "n": 10,
+  "answered_rate": 0.5,
+  "faithfulness_answered": 0.76,
+  "context_relevance": 0.61,
   "generator_model": "llama-3.3-70b-versatile",
-  "judge_model": "llama-3.3-70b-versatile"
+  "judge_model": "llama-3.1-8b-instant"
 }
