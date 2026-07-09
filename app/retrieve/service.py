@@ -20,18 +20,23 @@ MODES = ("bm25", "dense", "hybrid", "hybrid_rerank")
 
 
 class SearchService:
-    def __init__(self):
-        missing = [p for p in (settings.qdrant_location, settings.bm25_path) if not Path(p).exists()]
-        if missing:
-            raise RuntimeError(
-                f"Search index not found ({', '.join(missing)}). Build it first with "
-                "`make index` (uv run python -m app.ingest.build_index)."
-            )
-        self.embedder = Embedder()
-        self.store = VectorStore()
-        self.dense = DenseRetriever(self.embedder, self.store)
-        self.lexical = LexicalIndex().load()
-        self._reranker = None
+    def __init__(self, dense=None, lexical=None, reranker=None):
+        # Components may be injected (used by tests); otherwise they are built from
+        # the on-disk index — which must exist.
+        if dense is None or lexical is None:
+            missing = [p for p in (settings.qdrant_location, settings.bm25_path) if not Path(p).exists()]
+            if missing:
+                raise RuntimeError(
+                    f"Search index not found ({', '.join(missing)}). Build it first with "
+                    "`make index` (uv run python -m app.ingest.build_index)."
+                )
+            self.embedder = Embedder()
+            self.store = VectorStore()
+            dense = DenseRetriever(self.embedder, self.store)
+            lexical = LexicalIndex().load()
+        self.dense = dense
+        self.lexical = lexical
+        self._reranker = reranker
 
     @property
     def reranker(self):
@@ -48,7 +53,7 @@ class SearchService:
         top_k: int | None = None,
         candidate_k: int | None = None,
     ) -> list[SearchHit]:
-        top_k = top_k or settings.rerank_top_k
+        top_k = top_k if (top_k and top_k > 0) else settings.rerank_top_k
         if mode == "bm25":
             return self.lexical.search(query, top_k)
         if mode == "dense":

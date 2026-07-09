@@ -29,10 +29,17 @@ class Settings(BaseSettings):
     corpus_dataset: str = "beir/scifact"
     eval_dataset: str = "beir/scifact/test"
 
+    # --- API ---
+    # Trust X-Forwarded-For for rate-limit keying. Enable ONLY behind a proxy you
+    # control (Fly/Render), which sets XFF and strips client-supplied values —
+    # trusting it while directly exposed lets clients spoof their IP to evade limits.
+    trust_proxy: bool = False
+
     # --- Retrieval knobs ---
+    # dense_top_k is the first-stage candidate depth used by BOTH retrievers in
+    # hybrid mode (SearchService.candidate_k); rerank_top_k is the default number
+    # of results returned when the caller doesn't pass top_k.
     dense_top_k: int = 100
-    lexical_top_k: int = 100
-    fusion_top_k: int = 50
     rerank_top_k: int = 8
     rrf_k: int = 60
 

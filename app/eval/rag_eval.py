@@ -29,6 +29,7 @@ from pathlib import Path
 from openai import OpenAI
 
 from app.core.config import settings
+from app.core.interfaces import hit_passage
 from app.generate.generator import LLMGenerator
 from app.ingest.corpus import load_queries_qrels
 from app.retrieve.service import SearchService
@@ -41,7 +42,6 @@ GEN_MODEL = settings.llm_model
 JUDGE_MODEL = "llama-3.1-8b-instant"
 TOP_K = 5
 THROTTLE_S = 15.0  # stay under the free-tier tokens-per-minute budget
-JUDGE_CTX_CHARS = 400
 OUT = Path("eval/results")
 
 JUDGE_SYSTEM = (
@@ -83,7 +83,9 @@ def main() -> None:
     qids = list(queries)[:N]
     service = SearchService()
     generator = LLMGenerator(model=GEN_MODEL)
-    judge_client = OpenAI(base_url=settings.llm_base_url, api_key=settings.llm_api_key, max_retries=5)
+    judge_client = OpenAI(
+        base_url=settings.llm_base_url, api_key=settings.llm_api_key, max_retries=5, timeout=30.0
+    )
 
     rows = []
     for qid in qids:
@@ -91,7 +93,9 @@ def main() -> None:
         try:
             hits = service.retrieve(q, mode="hybrid", top_k=TOP_K)
             ans = generator.generate(q, hits)
-            s = judge(judge_client, JUDGE_MODEL, q, [h.text[:JUDGE_CTX_CHARS] for h in hits], ans.text)
+            # Judge must see the SAME context the generator saw (title + full text) —
+            # a truncated view would misscore claims grounded in the cut-off part.
+            s = judge(judge_client, JUDGE_MODEL, q, [hit_passage(h) for h in hits], ans.text)
         except Exception as e:  # skip a query rather than lose the whole run
             print(f"  q{qid:>4} SKIPPED ({type(e).__name__}: {str(e)[:60]})")
             continue

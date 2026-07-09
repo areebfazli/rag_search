@@ -19,8 +19,10 @@ class SearchHit:
 
 
 def hit_passage(hit: "SearchHit") -> str:
-    """Title + text — the full passage, matching what was embedded / BM25-indexed.
-    Used for reranking and answer context (the vector-store payload keeps text only)."""
+    """Title + text — the same CONTENT that was embedded / BM25-indexed, joined with
+    ". " for single-line model input (indexing joins with "\\n\\n"; see
+    corpus.document_passage). Used for reranking and answer context, since the
+    vector-store payload keeps text only."""
     title = hit.metadata.get("title", "").strip()
     return f"{title}. {hit.text}".strip() if title else hit.text
 
