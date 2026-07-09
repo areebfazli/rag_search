@@ -19,12 +19,9 @@ dependencies = [
     # OpenAI-compatible client for RAG generation (Groq/Ollama/OpenAI). Core because
     # /answer and app/eval/rag_eval depend on it.
     "openai>=1.40",
+    # Per-IP rate limiting for the unauthenticated API.
+    "slowapi>=0.1.9",
 ]
-
-[project.optional-dependencies]
-# ragas is a heavier, optional add-on for RAG metrics; the lightweight LLM-as-judge
-# eval in app/eval/rag_eval.py does NOT require it.
-eval-rag = ["ragas==0.4.*"]
 
 [dependency-groups]
 dev = ["pytest>=8.0", "ruff>=0.6"]
