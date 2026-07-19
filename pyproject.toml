@@ -21,6 +21,9 @@ dependencies = [
     "openai>=1.40",
     # Per-IP rate limiting for the unauthenticated API.
     "slowapi>=0.1.9",
+    # Declared explicitly (it would otherwise arrive transitively via
+    # sentence-transformers) so the CPU-only index below applies to it.
+    "torch>=2.2",
 ]
 
 [dependency-groups]
@@ -30,6 +33,18 @@ dev = ["pytest>=8.0", "ruff>=0.6"]
 # This is an application, not a library — manage the env + deps but don't build
 # and install the `app` package itself. Run modules from the project root.
 package = false
+
+# Nothing here uses a GPU — embedding, reranking and eval all run on CPU. Without
+# this, resolving torch on Linux drags in ~37 nvidia-* CUDA wheels (~2.7 GB) that
+# are dead weight in the image. macOS/other platforms keep the PyPI build, which is
+# already CPU-only there.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux' or sys_platform == 'win32'" }]
 
 [tool.ruff]
 line-length = 100

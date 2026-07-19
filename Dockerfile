@@ -12,15 +12,19 @@ WORKDIR /app
 # uv for fast, reproducible installs (pinned — never :latest in a build)
 COPY --from=ghcr.io/astral-sh/uv:0.11.28 /uv /usr/local/bin/uv
 
-COPY pyproject.toml uv.lock* ./
-RUN uv sync --no-dev
-
-COPY app ./app
-COPY frontend ./frontend
-
-# Run as an unprivileged user
-RUN useradd --create-home --uid 10001 appuser && chown -R appuser /app
+# Create the unprivileged user BEFORE installing, so the venv is written with the
+# right ownership already. A `chown -R /app` after `uv sync` rewrites every file in
+# the venv, and Docker stores that as a second full copy of it — doubling the image.
+RUN useradd --create-home --uid 10001 appuser && chown appuser /app
 USER appuser
+
+# Exact lockfile, no glob: a missing uv.lock must fail the build rather than silently
+# re-resolving to different versions. --locked fails if the lock is stale.
+COPY --chown=appuser pyproject.toml uv.lock ./
+RUN uv sync --no-dev --locked --no-cache
+
+COPY --chown=appuser app ./app
+COPY --chown=appuser frontend ./frontend
 
 # The index (data/) is large and built once — mount it at runtime, or build inside
 # the container:  docker run <img> .venv/bin/python -m app.ingest.build_index
