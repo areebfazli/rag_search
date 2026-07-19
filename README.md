@@ -54,10 +54,12 @@ t-test on per-query nDCG@10** (300 pairs), reported as Δ, p, and per-query win/
 | Rerank (bge) vs Hybrid | +0.0001 | 0.9964 | 48/196/56 | no |
 | Rerank (bge) vs Rerank (MiniLM) | +0.0266 | 0.0376 | 65/190/45 | **yes** |
 
-These are five uncorrected pairwise tests, so read the marginal ones with care: only
-hybrid-vs-BM25 (p = 0.0007) survives a Bonferroni correction at α = 0.01. The two results at
-p ≈ 0.037–0.038 would not, and are reported as suggestive rather than settled. The conclusions
-that carry weight below are the *null* ones — a p of 0.996 is not a near-miss.
+These are uncorrected pairwise tests, so read the marginal ones with care. Counting the
+Recall@100 comparison used in Finding 1, six tests are reported here; a Bonferroni correction at
+α = 0.05 puts the threshold at p ≈ 0.008. Only hybrid-vs-BM25 (p = 0.0007) clears it — the two
+results at p ≈ 0.035–0.038 do not, and are reported as suggestive rather than settled. The
+conclusions that carry weight below are the *null* ones, which correction only strengthens: a
+p of 0.996 is not a near-miss.
 
 **Findings.**
 
@@ -80,7 +82,7 @@ reranking at all: **Δ = +0.0001, p = 0.996**.
 cross-encoder actively degrades ranking; the right one merely returns you to where you started
 — and it is not cheap. Wall-clock over the same 300 queries on a 4-core laptop CPU, reranking a
 32-candidate slice: **7.5 s/query for MiniLM and 32.3 s/query for bge-reranker-base**, against
-~0.2 s/query for hybrid alone. Paying 150× the latency for a statistical tie is a poor trade.
+~0.2 s/query for hybrid alone. Paying ~160× the latency for a statistical tie is a poor trade.
 **Hybrid RRF is therefore the default**, with reranking available behind `mode=hybrid_rerank`.
 
 This corrects an earlier version of this README, which asserted that reranking "only pays off
@@ -173,9 +175,13 @@ Things that are deliberate rather than accidental, and the reasoning behind them
   service for minutes. It is a denial-of-service guard first and a latency knob second.
 - **The API is unauthenticated**, so per-IP rate limiting (30/min search, 10/min answer) is the
   only guard. `SSR_TRUST_PROXY=true` keys on the X-Forwarded-For entry `SSR_TRUSTED_PROXY_HOPS`
-  in from the *right* (default 1), after joining repeated header lines. Set the hop count to how
-  many proxies you actually run: too low keys on a client-supplied value and the limit can be
-  bypassed by rotating the header; too high puts every user behind your CDN in one bucket.
+  in from the *right* (default 1), after joining repeated header lines. Set the hop count to
+  exactly how many proxies you run — the count *is* the trust boundary, since only the rightmost
+  `hops` entries were written by your own infrastructure. Too **low** stops short and keys on one
+  of your proxies, putting every user behind it in one bucket. Too **high** indexes past your
+  proxies into the part of the list the *client* supplied, letting a client choose its own key
+  and rotate it per request — the limit is then bypassed entirely. The default of 1 is the safe
+  value and cannot be over-indexed.
 - **Embedded Qdrant locks to a single process.** Don't run the API and `make eval`/`make index`
   at the same time — the second one will fail to acquire the storage lock.
 - **`make eval` caches per config** under `data/eval_cache/`, keyed by a signature of everything

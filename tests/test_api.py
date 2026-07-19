@@ -80,7 +80,9 @@ def test_trust_proxy_normalises_equivalent_addresses(monkeypatch):
     # mint new buckets by rewriting its own IPv6 form.
     a = _client_ip(make_request("10.0.0.1", xff="0:0:0:0:0:0:0:1"))
     b = _client_ip(make_request("10.0.0.1", xff="::1"))
-    assert a == b
+    # Assert the VALUE, not just a == b: if IPv6 were rejected outright both calls would
+    # fall back to the peer and compare equal, so the equality alone passes vacuously.
+    assert a == b == "::1"
 
 
 def test_trust_proxy_too_few_entries_falls_back_to_peer(monkeypatch):

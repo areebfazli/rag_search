@@ -106,10 +106,18 @@ def _as_bool(v: object) -> bool:
 def _as_score(v: object) -> float:
     """Coerce a 0-1 judge score; ``null`` and out-of-range values are common.
 
-    NaN must be rejected before the clamp, not by it: ``min(1.0, nan)`` is ``nan``
-    and ``max(0.0, nan)`` is ``1.0``, so a NaN would silently become a *perfect*
-    score. json.loads accepts bare ``NaN``, so the judge can really emit one.
+    The rule is that malformed output must never *inflate* a published number, so
+    every unusable value resolves to 0.0. Two cases get there by surprising routes:
+
+    * NaN must be rejected before the clamp, not by it: ``min(1.0, nan)`` is ``nan``
+      and ``max(0.0, nan)`` is ``1.0``, so a NaN would become a *perfect* score.
+      json.loads accepts bare ``NaN``, so the judge can really emit one.
+    * ``bool`` is a subclass of ``int`` and ``float(True)`` is ``1.0``. The judge is
+      already emitting a boolean for the adjacent ``answered`` field, so
+      ``"faithfulness": true`` is a plausible slip — and it would score as perfect.
     """
+    if isinstance(v, bool):
+        return 0.0
     try:
         f = float(v)  # type: ignore[arg-type]
     except (TypeError, ValueError):

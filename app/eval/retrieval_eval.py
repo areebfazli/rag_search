@@ -109,16 +109,22 @@ def cached_run(
 
     done: dict[str, dict[str, float]] = {}
     if path.exists() and not os.environ.get("SSR_EVAL_REFRESH"):
+        # A corrupt checkpoint must degrade to "recompute", never abort the run —
+        # otherwise one bad file strands hours of work behind a manual rm. Validate the
+        # SHAPE, not just the parse: a file containing `null` or `[]` decodes fine, and
+        # `blob["run"]` on it raises TypeError, which an except-clause listing only
+        # ValueError/KeyError would let through.
+        blob: object = None
         try:
             blob = json.loads(path.read_text())
-            cached_run_data = blob["run"]
-        except (ValueError, KeyError, OSError) as e:
-            # A corrupt checkpoint must degrade to "recompute", never abort the run —
-            # otherwise one bad file strands hours of work behind a manual rm.
+        except (ValueError, OSError) as e:
             print(f"      (unreadable checkpoint, recomputing: {type(e).__name__})", flush=True)
-            blob, cached_run_data = {}, {}
+        if not (isinstance(blob, dict) and isinstance(blob.get("run"), dict)):
+            if blob is not None:
+                print("      (malformed checkpoint, recomputing)", flush=True)
+            blob = {}
         if blob.get("signature") == sig:
-            done = cached_run_data
+            done = blob["run"]
             if blob.get("complete"):
                 print(f"      (cached, {len(done)} queries)", flush=True)
                 return done
@@ -215,8 +221,10 @@ def main() -> None:
         raw[key] = cached_run(service, queries, key, mode, reranker)
         print(f"      done in {time.time() - t0:.0f}s", flush=True)
 
-    # Compare every config on the SAME queries. If a slow config is only partly
-    # finished, that means the common subset rather than an unfair mixed comparison.
+    # Guard, not a feature: cached_run always finishes its work list, so in normal
+    # operation every config covers every query and this intersection is a no-op. It
+    # exists so that if that ever stops being true, the table is scored on a common
+    # subset and says so, rather than silently comparing mismatched query sets.
     common = sorted(set.intersection(*(set(r) for r in raw.values())))
     if len(common) < len(queries):
         print(

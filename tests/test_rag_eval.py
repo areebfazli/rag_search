@@ -46,6 +46,14 @@ def test_as_score_survives_null_and_out_of_range():
     assert _as_score("0.75") == 0.75
 
 
+def test_as_score_rejects_booleans():
+    # bool subclasses int and float(True) is 1.0. The judge already emits a boolean for
+    # the adjacent `answered` field, so `"faithfulness": true` is a plausible slip — and
+    # it is the one remaining way malformed output could INFLATE a published metric.
+    assert _as_score(True) == 0.0
+    assert _as_score(False) == 0.0
+
+
 def test_as_score_rejects_all_non_finite_values():
     # min(1.0, nan) is nan and max(0.0, nan) is 1.0, so a naive clamp turns NaN into a
     # PERFECT score and inflates the headline metric. json.loads accepts bare NaN, so
