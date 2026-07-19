@@ -1,8 +1,17 @@
 {
-  "n": 10,
-  "answered_rate": 0.5,
-  "faithfulness_answered": 0.76,
-  "context_relevance": 0.61,
+  "n": 49,
+  "evidence_rate": 0.8163,
+  "answered_rate": 0.7347,
+  "abstention_precision": 0.3846,
+  "abstention_recall": 0.5556,
+  "false_abstention_rate": 0.2,
+  "answered_without_evidence_rate": 0.1111,
+  "faithfulness_answered": 0.8306,
+  "context_relevance": 0.7163,
   "generator_model": "llama-3.3-70b-versatile",
-  "judge_model": "llama-3.1-8b-instant"
+  "judge_model": "llama-3.1-8b-instant",
+  "top_k": 5,
+  "sample_seed": 13,
+  "skipped": 1,
+  "judge_parse_failures": 0
 }
