@@ -54,47 +54,45 @@ t-test on per-query nDCG@10** (300 pairs), reported as Δ, p, and per-query win/
 | Rerank (bge) vs Hybrid | +0.0001 | 0.9964 | 48/196/56 | no |
 | Rerank (bge) vs Rerank (MiniLM) | +0.0266 | 0.0376 | 65/190/45 | **yes** |
 
-These are uncorrected pairwise tests, so read the marginal ones with care. Counting the
-Recall@100 comparison used in Finding 1, six tests are reported here; a Bonferroni correction at
-α = 0.05 puts the threshold at p ≈ 0.008. Only hybrid-vs-BM25 (p = 0.0007) clears it — the two
-results at p ≈ 0.035–0.038 do not, and are reported as suggestive rather than settled. The
-conclusions that carry weight below are the *null* ones, which correction only strengthens: a
-p of 0.996 is not a near-miss.
+Six tests are reported here — the five above plus Recall@100 in Finding 1 — and none are
+corrected for multiple comparisons. Bonferroni at α = 0.05 would set the bar at p ≈ 0.008, which
+only hybrid-vs-BM25 clears, so treat the two results at p ≈ 0.035–0.038 as suggestive. The
+load-bearing conclusions below are the *null* ones, which correction only strengthens; p = 0.996
+is not a near-miss.
 
 **Findings.**
 
-**1 — Fusion's measurable win is recall, not ranking.** Hybrid RRF beats BM25 on nDCG@10 by
-+0.038 (p = 0.0007), but its +0.011 edge over *dense alone* is not statistically significant
-(p = 0.26 — it wins 53 queries and loses 34, with 213 ties). Where fusion does separate from
-dense is **Recall@100: 0.942 → 0.965 (p = 0.035, W/T/L 9/289/2)**. That, not a better top-10
-ordering, is the honest reason to keep it: fusion's job here is to hand a more complete
-candidate pool to the stages downstream. Note how thin that result is — 289 of 300 queries are
-identical, so the whole effect rests on 11 discordant ones. It is the right call on this
-evidence, not a proven one.
+**1 — Fusion's win is recall, not ranking.** Hybrid RRF beats BM25 by +0.038 nDCG@10
+(p = 0.0007), but its +0.011 edge over *dense alone* is not significant (p = 0.26, W/T/L
+53/213/34). Where fusion does separate from dense is **Recall@100: 0.942 → 0.965 (p = 0.035,
+W/T/L 9/289/2)** — and that, not top-10 ordering, is the reason to keep it: a fuller candidate
+pool for the stages downstream. On 11 discordant queries out of 300, that is the right call on
+this evidence rather than a settled one.
 
 **2 — Neither cross-encoder reranker paid off.** The CPU-default MS-MARCO MiniLM, trained on
-short web queries, *costs* 0.027 nDCG@10 against plain hybrid (p = 0.056; it loses 63 queries
-and wins 45). Swapping in the domain-appropriate `bge-reranker-base` repairs exactly that damage
-— it beats MiniLM by the same 0.027 (p = 0.038) — but lands statistically on top of doing no
-reranking at all: **Δ = +0.0001, p = 0.996**.
+short web queries, *costs* 0.027 nDCG@10 against plain hybrid (p = 0.056, W/T/L 45/192/63). The
+domain-appropriate `bge-reranker-base` repairs exactly that damage — it beats MiniLM by the same
+0.027 (p = 0.038) — and then lands on top of doing nothing at all: **Δ = +0.0001, p = 0.996**.
 
-**3 — So the reranker choice matters and reranking itself doesn't.** A domain-mismatched
-cross-encoder actively degrades ranking; the right one merely returns you to where you started
-— and it is not cheap. Wall-clock over the same 300 queries on a 4-core laptop CPU, reranking a
-32-candidate slice: **7.5 s/query for MiniLM and 32.3 s/query for bge-reranker-base**, against
-~0.2 s/query for hybrid alone. Paying ~160× the latency for a statistical tie is a poor trade.
-**Hybrid RRF is therefore the default**, with reranking available behind `mode=hybrid_rerank`.
+**3 — So the reranker *choice* matters and reranking itself doesn't.** A mismatched cross-encoder
+degrades ranking; the right one returns you to where you started, expensively. Over the same 300
+queries on a 4-core laptop CPU, reranking a 32-candidate slice costs **7.5 s/query (MiniLM)** and
+**32.3 s/query (bge)** against ~0.2 s/query for hybrid alone — ~160× the latency for a
+statistical tie. **Hybrid RRF is the default**; reranking stays available behind
+`mode=hybrid_rerank`.
 
-This corrects an earlier version of this README, which asserted that reranking "only pays off
-with a domain-appropriate model such as bge-reranker." That claim was never run. Measured, it
-is wrong: the domain-appropriate model does not pay off either — it only stops the mismatched
-one from hurting. Related: bounding the reranked slice to the top-32 (a latency guard, see
-[Operational notes](#operational-notes)) also *caps how much* a bad reranker can hurt — MiniLM
-scored 0.6715 when it reordered all 100 fused candidates, versus 0.6975 over 32, because a
-mismatched model gets fewer chances to promote a bad document into the top 10. (That 0.6715 is
-a point estimate from the previous committed run at full depth — same model, corpus and fusion,
-with the BM25/dense/hybrid rows bit-identical — rather than a row in the current table. Reproduce
-it with `SSR_RERANK_CANDIDATES=100 uv run python -m app.eval.retrieval_eval`.)
+This replaces an earlier claim in this README — that reranking "only pays off with a
+domain-appropriate model such as bge-reranker" — which was never run. Measured, it is wrong: the
+domain-appropriate model doesn't pay off either, it just stops the mismatched one from hurting.
+
+Bounding the reranked slice to 32 (a latency guard, see [Operational notes](#operational-notes))
+also caps the damage a bad reranker can do: MiniLM scored 0.6715 reordering all 100 fused
+candidates versus 0.6975 over 32, having fewer chances to promote a bad document into the top
+10.[^depth]
+
+[^depth]: A point estimate from the previous committed run at full depth — same model, corpus and
+fusion, with the BM25/dense/hybrid rows bit-identical — not a row in the current table. Reproduce
+with `SSR_RERANK_CANDIDATES=100 uv run python -m app.eval.retrieval_eval`.
 
 ## Grounded answers (RAG)
 
@@ -118,7 +116,7 @@ pipeline error — counted and reported rather than silently dropped (`eval/resu
 | **Abstention precision** (abstained & no evidence) | **0.38** |
 | Abstention recall (no evidence & abstained) | 0.56 |
 | False abstention (had evidence, abstained anyway) | 0.20 |
-| Answered without evidence, over answered (hallucination risk) | 0.11 |
+| Answered without evidence, as a share of answers given (hallucination risk) | 0.11 |
 
 Crossing the judge's answer/abstain call with whether a gold document was actually retrieved
 gives a 2×2 over the 49 claims:
@@ -129,19 +127,17 @@ gives a 2×2 over the 49 claims:
 | **abstained** (13) | 8 — declined despite having the evidence | 5 — correct |
 
 **Finding: abstention is the weakest part of this system, and scoring it against qrels is what
-exposed that.** An earlier version of this eval reported only "answered 0.50" and concluded the
-system "correctly abstains" — but abstention rate alone cannot distinguish a well-calibrated
-refusal from an over-cautious one. Measured against the labels: retrieval surfaces the gold
-document 82% of the time, yet **only 5 of 13 abstentions were justified** — in 8 cases the
-evidence was sitting in the context and the model declined to use it. In the other direction it
-answered 4 of the 9 genuinely unanswerable claims. So the generator is simultaneously *too*
-conservative where it has evidence and *not* conservative enough where it doesn't; the prompt's
-abstention instruction needs calibration work, not a victory lap. Faithfulness over the answers
-it does give is solid at 0.83.
+exposed it.** An earlier version of this eval reported "answered 0.50" and concluded the system
+"correctly abstains" — but an abstention rate alone cannot tell a calibrated refusal from an
+over-cautious one. Against the labels: retrieval surfaces the gold document 82% of the time, yet
+**only 5 of 13 abstentions were justified** — in 8 cases the evidence was in the context and the
+model declined to use it — while it answered 4 of the 9 genuinely unanswerable claims. The
+generator is both too conservative where it has evidence and not conservative enough where it
+doesn't, so the prompt's abstention instruction is the thing to work on next. Faithfulness over
+the answers it does give is solid at 0.83.
 
-(The old 0.50 figure also came from the first 10 query ids in dataset order — a deterministic
-head slice, not a sample. The harness now takes a seeded random sample and re-runs at any size
-via `make eval-rag`.)
+(That old 0.50 also came from the first 10 query ids in dataset order — a head slice, not a
+sample. The harness now takes a seeded random sample and re-runs at any size via `make eval-rag`.)
 
 ## Quickstart
 
