@@ -4,6 +4,7 @@ with no edits — just a different SSR_LLM_BASE_URL.
 """
 from __future__ import annotations
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -16,8 +17,10 @@ class Settings(BaseSettings):
     embedding_query_prefix: str = "Represent this sentence for searching relevant passages: "
 
     # --- Reranker ---
-    # CPU-friendly default (22M). mxbai-rerank-base-v2 is the GPU-quality upgrade
-    # documented in the design notes; swap via SSR_RERANKER_MODEL.
+    # CPU-friendly default (22M). Note the eval found that reranking does NOT pay off on
+    # SciFact with either model tested: this one costs 0.027 nDCG@10 vs plain hybrid, and
+    # BAAI/bge-reranker-base (278M) merely ties it at 32.3 s/query. Swap via
+    # SSR_RERANKER_MODEL, but measure before assuming a bigger reranker helps.
     reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
     # --- Vector store (Qdrant local/embedded: on-disk path, or ":memory:") ---
@@ -34,14 +37,38 @@ class Settings(BaseSettings):
     # control (Fly/Render), which sets XFF and strips client-supplied values —
     # trusting it while directly exposed lets clients spoof their IP to evade limits.
     trust_proxy: bool = False
+    # How many proxies you actually run in front of this service. Each appends the
+    # peer it saw, so the real client sits `trusted_proxy_hops` from the right of the
+    # X-Forwarded-For list. This MUST equal your real hop count:
+    #   too low  -> keys on one of your own proxies: every user behind it shares a bucket.
+    #   too high -> indexes past your proxies' entries into the part of the list the
+    #               CLIENT supplied. The client then picks its own key and can rotate it
+    #               per request, so the rate limit is bypassed entirely. Only the
+    #               rightmost `hops` entries are trustworthy; the count is the trust
+    #               boundary, so over-stating it is a security bug, not a mis-tuning.
+    # The default of 1 (plain rightmost) is the safe value and cannot be over-indexed.
+    trusted_proxy_hops: int = Field(default=1, ge=1)
 
     # --- Retrieval knobs ---
     # dense_top_k is the first-stage candidate depth used by BOTH retrievers in
     # hybrid mode (SearchService.candidate_k); rerank_top_k is the default number
     # of results returned when the caller doesn't pass top_k.
-    dense_top_k: int = 100
-    rerank_top_k: int = 8
-    rrf_k: int = 60
+    dense_top_k: int = Field(default=100, ge=1)
+    rerank_top_k: int = Field(default=8, ge=1)
+    # RRF divides by (rrf_k + rank); a non-positive value divides by zero at rank
+    # |rrf_k| instead of failing at startup.
+    rrf_k: int = Field(default=60, ge=1)
+    # A cross-encoder scores every (query, passage) pair with a full forward pass, so
+    # its cost is linear in the candidate count — reranking the whole 100-doc fused
+    # pool costs ~20s on CPU and, held under the retrieval lock, is a trivial DoS
+    # vector. Rerank only this top slice; the tail keeps its fused order, so Recall
+    # at depths beyond the slice is unchanged. Constrained to >=1: a 0 would silently
+    # turn hybrid_rerank into plain hybrid.
+    rerank_candidates: int = Field(default=32, ge=1)
+    # Cross-encoder batch size. Peak activation memory scales with batch x seq_len, so
+    # a small batch keeps the footprint flat on memory-constrained hosts; on CPU the
+    # throughput cost is minor, and it is a large win when the alternative is swapping.
+    rerank_batch_size: int = Field(default=8, ge=1)
 
     # --- LLM generation (OpenAI-compatible endpoint) ---
     # Default backend: Groq (free tier, OpenAI-compatible). Override via SSR_ env

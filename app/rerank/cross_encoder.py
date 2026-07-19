@@ -19,7 +19,11 @@ class CrossEncoderReranker:
     def rerank(self, query: str, hits: list[SearchHit], top_k: int) -> list[SearchHit]:
         if not hits:
             return []
-        scores = self.model.predict([(query, hit_passage(h)) for h in hits])
+        scores = self.model.predict(
+            [(query, hit_passage(h)) for h in hits],
+            batch_size=settings.rerank_batch_size,
+            show_progress_bar=False,
+        )
         order = sorted(range(len(hits)), key=lambda i: scores[i], reverse=True)
         return [
             SearchHit(hits[i].doc_id, float(scores[i]), hits[i].text, hits[i].metadata)

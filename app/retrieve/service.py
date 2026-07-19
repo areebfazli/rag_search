@@ -19,6 +19,23 @@ from app.retrieve.fusion import fuse_hits
 MODES = ("bm25", "dense", "hybrid", "hybrid_rerank")
 
 
+def _demote(tail: list[SearchHit], head: list[SearchHit]) -> list[SearchHit]:
+    """Restamp `tail` scores to sit strictly below `head`, preserving its order.
+
+    The reranked head carries cross-encoder logits (roughly -11..+11) while the
+    un-reranked tail carries RRF scores (~0.016 and down). Concatenating them leaves
+    the ORDER right but the `score` field non-monotonic, so a client that sorts by
+    score — or a UI that simply displays it, as ours does — contradicts the ranking.
+    Rank order is the contract; the score must not argue with it.
+    """
+    if not tail or not head:
+        return tail
+    floor = min(h.score for h in head)
+    return [
+        SearchHit(h.doc_id, floor - (i + 1), h.text, h.metadata) for i, h in enumerate(tail)
+    ]
+
+
 class SearchService:
     def __init__(self, dense=None, lexical=None, reranker=None):
         # Components may be injected (used by tests); otherwise they are built from
@@ -46,6 +63,12 @@ class SearchService:
             self._reranker = CrossEncoderReranker()
         return self._reranker
 
+    @reranker.setter
+    def reranker(self, reranker) -> None:
+        # Lets the eval harness swap reranker models without rebuilding the service
+        # (and re-acquiring the single-process embedded-Qdrant lock).
+        self._reranker = reranker
+
     def retrieve(
         self,
         query: str,
@@ -68,5 +91,9 @@ class SearchService:
         if mode == "hybrid":
             return fused[:top_k]
         if mode == "hybrid_rerank":
-            return self.reranker.rerank(query, fused, top_k)
+            # Rerank only the top slice (bounded cost — see settings.rerank_candidates)
+            # and keep the tail in fused order, so recall past the slice is preserved.
+            depth = min(len(fused), settings.rerank_candidates)
+            reranked = self.reranker.rerank(query, fused[:depth], depth)
+            return (reranked + _demote(fused[depth:], reranked))[:top_k]
         raise ValueError(f"unknown mode: {mode!r} (expected one of {MODES})")
