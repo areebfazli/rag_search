@@ -20,7 +20,7 @@ from app.core.config import settings
 from app.retrieve.service import MODES, SearchService
 from app.schemas.api import AnswerResponse, Hit, SearchResponse
 
-app = FastAPI(title="Semantic Search + RAG")
+app = FastAPI(title="Semantic Search with RAG")
 
 # The API is unauthenticated; without a limit, a public deploy could be spammed to
 # burn the LLM token budget or pin the CPU. Per-IP rate limiting mitigates that.

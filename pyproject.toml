@@ -1,7 +1,7 @@
 [project]
 name = "semantic-search-rag"
 version = "0.1.0"
-description = "Hybrid semantic search + RAG engine: BM25 + dense embeddings fused with RRF, cross-encoder reranking, grounded RAG answers, and a retrieval/RAG evaluation harness."
+description = "Hybrid semantic search with RAG engine: BM25 + dense embeddings fused with RRF, cross-encoder reranking, grounded RAG answers, and a retrieval/RAG evaluation harness."
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
 dependencies = [

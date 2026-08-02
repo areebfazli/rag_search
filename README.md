@@ -1,4 +1,4 @@
-# Semantic Search + RAG Engine
+# Semantic Search with RAG Engine
 
 Hybrid retrieval (**BM25 + dense embeddings**, fused with Reciprocal Rank Fusion) and grounded
 **RAG** answers, with an evaluation harness that measures every stage on **gold relevance
