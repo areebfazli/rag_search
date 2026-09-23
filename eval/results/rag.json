@@ -1,17 +1,1643 @@
 {
-  "n": 49,
-  "evidence_rate": 0.8163,
-  "answered_rate": 0.7347,
-  "abstention_precision": 0.3846,
-  "abstention_recall": 0.5556,
-  "false_abstention_rate": 0.2,
-  "answered_without_evidence_rate": 0.1111,
-  "faithfulness_answered": 0.8306,
-  "context_relevance": 0.7163,
-  "generator_model": "llama-3.3-70b-versatile",
-  "judge_model": "llama-3.1-8b-instant",
+  "n": 50,
+  "evidence_rate": 0.58,
+  "answered_rate": 0.6,
+  "abstention_precision": 0.8,
+  "abstention_recall": 0.7619,
+  "false_abstention_rate": 0.1379,
+  "answered_without_evidence_rate": 0.1667,
+  "oracle": "rationale",
+  "quadrants": {
+    "answered_with_evidence": 25,
+    "answered_without_evidence": 5,
+    "false_abstention": 4,
+    "correct_abstention": 16
+  },
+  "qrels_oracle": {
+    "evidence_rate": 0.82,
+    "abstention_precision": 0.35,
+    "abstention_recall": 0.7778,
+    "false_abstention_rate": 0.3171,
+    "answered_without_evidence_rate": 0.0667,
+    "quadrants": {
+      "answered_with_evidence": 28,
+      "answered_without_evidence": 2,
+      "false_abstention": 13,
+      "correct_abstention": 7
+    }
+  },
+  "verdict_accuracy": 0.7,
+  "verdict_parsed_rate": 0.86,
+  "confusion": {
+    "SUPPORT": {
+      "SUPPORT": 12,
+      "CONTRADICT": 1,
+      "NEI": 2,
+      "NONE": 4
+    },
+    "CONTRADICT": {
+      "SUPPORT": 0,
+      "CONTRADICT": 9,
+      "NEI": 4,
+      "NONE": 0
+    },
+    "NEI": {
+      "SUPPORT": 4,
+      "CONTRADICT": 0,
+      "NEI": 14,
+      "NONE": 0
+    }
+  },
+  "judge_answered_fallbacks": 7,
+  "judge_verdict_agreement": 1.0,
+  "faithfulness_answered": 0.9767,
+  "context_relevance": 0.703,
+  "by_label": {
+    "SUPPORT": {
+      "n": 19,
+      "answered": 17
+    },
+    "CONTRADICT": {
+      "n": 13,
+      "answered": 9
+    },
+    "NEI": {
+      "n": 18,
+      "answered": 4
+    }
+  },
+  "generator_model": "openai/gpt-oss-120b",
+  "judge_model": "qwen/qwen3.8-27b",
   "top_k": 5,
   "sample_seed": 13,
-  "skipped": 1,
-  "judge_parse_failures": 0
+  "skipped": 0,
+  "skip_reasons": {},
+  "judge_parse_failures": 0,
+  "judge_calls": 50,
+  "run": {
+    "git_sha": "1edff63c6b54a9aa39cc6f5171581c0b75ede368",
+    "prompt_hash": "d0921f4e69fc32f9da7ab88f4f7c88bc3cb25591bc5db11793807133c4bbd78b",
+    "judge_prompt_hash": "62bb62544847d70bb5839669e2974f9e79aca5311745d5660a6746261448d86f",
+    "generator_model": "openai/gpt-oss-120b",
+    "judge_model": "qwen/qwen3.8-27b",
+    "mode": "hybrid",
+    "reranker_model": null,
+    "top_k": 5,
+    "n_requested": 50,
+    "sample_seed": 13,
+    "oracle": "rationale",
+    "oracle_definition": "evidence = a doc the SciFact annotators cited with rationale sentences (SUPPORT or CONTRADICT) is in the retrieved top-k; NEI claims have none, so abstaining is the correct action for them",
+    "legacy_oracle": "qrels",
+    "legacy_oracle_definition": "legacy: evidence = any BEIR qrels-relevant doc is in the retrieved top-k; BEIR marks a cited abstract relevant for NEI claims too, so abstaining on an NEI claim is scored as a false abstention",
+    "label_source": {
+      "loader": "app.ingest.corpus.load_claim_labels",
+      "file": "scifact/queries.jsonl `metadata` field, BEIR SciFact source.zip",
+      "dataset": "beir/scifact/test",
+      "source_zip_sha256": "536e14446a0ba56ed1398ab1055f39fe852686ecad24a6306c80c490fa8e0165"
+    },
+    "answered_source": "verdict line when parsed (answered = verdict != NOT ENOUGH EVIDENCE); the judge's `answered` field only when no verdict line was parsed"
+  },
+  "rows": [
+    {
+      "query_id": "1352",
+      "mode": "hybrid",
+      "gold_label": "SUPPORT",
+      "rationale_doc_ids": [
+        "12885341"
+      ],
+      "qrels_doc_ids": [
+        "12885341"
+      ],
+      "verdict": "SUPPORTED",
+      "predicted_label": "SUPPORT",
+      "answered": true,
+      "answered_source": "verdict",
+      "judge_answered": true,
+      "faithfulness": 1.0,
+      "context_relevance": 1.0,
+      "evidence": true,
+      "evidence_qrels": true,
+      "abstention_class": "answered_with_evidence",
+      "abstention_class_qrels": "answered_with_evidence",
+      "answer": "The passage reports that the Aedes aegypti C\u2011type lectin mosGCTL\u20111 \u201cis induced by WNV\u201d\u30101\u3011.",
+      "cited_doc_ids": [],
+      "retrieved_doc_ids": [
+        "12885341",
+        "10559501",
+        "34287602",
+        "10648422",
+        "6144969"
+      ]
+    },
+    {
+      "query_id": "598",
+      "mode": "hybrid",
+      "gold_label": "CONTRADICT",
+      "rationale_doc_ids": [
+        "25742130"
+      ],
+      "qrels_doc_ids": [
+        "25742130"
+      ],
+      "verdict": "REFUTED",
+      "predicted_label": "CONTRADICT",
+      "answered": true,
+      "answered_source": "verdict",
+      "judge_answered": true,
+      "faithfulness": 1.0,
+      "context_relevance": 1.0,
+      "evidence": true,
+      "evidence_qrels": true,
+      "abstention_class": "answered_with_evidence",
+      "abstention_class_qrels": "answered_with_evidence",
+      "answer": "Verdict: REFUTED",
+      "cited_doc_ids": [],
+      "retrieved_doc_ids": [
+        "36355784",
+        "46695481",
+        "25742130",
+        "27446873",
+        "27873158"
+      ]
+    },
+    {
+      "query_id": "1180",
+      "mode": "hybrid",
+      "gold_label": "SUPPORT",
+      "rationale_doc_ids": [
+        "31272411"
+      ],
+      "qrels_doc_ids": [
+        "31272411"
+      ],
+      "verdict": "SUPPORTED",
+      "predicted_label": "SUPPORT",
+      "answered": true,
+      "answered_source": "verdict",
+      "judge_answered": true,
+      "faithfulness": 1.0,
+      "context_relevance": 1.0,
+      "evidence": true,
+      "evidence_qrels": true,
+      "abstention_class": "answered_with_evidence",
+      "abstention_class_qrels": "answered_with_evidence",
+      "answer": "The context describes MDA5 as a cytoplasmic RNA sensor that detects viral RNA and initiates type\u202fI interferon responses to RNA virus infection (e.g., coronavirus, encephalomyocarditis virus, infectious bursal disease virus)\u30102\u2020L1-L4\u3011\u30105\u2020L1-L4\u3011.",
+      "cited_doc_ids": [],
+      "retrieved_doc_ids": [
+        "44366096",
+        "2566674",
+        "31272411",
+        "10627801",
+        "14474178"
+      ]
+    },
+    {
+      "query_id": "1221",
+      "mode": "hybrid",
+      "gold_label": "CONTRADICT",
+      "rationale_doc_ids": [
+        "19736671"
+      ],
+      "qrels_doc_ids": [
+        "19736671"
+      ],
+      "verdict": "NOT ENOUGH EVIDENCE",
+      "predicted_label": "NEI",
+      "answered": false,
+      "answered_source": "verdict",
+      "judge_answered": false,
+      "faithfulness": 1.0,
+      "context_relevance": 0.1,
+      "evidence": false,
+      "evidence_qrels": false,
+      "abstention_class": "correct_abstention",
+      "abstention_class_qrels": "correct_abstention",
+      "answer": "Verdict: NOT ENOUGH EVIDENCE",
+      "cited_doc_ids": [],
+      "retrieved_doc_ids": [
+        "21479575",
+        "8352137",
+        "7211056",
+        "16732790",
+        "2402323"
+      ]
+    },
+    {
+      "query_id": "386",
+      "mode": "hybrid",
+      "gold_label": "SUPPORT",
+      "rationale_doc_ids": [
+        "16495649"
+      ],
+      "qrels_doc_ids": [
+        "16495649"
+      ],
+      "verdict": "SUPPORTED",
+      "predicted_label": "SUPPORT",
+      "answered": true,
+      "answered_source": "verdict",
+      "judge_answered": true,
+      "faithfulness": 1.0,
+      "context_relevance": 1.0,
+      "evidence": true,
+      "evidence_qrels": true,
+      "abstention_class": "answered_with_evidence",
+      "abstention_class_qrels": "answered_with_evidence",
+      "answer": "Verdict: SUPPORTED",
+      "cited_doc_ids": [],
+      "retrieved_doc_ids": [
+        "16495649",
+        "21260231",
+        "42404093",
+        "38799797",
+        "12258338"
+      ]
+    },
+    {
+      "query_id": "775",
+      "mode": "hybrid",
+      "gold_label": "NEI",
+      "rationale_doc_ids": [],
+      "qrels_doc_ids": [
+        "32275758"
+      ],
+      "verdict": "NOT ENOUGH EVIDENCE",
+      "predicted_label": "NEI",
+      "answered": false,
+      "answered_source": "verdict",
+      "judge_answered": false,
+      "faithfulness": 1.0,
+      "context_relevance": 0.2,
+      "evidence": false,
+      "evidence_qrels": false,
+      "abstention_class": "correct_abstention",
+      "abstention_class_qrels": "correct_abstention",
+      "answer": "Verdict: NOT ENOUGH EVIDENCE",
+      "cited_doc_ids": [],
+      "retrieved_doc_ids": [
+        "11569583",
+        "31293581",
+        "12552297",
+        "27635177",
+        "43014661"
+      ]
+    },
+    {
+      "query_id": "1279",
+      "mode": "hybrid",
+      "gold_label": "NEI",
+      "rationale_doc_ids": [],
+      "qrels_doc_ids": [
+        "11335781"
+      ],
+      "verdict": "SUPPORTED",
+      "predicted_label": "SUPPORT",
+      "answered": true,
+      "answered_source": "verdict",
+      "judge_answered": true,
+      "faithfulness": 0.8,
+      "context_relevance": 0.9,
+      "evidence": false,
+      "evidence_qrels": true,
+      "abstention_class": "answered_without_evidence",
+      "abstention_class_qrels": "answered_with_evidence",
+      "answer": "Verdict: SUPPORTED",
+      "cited_doc_ids": [],
+      "retrieved_doc_ids": [
+        "1454773",
+        "11335781",
+        "52180874",
+        "25589047",
+        "1900152"
+      ]
+    },
+    {
+      "query_id": "859",
+      "mode": "hybrid",
+      "gold_label": "CONTRADICT",
+      "rationale_doc_ids": [
+        "1982286"
+      ],
+      "qrels_doc_ids": [
+        "1982286"
+      ],
+      "verdict": "REFUTED",
+      "predicted_label": "CONTRADICT",
+      "answered": true,
+      "answered_source": "verdict",
+      "judge_answered": true,
+      "faithfulness": 1.0,
+      "context_relevance": 0.9,
+      "evidence": true,
+      "evidence_qrels": true,
+      "abstention_class": "answered_with_evidence",
+      "abstention_class_qrels": "answered_with_evidence",
+      "answer": "Verdict: REFUTED",
+      "cited_doc_ids": [],
+      "retrieved_doc_ids": [
+        "22049489",
+        "1982286",
+        "12315072",
+        "9076196",
+        "13007205"
+      ]
+    },
+    {
+      "query_id": "1339",
+      "mode": "hybrid",
+      "gold_label": "CONTRADICT",
+      "rationale_doc_ids": [
+        "15482274"
+      ],
+      "qrels_doc_ids": [
+        "15482274"
+      ],
+      "verdict": "REFUTED",
+      "predicted_label": "CONTRADICT",
+      "answered": true,
+      "answered_source": "verdict",
+      "judge_answered": true,
+      "faithfulness": 1.0,
+      "context_relevance": 0.9,
+      "evidence": true,
+      "evidence_qrels": true,
+      "abstention_class": "answered_with_evidence",
+      "abstention_class_qrels": "answered_with_evidence",
+      "answer": "Verdict: REFUTED",
+      "cited_doc_ids": [],
+      "retrieved_doc_ids": [
+        "15482274",
+        "52874170",
+        "11718220",
+        "18062308",
+        "25691541"
+      ]
+    },
+    {
+      "query_id": "1150",
+      "mode": "hybrid",
+      "gold_label": "SUPPORT",
+      "rationale_doc_ids": [
+        "11369420"
+      ],
+      "qrels_doc_ids": [
+        "11369420"
+      ],
+      "verdict": "SUPPORTED",
+      "predicted_label": "SUPPORT",
+      "answered": true,
+      "answered_source": "verdict",
+      "judge_answered": true,
+      "faithfulness": 1.0,
+      "context_relevance": 0.95,
+      "evidence": true,
+      "evidence_qrels": true,
+      "abstention_class": "answered_with_evidence",
+      "abstention_class_qrels": "answered_with_evidence",
+      "answer": "The passage reports that Tetraspanin\u202f3 is required for leukemia stem\u2011cell self\u2011renewal and disease propagation, and that its inhibition blocks growth of AML patient samples, indicating it plays a causal role in AML development and progression\u30101\u3011.",
+      "cited_doc_ids": [],
+      "retrieved_doc_ids": [
+        "11369420",
+        "5765455",
+        "9460704",
+        "8427306",
+        "25832301"
+      ]
+    },
+    {
+      "query_id": "350",
+      "mode": "hybrid",
+      "gold_label": "NEI",
+      "rationale_doc_ids": [],
+      "qrels_doc_ids": [
+        "16927286"
+      ],
+      "verdict": "SUPPORTED",
+      "predicted_label": "SUPPORT",
+      "answered": true,
+      "answered_source": "verdict",
+      "judge_answered": true,
+      "faithfulness": 0.8,
+      "context_relevance": 0.9,
+      "evidence": false,
+      "evidence_qrels": true,
+      "abstention_class": "answered_without_evidence",
+      "abstention_class_qrels": "answered_with_evidence",
+      "answer": "The context indicates that IF3 participates in selecting the initiator tRNA during initiation, implying that discrimination between initiator and elongation tRNAs relies on IF3 [1].",
+      "cited_doc_ids": [
+        "16927286"
+      ],
+      "retrieved_doc_ids": [
+        "16927286",
+        "23342686",
+        "30261663",
+        "13072112",
+        "39729277"
+      ]
+    },
+    {
+      "query_id": "820",
+      "mode": "hybrid",
+      "gold_label": "NEI",
+      "rationale_doc_ids": [],
+      "qrels_doc_ids": [
+        "8646760"
+      ],
+      "verdict": "NOT ENOUGH EVIDENCE",
+      "predicted_label": "NEI",
+      "answered": false,
+      "answered_source": "verdict",
+      "judge_answered": false,
+      "faithfulness": 1.0,
+      "context_relevance": 0.2,
+      "evidence": false,
+      "evidence_qrels": false,
+      "abstention_class": "correct_abstention",
+      "abstention_class_qrels": "correct_abstention",
+      "answer": "Verdict: NOT ENOUGH EVIDENCE",
+      "cited_doc_ids": [],
+      "retrieved_doc_ids": [
+        "35448676",
+        "39729277",
+        "36540079",
+        "25799020",
+        "8712839"
+      ]
+    },
+    {
+      "query_id": "637",
+      "mode": "hybrid",
+      "gold_label": "NEI",
+      "rationale_doc_ids": [],
+      "qrels_doc_ids": [
+        "25649714"
+      ],
+      "verdict": "NOT ENOUGH EVIDENCE",
+      "predicted_label": "NEI",
+      "answered": false,
+      "answered_source": "verdict",
+      "judge_answered": false,
+      "faithfulness": 1.0,
+      "context_relevance": 0.8,
+      "evidence": false,
+      "evidence_qrels": true,
+      "abstention_class": "correct_abstention",
+      "abstention_class_qrels": "false_abstention",
+      "answer": "Verdict: NOT ENOUGH EVIDENCE",
+      "cited_doc_ids": [],
+      "retrieved_doc_ids": [
+        "25649714",
+        "6129301",
+        "31612088",
+        "31019903",
+        "73473433"
+      ]
+    },
+    {
+      "query_id": "1298",
+      "mode": "hybrid",
+      "gold_label": "SUPPORT",
+      "rationale_doc_ids": [
+        "11718220"
+      ],
+      "qrels_doc_ids": [
+        "11718220"
+      ],
+      "verdict": null,
+      "predicted_label": "NONE",
+      "answered": true,
+      "answered_source": "judge",
+      "judge_answered": true,
+      "faithfulness": 1.0,
+      "context_relevance": 0.95,
+      "evidence": true,
+      "evidence_qrels": true,
+      "abstention_class": "answered_with_evidence",
+      "abstention_class_qrels": "answered_with_evidence",
+      "answer": "The CLOTS trial in 2,518 immobile acute\u2011stroke patients found that thigh\u2011length graduated compression stockings resulted in a 10.0\u202f% DVT rate versus 10.5\u202f% without stockings, an absolute reduction of only 0.5\u202f% that was not statistically significant, leading the investigators to conclude that the data do not support using thigh\u2011length GCS in",
+      "cited_doc_ids": [],
+      "retrieved_doc_ids": [
+        "11718220",
+        "79231308",
+        "34338075",
+        "29981186",
+        "1387104"
+      ]
+    },
+    {
+      "query_id": "956",
+      "mode": "hybrid",
+      "gold_label": "NEI",
+      "rationale_doc_ids": [],
+      "qrels_doc_ids": [
+        "12956194"
+      ],
+      "verdict": "SUPPORTED",
+      "predicted_label": "SUPPORT",
+      "answered": true,
+      "answered_source": "verdict",
+      "judge_answered": true,
+      "faithfulness": 1.0,
+      "context_relevance": 0.9,
+      "evidence": false,
+      "evidence_qrels": true,
+      "abstention_class": "answered_without_evidence",
+      "abstention_class_qrels": "answered_with_evidence",
+      "answer": "The provided studies describe how GLP\u20111R can engage multiple intracellular pathways and exhibit biased agonism, indicating that its pleiotropic coupling to different effectors yields distinct signaling outcomes\u30101\u2020L1-L4\u3011\u30103\u2020L1-L4\u3011.",
+      "cited_doc_ids": [],
+      "retrieved_doc_ids": [
+        "12956194",
+        "3127341",
+        "21754541",
+        "3610282",
+        "31107919"
+      ]
+    },
+    {
+      "query_id": "539",
+      "mode": "hybrid",
+      "gold_label": "SUPPORT",
+      "rationale_doc_ids": [
+        "13282296"
+      ],
+      "qrels_doc_ids": [
+        "13282296"
+      ],
+      "verdict": "SUPPORTED",
+      "predicted_label": "SUPPORT",
+      "answered": true,
+      "answered_source": "verdict",
+      "judge_answered": true,
+      "faithfulness": 1.0,
+      "context_relevance": 0.95,
+      "evidence": true,
+      "evidence_qrels": true,
+      "abstention_class": "answered_with_evidence",
+      "abstention_class_qrels": "answered_with_evidence",
+      "answer": "The study of older patients with type\u202f2 diabetes found that having severe hypoglycemic episodes that required hospitalization was linked to a higher risk of developing dementia, with hazard ratios increasing with the number of episodes (e.g., HR\u202f1.26 for one episode, HR\u202f1.94 for three or more)\u30101\u3011.",
+      "cited_doc_ids": [],
+      "retrieved_doc_ids": [
+        "13282296",
+        "21472388",
+        "11953232",
+        "14682243",
+        "20697217"
+      ]
+    },
+    {
+      "query_id": "236",
+      "mode": "hybrid",
+      "gold_label": "SUPPORT",
+      "rationale_doc_ids": [
+        "4388470"
+      ],
+      "qrels_doc_ids": [
+        "4388470"
+      ],
+      "verdict": "NOT ENOUGH EVIDENCE",
+      "predicted_label": "NEI",
+      "answered": false,
+      "answered_source": "verdict",
+      "judge_answered": false,
+      "faithfulness": 1.0,
+      "context_relevance": 0.8,
+      "evidence": true,
+      "evidence_qrels": true,
+      "abstention_class": "false_abstention",
+      "abstention_class_qrels": "false_abstention",
+      "answer": "Verdict: NOT ENOUGH EVIDENCE",
+      "cited_doc_ids": [],
+      "retrieved_doc_ids": [
+        "4388470",
+        "41380943",
+        "36708463",
+        "22490293",
+        "28390999"
+      ]
+    },
+    {
+      "query_id": "702",
+      "mode": "hybrid",
+      "gold_label": "NEI",
+      "rationale_doc_ids": [],
+      "qrels_doc_ids": [
+        "4350400"
+      ],
+      "verdict": "NOT ENOUGH EVIDENCE",
+      "predicted_label": "NEI",
+      "answered": false,
+      "answered_source": "verdict",
+      "judge_answered": false,
+      "faithfulness": 1.0,
+      "context_relevance": 0.2,
+      "evidence": false,
+      "evidence_qrels": true,
+      "abstention_class": "correct_abstention",
+      "abstention_class_qrels": "false_abstention",
+      "answer": "Verdict: NOT ENOUGH EVIDENCE",
+      "cited_doc_ids": [],
+      "retrieved_doc_ids": [
+        "16557565",
+        "4350400",
+        "38675228",
+        "19950357",
+        "20402596"
+      ]
+    },
+    {
+      "query_id": "759",
+      "mode": "hybrid",
+      "gold_label": "CONTRADICT",
+      "rationale_doc_ids": [
+        "1805641"
+      ],
+      "qrels_doc_ids": [
+        "1805641"
+      ],
+      "verdict": null,
+      "predicted_label": "NEI",
+      "answered": false,
+      "answered_source": "judge",
+      "judge_answered": false,
+      "faithfulness": 0.0,
+      "context_relevance": 0.9,
+      "evidence": true,
+      "evidence_qrels": true,
+      "abstention_class": "false_abstention",
+      "abstention_class_qrels": "false_abstention",
+      "answer": "Mathematical modelling in Tanzania showed that replacing existing treatment with",
+      "cited_doc_ids": [],
+      "retrieved_doc_ids": [
+        "1805641",
+        "3929361",
+        "12409683",
+        "10617916",
+        "18074797"
+      ]
+    },
+    {
+      "query_id": "1336",
+      "mode": "hybrid",
+      "gold_label": "CONTRADICT",
+      "rationale_doc_ids": [
+        "27910499"
+      ],
+      "qrels_doc_ids": [
+        "27910499"
+      ],
+      "verdict": "REFUTED",
+      "predicted_label": "CONTRADICT",
+      "answered": true,
+      "answered_source": "verdict",
+      "judge_answered": true,
+      "faithfulness": 1.0,
+      "context_relevance": 0.9,
+      "evidence": true,
+      "evidence_qrels": true,
+      "abstention_class": "answered_with_evidence",
+      "abstention_class_qrels": "answered_with_evidence",
+      "answer": "The study found that recipients of cord\u2011blood grafts achieved T\u2011cell receptor diversity similar to that of healthy individuals, indicating no reduction in diversity after transplantation [2].",
+      "cited_doc_ids": [
+        "27910499"
+      ],
+      "retrieved_doc_ids": [
+        "27243019",
+        "27910499",
+        "43587663",
+        "20220731",
+        "24795767"
+      ]
+    },
+    {
+      "query_id": "452",
+      "mode": "hybrid",
+      "gold_label": "CONTRADICT",
+      "rationale_doc_ids": [
+        "12804937",
+        "464511"
+      ],
+      "qrels_doc_ids": [
+        "12804937",
+        "464511"
+      ],
+      "verdict": "REFUTED",
+      "predicted_label": "CONTRADICT",
+      "answered": true,
+      "answered_source": "verdict",
+      "judge_answered": true,
+      "faithfulness": 1.0,
+      "context_relevance": 0.9,
+      "evidence": false,
+      "evidence_qrels": false,
+      "abstention_class": "answered_without_evidence",
+      "abstention_class_qrels": "answered_without_evidence",
+      "answer": "The single\u2011cell RNA\u2011seq analysis revealed abundant (12\u201324\u202f%) random monoallelic expression of autosomal genes, showing that genetically identical cells can differ markedly in which allele is transcribed [4]. Likewise, allelic expression studies in T\u2011cell clones demonstrated both monoallelic and biallelic expression, indicating considerable expression variability among identical cells [5].",
+      "cited_doc_ids": [
+        "9154703",
+        "36242796"
+      ],
+      "retrieved_doc_ids": [
+        "4378885",
+        "4632921",
+        "9196472",
+        "9154703",
+        "36242796"
+      ]
+    },
+    {
+      "query_id": "971",
+      "mode": "hybrid",
+      "gold_label": "SUPPORT",
+      "rationale_doc_ids": [
+        "27873158",
+        "28617573",
+        "46695481",
+        "9764256"
+      ],
+      "qrels_doc_ids": [
+        "27873158",
+        "28617573",
+        "46695481",
+        "9764256"
+      ],
+      "verdict": null,
+      "predicted_label": "NONE",
+      "answered": true,
+      "answered_source": "judge",
+      "judge_answered": true,
+      "faithfulness": 0.85,
+      "context_relevance": 0.95,
+      "evidence": true,
+      "evidence_qrels": true,
+      "abstention_class": "answered_with_evidence",
+      "abstention_class_qrels": "answered_with_evidence",
+      "answer": "",
+      "cited_doc_ids": [],
+      "retrieved_doc_ids": [
+        "46695481",
+        "27446873",
+        "6561200",
+        "27873158",
+        "9764256"
+      ]
+    },
+    {
+      "query_id": "811",
+      "mode": "hybrid",
+      "gold_label": "CONTRADICT",
+      "rationale_doc_ids": [
+        "19799455"
+      ],
+      "qrels_doc_ids": [
+        "19799455"
+      ],
+      "verdict": "REFUTED",
+      "predicted_label": "CONTRADICT",
+      "answered": true,
+      "answered_source": "verdict",
+      "judge_answered": true,
+      "faithfulness": 1.0,
+      "context_relevance": 0.9,
+      "evidence": true,
+      "evidence_qrels": true,
+      "abstention_class": "answered_with_evidence",
+      "abstention_class_qrels": "answered_with_evidence",
+      "answer": "The passage reports that mice lacking the SVCT2 transporter (Slc23a1\u2212/\u2212) have dramatically reduced ascorbic\u2011acid uptake, with undetectable or markedly lowered vitamin\u202fC levels in blood and tissues, leading to perinatal lethality\u30101\u2020L4-L9\u3011. This contradicts the claim of greatly increased ascorbic\u2011acid levels in brain and adrenals.",
+      "cited_doc_ids": [],
+      "retrieved_doc_ids": [
+        "19799455",
+        "5107861",
+        "23868856",
+        "8698208",
+        "7221410"
+      ]
+    },
+    {
+      "query_id": "536",
+      "mode": "hybrid",
+      "gold_label": "SUPPORT",
+      "rationale_doc_ids": [
+        "16056514"
+      ],
+      "qrels_doc_ids": [
+        "16056514"
+      ],
+      "verdict": "SUPPORTED",
+      "predicted_label": "SUPPORT",
+      "answered": true,
+      "answered_source": "verdict",
+      "judge_answered": true,
+      "faithfulness": 1.0,
+      "context_relevance": 0.95,
+      "evidence": true,
+      "evidence_qrels": true,
+      "abstention_class": "answered_with_evidence",
+      "abstention_class_qrels": "answered_with_evidence",
+      "answer": "Verdict: SUPPORTED",
+      "cited_doc_ids": [],
+      "retrieved_doc_ids": [
+        "16056514",
+        "14419116",
+        "9194077",
+        "17506075",
+        "14924526"
+      ]
+    },
+    {
+      "query_id": "718",
+      "mode": "hybrid",
+      "gold_label": "CONTRADICT",
+      "rationale_doc_ids": [
+        "17587795"
+      ],
+      "qrels_doc_ids": [
+        "17587795"
+      ],
+      "verdict": null,
+      "predicted_label": "NEI",
+      "answered": false,
+      "answered_source": "judge",
+      "judge_answered": false,
+      "faithfulness": 0.0,
+      "context_relevance": 0.2,
+      "evidence": true,
+      "evidence_qrels": true,
+      "abstention_class": "false_abstention",
+      "abstention_class_qrels": "false_abstention",
+      "answer": "The context reports",
+      "cited_doc_ids": [],
+      "retrieved_doc_ids": [
+        "17587795",
+        "175735",
+        "18895793",
+        "22038539",
+        "7808055"
+      ]
+    },
+    {
+      "query_id": "1012",
+      "mode": "hybrid",
+      "gold_label": "SUPPORT",
+      "rationale_doc_ids": [
+        "9745001"
+      ],
+      "qrels_doc_ids": [
+        "9745001"
+      ],
+      "verdict": "SUPPORTED",
+      "predicted_label": "SUPPORT",
+      "answered": true,
+      "answered_source": "verdict",
+      "judge_answered": true,
+      "faithfulness": 1.0,
+      "context_relevance": 1.0,
+      "evidence": true,
+      "evidence_qrels": true,
+      "abstention_class": "answered_with_evidence",
+      "abstention_class_qrels": "answered_with_evidence",
+      "answer": "The study of 69 patients with non\u2011toxic multinodular goitre reported a median thyroid volume decrease from 73\u202fml to 29\u202fml (\u224860\u202f% reduction) after radioiodine treatment, confirming a substantial size reduction\u30101\u3011.",
+      "cited_doc_ids": [],
+      "retrieved_doc_ids": [
+        "9745001",
+        "43122426",
+        "26026009",
+        "6751418",
+        "37912677"
+      ]
+    },
+    {
+      "query_id": "237",
+      "mode": "hybrid",
+      "gold_label": "NEI",
+      "rationale_doc_ids": [],
+      "qrels_doc_ids": [
+        "4942718"
+      ],
+      "verdict": "NOT ENOUGH EVIDENCE",
+      "predicted_label": "NEI",
+      "answered": false,
+      "answered_source": "verdict",
+      "judge_answered": false,
+      "faithfulness": 1.0,
+      "context_relevance": 0.2,
+      "evidence": false,
+      "evidence_qrels": true,
+      "abstention_class": "correct_abstention",
+      "abstention_class_qrels": "false_abstention",
+      "answer": "Verdict: NOT ENOUGH EVIDENCE",
+      "cited_doc_ids": [],
+      "retrieved_doc_ids": [
+        "12881593",
+        "4942718",
+        "34386619",
+        "12824568",
+        "17416520"
+      ]
+    },
+    {
+      "query_id": "300",
+      "mode": "hybrid",
+      "gold_label": "NEI",
+      "rationale_doc_ids": [],
+      "qrels_doc_ids": [
+        "3553087"
+      ],
+      "verdict": "NOT ENOUGH EVIDENCE",
+      "predicted_label": "NEI",
+      "answered": false,
+      "answered_source": "verdict",
+      "judge_answered": false,
+      "faithfulness": 1.0,
+      "context_relevance": 0.2,
+      "evidence": false,
+      "evidence_qrels": true,
+      "abstention_class": "correct_abstention",
+      "abstention_class_qrels": "false_abstention",
+      "answer": "Verdict: NOT ENOUGH EVIDENCE",
+      "cited_doc_ids": [],
+      "retrieved_doc_ids": [
+        "16120395",
+        "3553087",
+        "25937484",
+        "15551129",
+        "21622715"
+      ]
+    },
+    {
+      "query_id": "613",
+      "mode": "hybrid",
+      "gold_label": "SUPPORT",
+      "rationale_doc_ids": [
+        "9638032"
+      ],
+      "qrels_doc_ids": [
+        "9638032"
+      ],
+      "verdict": null,
+      "predicted_label": "NONE",
+      "answered": true,
+      "answered_source": "judge",
+      "judge_answered": true,
+      "faithfulness": 1.0,
+      "context_relevance": 0.95,
+      "evidence": true,
+      "evidence_qrels": true,
+      "abstention_class": "answered_with_evidence",
+      "abstention_class_qrels": "answered_with_evidence",
+      "answer": "The study reports that raising microtubule acetylation\u2014by deacetylase inhibition, \u03b1\u2011tubulin acetyltransferase expression, or knockdown of HDAC6/Sirt2\u2014prevents mutant LRRK",
+      "cited_doc_ids": [],
+      "retrieved_doc_ids": [
+        "9638032",
+        "16056410",
+        "36830715",
+        "42035464",
+        "27134527"
+      ]
+    },
+    {
+      "query_id": "587",
+      "mode": "hybrid",
+      "gold_label": "NEI",
+      "rationale_doc_ids": [],
+      "qrels_doc_ids": [
+        "16999023"
+      ],
+      "verdict": "NOT ENOUGH EVIDENCE",
+      "predicted_label": "NEI",
+      "answered": false,
+      "answered_source": "verdict",
+      "judge_answered": false,
+      "faithfulness": 1.0,
+      "context_relevance": 0.2,
+      "evidence": false,
+      "evidence_qrels": true,
+      "abstention_class": "correct_abstention",
+      "abstention_class_qrels": "false_abstention",
+      "answer": "Verdict: NOT ENOUGH EVIDENCE",
+      "cited_doc_ids": [],
+      "retrieved_doc_ids": [
+        "7142113",
+        "40558887",
+        "16999023",
+        "42855554",
+        "39048693"
+      ]
+    },
+    {
+      "query_id": "551",
+      "mode": "hybrid",
+      "gold_label": "NEI",
+      "rationale_doc_ids": [],
+      "qrels_doc_ids": [
+        "33499189"
+      ],
+      "verdict": "NOT ENOUGH EVIDENCE",
+      "predicted_label": "NEI",
+      "answered": false,
+      "answered_source": "verdict",
+      "judge_answered": false,
+      "faithfulness": 1.0,
+      "context_relevance": 0.2,
+      "evidence": false,
+      "evidence_qrels": false,
+      "abstention_class": "correct_abstention",
+      "abstention_class_qrels": "correct_abstention",
+      "answer": "Verdict: NOT ENOUGH EVIDENCE",
+      "cited_doc_ids": [],
+      "retrieved_doc_ids": [
+        "8903143",
+        "5914739",
+        "9283422",
+        "2825380",
+        "34905328"
+      ]
+    },
+    {
+      "query_id": "597",
+      "mode": "hybrid",
+      "gold_label": "SUPPORT",
+      "rationale_doc_ids": [
+        "12779444",
+        "25742130",
+        "36355784"
+      ],
+      "qrels_doc_ids": [
+        "12779444",
+        "25742130",
+        "36355784"
+      ],
+      "verdict": "SUPPORTED",
+      "predicted_label": "SUPPORT",
+      "answered": true,
+      "answered_source": "verdict",
+      "judge_answered": true,
+      "faithfulness": 1.0,
+      "context_relevance": 0.95,
+      "evidence": true,
+      "evidence_qrels": true,
+      "abstention_class": "answered_with_evidence",
+      "abstention_class_qrels": "answered_with_evidence",
+      "answer": "The Finnish data show that cervical cancer incidence fell from 15.4 per\u202f10\u2075 woman\u2011years in the early 1960s to 2.7 per\u202f10\u2075 in 1991, and later reports indicate continued declines (e.g., 4.0 per\u202f100,000 in 2003) compared with higher earlier rates\u30101\u2020L7-L12\u3011\u30102\u2020L9-L13\u3011.",
+      "cited_doc_ids": [],
+      "retrieved_doc_ids": [
+        "36355784",
+        "25742130",
+        "12779444",
+        "23136735",
+        "27446873"
+      ]
+    },
+    {
+      "query_id": "124",
+      "mode": "hybrid",
+      "gold_label": "SUPPORT",
+      "rationale_doc_ids": [
+        "4883040"
+      ],
+      "qrels_doc_ids": [
+        "4883040"
+      ],
+      "verdict": "SUPPORTED",
+      "predicted_label": "SUPPORT",
+      "answered": true,
+      "answered_source": "verdict",
+      "judge_answered": true,
+      "faithfulness": 1.0,
+      "context_relevance": 1.0,
+      "evidence": true,
+      "evidence_qrels": true,
+      "abstention_class": "answered_with_evidence",
+      "abstention_class_qrels": "answered_with_evidence",
+      "answer": "The systematic review reported that antiretroviral therapy is strongly associated with a reduction in tuberculosis incidence in all baseline CD4 count categories (HR\u202f0.16 for <200\u202fcells/\u00b5l, HR\u202f0.34 for 200\u2013350\u202fcells/\u00b5l, HR\u202f0.43 for >350\u202fcells/\u00b5l, and HR\u202f0.35 overall)\u30101\u3011.",
+      "cited_doc_ids": [],
+      "retrieved_doc_ids": [
+        "4883040",
+        "7111021",
+        "31363207",
+        "13899137",
+        "21479231"
+      ]
+    },
+    {
+      "query_id": "5",
+      "mode": "hybrid",
+      "gold_label": "SUPPORT",
+      "rationale_doc_ids": [
+        "13734012"
+      ],
+      "qrels_doc_ids": [
+        "13734012"
+      ],
+      "verdict": "SUPPORTED",
+      "predicted_label": "SUPPORT",
+      "answered": true,
+      "answered_source": "verdict",
+      "judge_answered": true,
+      "faithfulness": 1.0,
+      "context_relevance": 0.9,
+      "evidence": true,
+      "evidence_qrels": true,
+      "abstention_class": "answered_with_evidence",
+      "abstention_class_qrels": "answered_with_evidence",
+      "answer": "The study found an overall prevalence of abnormal prion protein of 493 per\u202fmillion people, which is essentially 1 in\u202f2,000 (\u2248500 per\u202fmillion)\u30101\u3011.",
+      "cited_doc_ids": [],
+      "retrieved_doc_ids": [
+        "13734012",
+        "103007",
+        "18617259",
+        "841371",
+        "76415938"
+      ]
+    },
+    {
+      "query_id": "593",
+      "mode": "hybrid",
+      "gold_label": "SUPPORT",
+      "rationale_doc_ids": [
+        "19675911"
+      ],
+      "qrels_doc_ids": [
+        "19675911"
+      ],
+      "verdict": "REFUTED",
+      "predicted_label": "CONTRADICT",
+      "answered": true,
+      "answered_source": "verdict",
+      "judge_answered": true,
+      "faithfulness": 1.0,
+      "context_relevance": 0.95,
+      "evidence": true,
+      "evidence_qrels": true,
+      "abstention_class": "answered_with_evidence",
+      "abstention_class_qrels": "answered_with_evidence",
+      "answer": "The study of Olmsted County residents found that the incidence of heart failure \u201cdid not change over time among \u2026 women\u201d rather than declining, so a 10\u202f% decrease since 1979 is not supported by the data [1].",
+      "cited_doc_ids": [
+        "19675911"
+      ],
+      "retrieved_doc_ids": [
+        "19675911",
+        "31889025",
+        "24408040",
+        "13481731",
+        "27240667"
+      ]
+    },
+    {
+      "query_id": "830",
+      "mode": "hybrid",
+      "gold_label": "NEI",
+      "rationale_doc_ids": [],
+      "qrels_doc_ids": [
+        "1897324"
+      ],
+      "verdict": null,
+      "predicted_label": "NEI",
+      "answered": false,
+      "answered_source": "judge",
+      "judge_answered": false,
+      "faithfulness": 0.0,
+      "context_relevance": 0.2,
+      "evidence": false,
+      "evidence_qrels": false,
+      "abstention_class": "correct_abstention",
+      "abstention_class_qrels": "correct_abstention",
+      "answer": "",
+      "cited_doc_ids": [],
+      "retrieved_doc_ids": [
+        "735130",
+        "12737132",
+        "52873726",
+        "8417211",
+        "46305977"
+      ]
+    },
+    {
+      "query_id": "56",
+      "mode": "hybrid",
+      "gold_label": "SUPPORT",
+      "rationale_doc_ids": [
+        "4709641"
+      ],
+      "qrels_doc_ids": [
+        "4709641"
+      ],
+      "verdict": "SUPPORTED",
+      "predicted_label": "SUPPORT",
+      "answered": true,
+      "answered_source": "verdict",
+      "judge_answered": true,
+      "faithfulness": 1.0,
+      "context_relevance": 0.95,
+      "evidence": true,
+      "evidence_qrels": true,
+      "abstention_class": "answered_with_evidence",
+      "abstention_class_qrels": "answered_with_evidence",
+      "answer": "The passage reports that ApoE4\u2011expressing human iPSC\u2011derived neurons show increased amyloid\u2011\u03b2 production, elevated tau phosphorylation, and degeneration of GABAergic neurons\u30101\u3011.",
+      "cited_doc_ids": [],
+      "retrieved_doc_ids": [
+        "4709641",
+        "4459491",
+        "11659421",
+        "10641715",
+        "13969173"
+      ]
+    },
+    {
+      "query_id": "716",
+      "mode": "hybrid",
+      "gold_label": "NEI",
+      "rationale_doc_ids": [],
+      "qrels_doc_ids": [
+        "18421962"
+      ],
+      "verdict": "NOT ENOUGH EVIDENCE",
+      "predicted_label": "NEI",
+      "answered": false,
+      "answered_source": "verdict",
+      "judge_answered": false,
+      "faithfulness": 1.0,
+      "context_relevance": 0.1,
+      "evidence": false,
+      "evidence_qrels": false,
+      "abstention_class": "correct_abstention",
+      "abstention_class_qrels": "correct_abstention",
+      "answer": "Verdict: NOT ENOUGH EVIDENCE",
+      "cited_doc_ids": [],
+      "retrieved_doc_ids": [
+        "6828370",
+        "12440953",
+        "6820680",
+        "37438296",
+        "9159495"
+      ]
+    },
+    {
+      "query_id": "1140",
+      "mode": "hybrid",
+      "gold_label": "CONTRADICT",
+      "rationale_doc_ids": [
+        "12009265"
+      ],
+      "qrels_doc_ids": [
+        "12009265"
+      ],
+      "verdict": "REFUTED",
+      "predicted_label": "CONTRADICT",
+      "answered": true,
+      "answered_source": "verdict",
+      "judge_answered": true,
+      "faithfulness": 1.0,
+      "context_relevance": 0.95,
+      "evidence": true,
+      "evidence_qrels": true,
+      "abstention_class": "answered_with_evidence",
+      "abstention_class_qrels": "answered_with_evidence",
+      "answer": "The Physicians\u2019 Health Study II found that supplementation with vitamin\u202fE (400\u202fIU every other day) did not reduce the incidence of prostate cancer (hazard ratio\u202f0.97; not statistically significant)\u30101\u3011.",
+      "cited_doc_ids": [],
+      "retrieved_doc_ids": [
+        "12009265",
+        "308862",
+        "24581365",
+        "6407356",
+        "25513319"
+      ]
+    },
+    {
+      "query_id": "552",
+      "mode": "hybrid",
+      "gold_label": "NEI",
+      "rationale_doc_ids": [],
+      "qrels_doc_ids": [
+        "1471041"
+      ],
+      "verdict": "NOT ENOUGH EVIDENCE",
+      "predicted_label": "NEI",
+      "answered": false,
+      "answered_source": "verdict",
+      "judge_answered": false,
+      "faithfulness": 1.0,
+      "context_relevance": 0.8,
+      "evidence": false,
+      "evidence_qrels": true,
+      "abstention_class": "correct_abstention",
+      "abstention_class_qrels": "false_abstention",
+      "answer": "Verdict: NOT ENOUGH EVIDENCE",
+      "cited_doc_ids": [],
+      "retrieved_doc_ids": [
+        "1471041",
+        "27772649",
+        "10675756",
+        "11415809",
+        "14340571"
+      ]
+    },
+    {
+      "query_id": "171",
+      "mode": "hybrid",
+      "gold_label": "CONTRADICT",
+      "rationale_doc_ids": [
+        "12670680"
+      ],
+      "qrels_doc_ids": [
+        "12670680"
+      ],
+      "verdict": "REFUTED",
+      "predicted_label": "CONTRADICT",
+      "answered": true,
+      "answered_source": "verdict",
+      "judge_answered": true,
+      "faithfulness": 1.0,
+      "context_relevance": 0.9,
+      "evidence": true,
+      "evidence_qrels": true,
+      "abstention_class": "answered_with_evidence",
+      "abstention_class_qrels": "answered_with_evidence",
+      "answer": "The passage describes basophils as being activated in SLE and promoting autoantibody production that leads to lupus nephritis, indicating they contribute to disease rather than counteract it [1].",
+      "cited_doc_ids": [
+        "12670680"
+      ],
+      "retrieved_doc_ids": [
+        "12670680",
+        "14938990",
+        "28149602",
+        "28015516",
+        "1049501"
+      ]
+    },
+    {
+      "query_id": "834",
+      "mode": "hybrid",
+      "gold_label": "NEI",
+      "rationale_doc_ids": [],
+      "qrels_doc_ids": [
+        "5483793"
+      ],
+      "verdict": "SUPPORTED",
+      "predicted_label": "SUPPORT",
+      "answered": true,
+      "answered_source": "verdict",
+      "judge_answered": true,
+      "faithfulness": 0.85,
+      "context_relevance": 0.6,
+      "evidence": false,
+      "evidence_qrels": false,
+      "abstention_class": "answered_without_evidence",
+      "abstention_class_qrels": "answered_without_evidence",
+      "answer": "The passages describe that nitric\u2011oxide synthase can produce both superoxide and nitric oxide, which then combine to form peroxynitrite without involving NOX2 activity\u30101\u2020L1-L9\u3011\u30102\u2020L4-L9\u3011.",
+      "cited_doc_ids": [],
+      "retrieved_doc_ids": [
+        "23100962",
+        "23122306",
+        "46328296",
+        "12631182",
+        "7230315"
+      ]
+    },
+    {
+      "query_id": "721",
+      "mode": "hybrid",
+      "gold_label": "SUPPORT",
+      "rationale_doc_ids": [
+        "1834762"
+      ],
+      "qrels_doc_ids": [
+        "1834762"
+      ],
+      "verdict": "SUPPORTED",
+      "predicted_label": "SUPPORT",
+      "answered": true,
+      "answered_source": "verdict",
+      "judge_answered": true,
+      "faithfulness": 1.0,
+      "context_relevance": 1.0,
+      "evidence": true,
+      "evidence_qrels": true,
+      "abstention_class": "answered_with_evidence",
+      "abstention_class_qrels": "answered_with_evidence",
+      "answer": "The study reports that infection of lupus\u2011prone mice with curli\u2011producing bacteria led to higher autoantibody titers than infection with curli\u2011deficient bacteria [1].",
+      "cited_doc_ids": [
+        "1834762"
+      ],
+      "retrieved_doc_ids": [
+        "1834762",
+        "12670680",
+        "5476778",
+        "5800138",
+        "13106686"
+      ]
+    },
+    {
+      "query_id": "75",
+      "mode": "hybrid",
+      "gold_label": "NEI",
+      "rationale_doc_ids": [],
+      "qrels_doc_ids": [
+        "4387784"
+      ],
+      "verdict": "NOT ENOUGH EVIDENCE",
+      "predicted_label": "NEI",
+      "answered": false,
+      "answered_source": "verdict",
+      "judge_answered": false,
+      "faithfulness": 1.0,
+      "context_relevance": 0.2,
+      "evidence": false,
+      "evidence_qrels": true,
+      "abstention_class": "correct_abstention",
+      "abstention_class_qrels": "false_abstention",
+      "answer": "Verdict: NOT ENOUGH EVIDENCE",
+      "cited_doc_ids": [],
+      "retrieved_doc_ids": [
+        "4387784",
+        "13965483",
+        "37768883",
+        "25657127",
+        "36233757"
+      ]
+    },
+    {
+      "query_id": "295",
+      "mode": "hybrid",
+      "gold_label": "SUPPORT",
+      "rationale_doc_ids": [
+        "20310709"
+      ],
+      "qrels_doc_ids": [
+        "20310709"
+      ],
+      "verdict": null,
+      "predicted_label": "NONE",
+      "answered": true,
+      "answered_source": "judge",
+      "judge_answered": true,
+      "faithfulness": 1.0,
+      "context_relevance": 0.95,
+      "evidence": true,
+      "evidence_qrels": true,
+      "abstention_class": "answered_with_evidence",
+      "abstention_class_qrels": "answered_with_evidence",
+      "answer": "The passages describe how dendritic cells shape ILC function in the gut: CD14\u207a dendritic cells promote conversion of ILC3 to CD127\u207a ILC1, while CD14\u207b dendritic cells drive the opposite transition, indicating that DC\u2011derived cues determine ILC composition and phenotype in the intestine\u30102\u3011. Additionally, TNF\u2011\u03b1 from CD103\u207bCD11b\u207a dendritic cells synergizes with IL\u201123 to induce IL\u201117A production by IL\u20117",
+      "cited_doc_ids": [],
+      "retrieved_doc_ids": [
+        "24044977",
+        "29423324",
+        "1022115",
+        "20310709",
+        "22791348"
+      ]
+    },
+    {
+      "query_id": "1270",
+      "mode": "hybrid",
+      "gold_label": "CONTRADICT",
+      "rationale_doc_ids": [
+        "13900610"
+      ],
+      "qrels_doc_ids": [
+        "13900610"
+      ],
+      "verdict": "REFUTED",
+      "predicted_label": "CONTRADICT",
+      "answered": true,
+      "answered_source": "verdict",
+      "judge_answered": true,
+      "faithfulness": 1.0,
+      "context_relevance": 1.0,
+      "evidence": true,
+      "evidence_qrels": true,
+      "abstention_class": "answered_with_evidence",
+      "abstention_class_qrels": "answered_with_evidence",
+      "answer": "Verdict: REFUTED",
+      "cited_doc_ids": [],
+      "retrieved_doc_ids": [
+        "13900610",
+        "34227917",
+        "14843502",
+        "20491205",
+        "43855756"
+      ]
+    },
+    {
+      "query_id": "238",
+      "mode": "hybrid",
+      "gold_label": "NEI",
+      "rationale_doc_ids": [],
+      "qrels_doc_ids": [
+        "2251426"
+      ],
+      "verdict": "NOT ENOUGH EVIDENCE",
+      "predicted_label": "NEI",
+      "answered": false,
+      "answered_source": "verdict",
+      "judge_answered": false,
+      "faithfulness": 1.0,
+      "context_relevance": 0.4,
+      "evidence": false,
+      "evidence_qrels": true,
+      "abstention_class": "correct_abstention",
+      "abstention_class_qrels": "false_abstention",
+      "answer": "Verdict: NOT ENOUGH EVIDENCE",
+      "cited_doc_ids": [],
+      "retrieved_doc_ids": [
+        "4463811",
+        "2251426",
+        "32556431",
+        "13290521",
+        "18421962"
+      ]
+    },
+    {
+      "query_id": "1014",
+      "mode": "hybrid",
+      "gold_label": "NEI",
+      "rationale_doc_ids": [],
+      "qrels_doc_ids": [
+        "6277638"
+      ],
+      "verdict": "NOT ENOUGH EVIDENCE",
+      "predicted_label": "NEI",
+      "answered": false,
+      "answered_source": "verdict",
+      "judge_answered": false,
+      "faithfulness": 1.0,
+      "context_relevance": 0.2,
+      "evidence": false,
+      "evidence_qrels": true,
+      "abstention_class": "correct_abstention",
+      "abstention_class_qrels": "false_abstention",
+      "answer": "Verdict: NOT ENOUGH EVIDENCE",
+      "cited_doc_ids": [],
+      "retrieved_doc_ids": [
+        "6277638",
+        "116792",
+        "1227277",
+        "4658268",
+        "2266471"
+      ]
+    },
+    {
+      "query_id": "1088",
+      "mode": "hybrid",
+      "gold_label": "CONTRADICT",
+      "rationale_doc_ids": [
+        "37549932"
+      ],
+      "qrels_doc_ids": [
+        "37549932"
+      ],
+      "verdict": "NOT ENOUGH EVIDENCE",
+      "predicted_label": "NEI",
+      "answered": false,
+      "answered_source": "verdict",
+      "judge_answered": false,
+      "faithfulness": 1.0,
+      "context_relevance": 0.2,
+      "evidence": false,
+      "evidence_qrels": false,
+      "abstention_class": "correct_abstention",
+      "abstention_class_qrels": "correct_abstention",
+      "answer": "Verdict: NOT ENOUGH EVIDENCE",
+      "cited_doc_ids": [],
+      "retrieved_doc_ids": [
+        "24282306",
+        "14863011",
+        "31902335",
+        "33638477",
+        "3840043"
+      ]
+    },
+    {
+      "query_id": "1274",
+      "mode": "hybrid",
+      "gold_label": "SUPPORT",
+      "rationale_doc_ids": [
+        "4406819"
+      ],
+      "qrels_doc_ids": [
+        "12428814",
+        "27731651",
+        "4406819"
+      ],
+      "verdict": "NOT ENOUGH EVIDENCE",
+      "predicted_label": "NEI",
+      "answered": false,
+      "answered_source": "verdict",
+      "judge_answered": false,
+      "faithfulness": 1.0,
+      "context_relevance": 0.8,
+      "evidence": true,
+      "evidence_qrels": true,
+      "abstention_class": "false_abstention",
+      "abstention_class_qrels": "false_abstention",
+      "answer": "Verdict: NOT ENOUGH EVIDENCE",
+      "cited_doc_ids": [],
+      "retrieved_doc_ids": [
+        "27731651",
+        "7481159",
+        "22632303",
+        "4406819",
+        "7145763"
+      ]
+    }
+  ]
 }

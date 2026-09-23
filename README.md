@@ -48,8 +48,8 @@ Measured below, and on this corpus it does not improve ranking, so it is off by 
 | Reranker | `cross-encoder/ms-marco-MiniLM-L-6-v2` and `BAAI/bge-reranker-base` (both evaluated; swappable via `SSR_RERANKER_MODEL`) |
 | API | FastAPI + slowapi rate limiting |
 | Retrieval eval | `ranx` on BEIR/SciFact gold qrels, with paired significance tests |
-| RAG eval | LLM-as-judge with abstention scored against gold qrels (`app/eval/rag_eval.py`) |
-| LLM | Groq `llama-3.3-70b-versatile` (any OpenAI-compatible endpoint via `SSR_LLM_BASE_URL`) |
+| RAG eval | Verdicts + abstention scored against SciFact rationale labels; LLM judge for faithfulness (`app/eval/rag_eval.py`) |
+| LLM | Groq `openai/gpt-oss-120b` generator, `qwen/qwen3.8-27b` judge (any OpenAI-compatible endpoint via `SSR_LLM_BASE_URL`) |
 
 ## Evaluation (headline artifact)
 
@@ -120,49 +120,59 @@ with `SSR_RERANK_CANDIDATES=100 uv run python -m app.eval.retrieval_eval`.
 
 ## Grounded answers (RAG)
 
-`GET /answer?q=...` runs the hybrid retrieval, then generates a grounded answer with an OpenAI-compatible LLM (Groq `llama-3.3-70b-versatile` by default; switch providers via `SSR_LLM_BASE_URL`). Answers cite sources as `[n]` mapped back to document ids, and the model is instructed to **abstain when the retrieved context lacks the evidence** rather than hallucinate.
+`GET /answer?q=...` runs the hybrid retrieval, then generates a grounded answer with an OpenAI-compatible LLM (Groq `openai/gpt-oss-120b` by default; switch providers via `SSR_LLM_BASE_URL`). Answers cite sources as `[n]` mapped back to document ids, and the model is instructed to **abstain when the retrieved context lacks the evidence** rather than hallucinate.
 
 For example, `/answer?q=Can aspirin reduce the risk of colorectal cancer?`:
 > "Aspirin has been shown to reduce the risk of colorectal cancer [1][2][3] … a pooled analysis of four randomized trials showed a 34% reduction in 20-year colorectal cancer mortality [3]."
 
-**Answer-quality eval** (`app/eval/rag_eval.py`) is an LLM-as-judge whose abstention decisions
-are **scored against the gold qrels rather than assumed correct**. Generator = Groq
-`llama-3.3-70b-versatile`, judge = `llama-3.1-8b-instant`, a separate, lighter model, so it
-isn't grading its own output. Random 50-claim sample (seed 13); 49 scored, 1 skipped on a
-pipeline error, counted and reported rather than silently dropped
-([`eval/results/rag.md`](eval/results/rag.md)).
+**Answer-quality eval** (`app/eval/rag_eval.py`) scores each answer's final `Verdict:` line
+(supported / refuted / not enough evidence) and its answer/abstain decision **against SciFact's
+labels rather than assuming them correct**; an LLM judge scores only faithfulness and context
+relevance. Generator = Groq `openai/gpt-oss-120b`, judge = `qwen/qwen3.8-27b`, a different model
+family, so it isn't grading its own output. Random 50-claim sample (seed 13), all 50 scored,
+top-5 context; full tables in [`eval/results/rag.md`](eval/results/rag.md). Groq retired the
+Llama models the previous run used, so these numbers are not directly comparable to that run's.
+
+Abstention is scored against a **rationale oracle**: the context has evidence when a document the
+annotators cited *with rationale sentences* is in the top-5. NEI claims have no rationale
+document, so abstaining on them is the correct action.
 
 | Metric | Score |
 |---|---|
-| Faithfulness (over answered) | 0.83 |
-| Context relevance (all) | 0.72 |
-| Evidence retrieved (gold doc in top-5) | 0.82 |
-| Answered (model attempted an answer) | 0.73 |
-| **Abstention precision** (abstained & no evidence) | **0.38** |
-| Abstention recall (no evidence & abstained) | 0.56 |
-| False abstention (had evidence, abstained anyway) | 0.20 |
-| Answered without evidence, as a share of answers given (hallucination risk) | 0.11 |
+| Faithfulness (over answered) | 0.98 |
+| Context relevance (all) | 0.70 |
+| **3-class verdict accuracy** (vs gold label, no judge) | **0.70** |
+| Verdict line parsed | 0.86 |
+| Evidence retrieved (rationale doc in top-5) | 0.58 |
+| Answered (model attempted an answer) | 0.60 |
+| **Abstention precision** (abstained & no evidence) | **0.80** |
+| Abstention recall (no evidence & abstained) | 0.76 |
+| False abstention (had evidence, abstained anyway) | 0.14 |
+| Answered without evidence, as a share of answers given (hallucination risk) | 0.17 |
 
-Crossing the judge's answer/abstain call with whether a gold document was actually retrieved
-gives a 2×2 over the 49 claims:
-
-|  | evidence retrieved (40) | no evidence (9) |
+|  | evidence retrieved (29) | no evidence (21) |
 |---|---|---|
-| **answered** (36) | 32 correct | 4 answered with nothing to go on |
-| **abstained** (13) | 8 declined despite having the evidence | 5 correct |
+| **answered** (30) | 25 answered with evidence | 5 answered with nothing to go on |
+| **abstained** (20) | 4 declined despite having the evidence | 16 correct |
 
-**Finding: abstention is the weakest part of this system, and scoring it against qrels is what
-exposed it.** An earlier version of this eval reported "answered 0.50" and concluded the system
-"correctly abstains". But an abstention rate alone cannot tell a calibrated refusal from an
-over-cautious one. Against the labels: retrieval surfaces the gold document 82% of the time, yet
-**only 5 of 13 abstentions were justified** (in 8 cases the evidence was in the context and the
-model declined to use it), while it answered 4 of the 9 genuinely unanswerable claims. The
-generator is both too conservative where it has evidence and not conservative enough where it
-doesn't, so the prompt's abstention instruction is the thing to work on next. Faithfulness over
-the answers it does give is solid at 0.83.
+Verdicts against the gold label (`NONE` = answered with no parseable verdict line, always wrong):
 
-(That old 0.50 also came from the first 10 query ids in dataset order: a head slice, not a
-sample. The harness now takes a seeded random sample and re-runs at any size via `make eval-rag`.)
+| Gold \ predicted | SUPPORT | CONTRADICT | NEI | NONE |
+|---|---|---|---|---|
+| **SUPPORT** (19) | 12 | 1 | 2 | 4 |
+| **CONTRADICT** (13) | 0 | 9 | 4 | 0 |
+| **NEI** (18) | 4 | 0 | 14 | 0 |
+
+**Finding: the oracle decides whether abstention looks broken.** Scored the legacy way, against
+BEIR qrels (which mark a cited abstract relevant for NEI claims too), the *same answers* give
+abstention precision 0.35 and 13 "false" abstentions (false-abstention rate 0.32). Under the
+rationale oracle, 9 of those 13 are NEI claims where refusing was the right call, and precision
+is 0.80. What remains is smaller and real: 4 SUPPORT claims answered without a parseable verdict
+line (scored `NONE`), 4 CONTRADICT claims abstained on, and 4 NEI claims answered SUPPORT, which
+are 4 of the 5 answers given without evidence. Faithfulness over the answers it does give is 0.98.
+
+(An earlier version of this eval reported "answered 0.50" from the first 10 query ids in dataset
+order: a head slice, not a sample. The harness now takes a seeded random sample and re-runs at any size via `make eval-rag`.)
 
 ## Limitations
 
@@ -175,21 +185,24 @@ sample. The harness now takes a seeded random sample and re-runs at any size via
 - **NEI labelling.** For the 112 NEI claims, BEIR's qrels mark the cited abstract relevant even
   though annotators found no rationale in it, and the whole hybrid-vs-dense recall gain sits on
   that stratum (Finding 1).
-- **The RAG eval is small.** N = 50 claims (49 scored), so every rate in that table rests on a
-  few dozen answers, and three of the four 2×2 cells on single digits.
-- **The LLM judge is single-sample and shares a model family with the generator.** Each answer is
-  judged once, and `llama-3.1-8b-instant` is a different, smaller model than the generator but
-  still Llama, so shared-family bias is not ruled out.
+- **The RAG eval is small.** N = 50 claims, so every rate in that table rests on a few dozen
+  answers, and 10 of the 12 confusion-matrix cells are single digits.
+- **The LLM judge is single-sample.** Each answer is judged once, so judge variance on
+  faithfulness and context relevance is unmeasured. Verdict accuracy and abstention need no judge,
+  except for the 7 of 50 answer/abstain calls it settles when no verdict line parsed.
+- **No before/after on the RAG eval.** The model change (retired Groq Llama models →
+  `openai/gpt-oss-120b` / `qwen/qwen3.8-27b`) breaks comparability with the earlier published run,
+  so no RAG-quality change can be attributed across it.
 - **Latency numbers are console-only.** The 7.5 s / 32.3 s / ~0.2 s per-query figures come from
   the eval run's console output and are not in a committed artifact.
 
 ## What I'd do next
 
-- **Rationale-doc abstention oracle + structured verdict** (in progress): score abstention
-  against SciFact's rationale docs rather than qrels, and have the generator end a claim's answer
-  with a structured verdict (supported / refuted / not enough evidence) alongside its citations.
-- **A judge from a different model family**, so the answer-quality numbers do not rest on Llama
-  grading Llama.
+- **Fix verdict-line compliance**: 14% of answers end without a parseable `Verdict:` line, which
+  alone costs 4 SUPPORT claims (scored `NONE`). Enforce the format (structured output or a
+  retry) so verdict accuracy measures judgment, not formatting.
+- **Measure judge agreement by re-sampling**: re-run the judge several times per answer to put a
+  variance on faithfulness and context relevance, which currently rest on one call each.
 - **Persist per-query latency** into the committed eval results, so the reranker cost claim is
   reproducible from an artifact rather than a console log.
 - **Stratified reporting as the default**: report every retrieval comparison by claim label, not
