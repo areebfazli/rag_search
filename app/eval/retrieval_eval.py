@@ -2,7 +2,9 @@
 
 Runs each config over the test queries and reports nDCG@10, Recall@100, MRR@10 and
 MAP@100 with paired significance tests — the headline artifact of the project.
-Writes a Markdown table + JSON to eval/results/.
+Writes a Markdown table + JSON to eval/results/ — but only for the canonical run (full
+test split, no SSR_EVAL_LIMIT). Any other run goes to data/eval_runs/ (gitignored), so
+a smoke test can never overwrite the committed table.
 
 Two rerankers are evaluated so "use a domain-appropriate reranker" is a measured
 claim rather than an assumed one: the CPU-default MS-MARCO MiniLM (trained on short
@@ -16,6 +18,7 @@ bge reranker alone is ~3h on a laptop CPU.
 Run:
     uv run python -m app.eval.retrieval_eval
     SSR_EVAL_REFRESH=1 uv run python -m app.eval.retrieval_eval   # ignore the cache
+    SSR_EVAL_LIMIT=20 uv run python -m app.eval.retrieval_eval    # smoke subset
 """
 from __future__ import annotations
 
@@ -27,7 +30,8 @@ import os
 import time
 from pathlib import Path
 
-from app.core.config import settings
+from app.core.config import Settings, settings
+from app.ingest.build_index import MANIFEST_PATH
 from app.ingest.corpus import load_queries_qrels
 from app.retrieve.service import SearchService
 
@@ -56,40 +60,82 @@ DEPTH = 100  # first-stage candidate depth = result depth (enough for Recall@100
 MAX_P = 0.05  # significance threshold for the paired tests
 CHECKPOINT_EVERY = 20  # persist partial progress this often (cross-encoders are slow)
 
-OUT = Path("eval/results")
+OUT = Path("eval/results")  # canonical run only — the committed artifact
+RUNS = Path("data/eval_runs")  # every other run (gitignored)
 CACHE = Path("data/eval_cache")
+# Only a full run on this split may write to OUT. Read off the Settings field default
+# rather than restated, so the two cannot drift apart.
+CANONICAL_DATASET = Settings.model_fields["eval_dataset"].default
+
+# Sentinel for "index built before manifests existed". It is NOT folded into the
+# payload: a missing manifest leaves the signature byte-identical to what pre-manifest
+# code computed, so the existing data/eval_cache/ entries behind the committed tables
+# stay valid instead of being silently invalidated (and hours of cross-encoder runs
+# redone). The first `make index` under this code writes a manifest, which then
+# changes every signature — correctly, since the index was just rebuilt.
+NO_MANIFEST = None
+
+
+def _index_fingerprint() -> str | None:
+    """sha256 of data/index_manifest.json's raw bytes, or NO_MANIFEST if absent.
+
+    Raw bytes, not parsed JSON: a corrupt manifest still hashes to *something* that
+    differs from any good one, which fails safe (recompute) rather than matching.
+    """
+    try:
+        return hashlib.sha256(MANIFEST_PATH.read_bytes()).hexdigest()
+    except FileNotFoundError:
+        return NO_MANIFEST
 
 
 def _signature(mode: str, reranker: str | None, n_queries: int) -> str:
-    """The *settings* that change a run's output. A cache entry is only reused when
-    this matches, so changing depth/rerank slice/dataset can't silently serve stale
-    scores.
+    """The settings — and the index they run against — that change a run's output. A
+    cache entry is only reused when this matches, so changing depth/rerank
+    slice/dataset, or reindexing a different corpus/model/BM25 setup, can't silently
+    serve stale scores.
 
     settings.rerank_batch_size is deliberately absent: it is a pure performance knob.
     Measured on MiniLM, batch 8 vs 32 moves scores by ~1e-6 (float reduction noise
     from padding) and leaves the ranking identical, so it cannot change a metric.
 
-    Caveat: this covers configuration, NOT the on-disk index contents. Rebuilding the
-    index with `make index` between a partial run and its resume would produce a cache
-    file whose halves were scored against different indices, reported as one clean run.
-    Use SSR_EVAL_REFRESH=1 after any reindex.
+    The index is covered through data/index_manifest.json (see _index_fingerprint):
+    what it was built FROM, not its bytes. Two caveats remain:
+      * A reindex with identical inputs keeps the signature. Nothing in the build is
+        random (fixed corpus order, exact BM25, CPU embeddings under the locked torch),
+        so that is the same index the cache was scored against.
+      * An index built before manifests existed has none; the signature then falls
+        back to the settings-only form (NO_MANIFEST), which cannot detect a reindex.
+        Use SSR_EVAL_REFRESH=1 if that index may have been rebuilt mid-run.
     """
-    payload = json.dumps(
-        {
-            "mode": mode,
-            "reranker": reranker,
-            "depth": DEPTH,
-            "rerank_candidates": settings.rerank_candidates,
-            "rrf_k": settings.rrf_k,
-            "dataset": settings.eval_dataset,
-            "embedding_model": settings.embedding_model,
-            # Changing the query prefix changes every dense result, so it belongs here.
-            "embedding_query_prefix": settings.embedding_query_prefix,
-            "n_queries": n_queries,
-        },
-        sort_keys=True,
-    )
+    fields: dict = {
+        "mode": mode,
+        "reranker": reranker,
+        "depth": DEPTH,
+        "rerank_candidates": settings.rerank_candidates,
+        "rrf_k": settings.rrf_k,
+        "dataset": settings.eval_dataset,
+        "embedding_model": settings.embedding_model,
+        # Changing the query prefix changes every dense result, so it belongs here.
+        "embedding_query_prefix": settings.embedding_query_prefix,
+        "n_queries": n_queries,
+    }
+    if (index := _index_fingerprint()) is not NO_MANIFEST:
+        fields["index_manifest"] = index
+    payload = json.dumps(fields, sort_keys=True)
     return hashlib.sha256(payload.encode()).hexdigest()[:16]
+
+
+def _output_dir(limit: int, n_queries: int) -> tuple[Path, bool]:
+    """Where this run's tables go, and whether it is the canonical run.
+
+    eval/results/ is the committed headline artifact, so only a full run on the
+    canonical split may write there. Anything else — a smoke subset, another split —
+    goes to data/eval_runs/<dataset-slug>_<n>/, named so runs don't collide.
+    """
+    if not limit and settings.eval_dataset == CANONICAL_DATASET:
+        return OUT, True
+    slug = "".join(c if c.isalnum() else "-" for c in settings.eval_dataset).strip("-")
+    return RUNS / f"{slug}_{n_queries}", False
 
 
 def cached_run(
@@ -208,8 +254,14 @@ def main() -> None:
     if limit := int(os.environ.get("SSR_EVAL_LIMIT", "0")):  # smoke-test escape hatch
         queries = dict(list(queries.items())[:limit])
         qrels_dict = {q: v for q, v in qrels_dict.items() if q in queries}
+    out, canonical = _output_dir(limit, len(queries))
     n_judg = sum(len(v) for v in qrels_dict.values())
-    print(f"Eval set: {len(queries)} queries, {n_judg} relevance judgments")
+    print(
+        f"Eval set: {settings.eval_dataset}, {len(queries)} queries, "
+        f"{n_judg} relevance judgments"
+    )
+    if not canonical:
+        print(f"Non-canonical run (limit/dataset) — writing to {out}, not {OUT}")
     print(f"Rerank slice: top-{settings.rerank_candidates} of {DEPTH} fused candidates\n")
 
     service = SearchService()
@@ -239,11 +291,20 @@ def main() -> None:
     blob = report.to_dict()
     scores = {key: blob[key]["scores"] for key, *_ in CONFIGS}
 
-    OUT.mkdir(parents=True, exist_ok=True)
+    out.mkdir(parents=True, exist_ok=True)
     table = to_markdown(scores)
     sig_lines = _significance_markdown(blob)
-    (OUT / "retrieval.md").write_text(
-        f"# Retrieval evaluation — BEIR/SciFact ({len(common)} test queries)\n\n"
+    # The canonical header is kept verbatim so a rerun reproduces the committed file;
+    # any other run names its real dataset and size, so it can't pass for the headline.
+    title = (
+        f"BEIR/SciFact ({len(common)} test queries)"
+        if canonical
+        else f"{settings.eval_dataset} ({len(common)} queries"
+        + (f", SSR_EVAL_LIMIT={limit}" if limit else "")
+        + ", non-canonical)"
+    )
+    (out / "retrieval.md").write_text(
+        f"# Retrieval evaluation — {title}\n\n"
         f"{table}\n\n"
         f"Reranked slice: top-{settings.rerank_candidates} of {DEPTH} fused candidates "
         f"(the tail keeps its fused order, so Recall@100 is unchanged by reranking).\n\n"
@@ -251,7 +312,7 @@ def main() -> None:
         f"Paired two-sided Student's t-test on per-query nDCG@10, p < {MAX_P}.\n\n"
         f"{sig_lines}\n"
     )
-    (OUT / "retrieval.json").write_text(
+    (out / "retrieval.json").write_text(
         json.dumps(
             _json_safe(
                 {
@@ -274,7 +335,7 @@ def main() -> None:
     )
     print("\n" + table)
     print("\n" + sig_lines)
-    print(f"\nWrote {OUT/'retrieval.md'} and {OUT/'retrieval.json'}")
+    print(f"\nWrote {out/'retrieval.md'} and {out/'retrieval.json'}")
 
 
 def _significance_markdown(blob: dict) -> str:

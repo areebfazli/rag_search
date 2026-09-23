@@ -14,11 +14,15 @@ import Stemmer
 from app.core.config import settings
 from app.core.interfaces import SearchHit
 
+# PyStemmer's Stemmer object does not expose its algorithm name, so keep it here where
+# both the tokenizer and the index manifest (build_index) can read the same value.
+STEMMER_LANGUAGE = "english"
+
 
 class LexicalIndex:
     def __init__(self):
         self.retriever: bm25s.BM25 | None = None
-        self.stemmer = Stemmer.Stemmer("english")
+        self.stemmer = Stemmer.Stemmer(STEMMER_LANGUAGE)
         self.docs: list[dict] = []
 
     def build(self, docs: list[dict], texts: list[str]) -> None:
@@ -26,6 +30,21 @@ class LexicalIndex:
         self.retriever = bm25s.BM25()
         self.retriever.index(corpus_tokens)
         self.docs = docs
+
+    def describe(self) -> dict:
+        """What shaped this index, for data/index_manifest.json. The BM25 parameters
+        are read off the constructed retriever rather than restated, so a bm25s default
+        change shows up in the manifest instead of being silently misreported."""
+        r = self.retriever
+        return {
+            "bm25s_version": bm25s.__version__,
+            "stemmer": STEMMER_LANGUAGE,
+            "k1": r.k1,
+            "b": r.b,
+            "delta": r.delta,
+            "method": r.method,
+            "idf_method": r.idf_method,
+        }
 
     def save(self, path: str | None = None) -> None:
         p = Path(path or settings.bm25_path)

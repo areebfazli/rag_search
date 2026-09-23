@@ -126,3 +126,118 @@ def test_json_safe_replaces_non_finite_with_null():
 def test_json_safe_leaves_ordinary_values_alone():
     payload = {"a": 0.5, "b": [1, 2], "c": "text", "d": True, "e": None}
     assert re_mod._json_safe(payload) == payload
+
+
+# --- index manifest in the cache signature ---------------------------------
+
+
+@pytest.fixture()
+def manifest(tmp_path, monkeypatch):
+    path = tmp_path / "index_manifest.json"
+    monkeypatch.setattr(re_mod, "MANIFEST_PATH", path)
+    return path
+
+
+def _legacy_signature(mode, reranker, n_queries):
+    """The pre-manifest formula, restated on purpose: the existing data/eval_cache/
+    entries behind the committed tables are keyed by exactly this."""
+    import hashlib
+
+    payload = json.dumps(
+        {
+            "mode": mode,
+            "reranker": reranker,
+            "depth": re_mod.DEPTH,
+            "rerank_candidates": settings.rerank_candidates,
+            "rrf_k": settings.rrf_k,
+            "dataset": settings.eval_dataset,
+            "embedding_model": settings.embedding_model,
+            "embedding_query_prefix": settings.embedding_query_prefix,
+            "n_queries": n_queries,
+        },
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode()).hexdigest()[:16]
+
+
+def test_missing_manifest_keeps_the_legacy_signature(manifest):
+    # An index built before manifests existed must not silently invalidate hours of
+    # cached cross-encoder runs: the sentinel leaves the signature byte-identical.
+    assert not manifest.exists()
+    assert re_mod._index_fingerprint() is re_mod.NO_MANIFEST
+    for _, _, mode, reranker in re_mod.CONFIGS:
+        assert re_mod._signature(mode, reranker, 300) == _legacy_signature(mode, reranker, 300)
+
+
+def test_manifest_contents_are_part_of_the_signature(manifest):
+    legacy = re_mod._signature("hybrid", None, 3)
+    manifest.write_text('{"doc_count": 5183}')
+    first = re_mod._signature("hybrid", None, 3)
+    assert first != legacy
+    assert re_mod._signature("hybrid", None, 3) == first  # stable for identical bytes
+    manifest.write_text('{"doc_count": 5184}')  # a reindex of a different corpus
+    assert re_mod._signature("hybrid", None, 3) != first
+
+
+def test_reindex_invalidates_the_cache(cache, manifest):
+    manifest.write_text('{"embedding_model": "a"}')
+    _run(FakeService(), cache)
+    manifest.write_text('{"embedding_model": "b"}')
+    again = FakeService()
+    _run(again, cache)
+    assert again.calls == len(QUERIES)  # not served from the old index's cache
+
+
+# --- only the canonical run may write to eval/results ----------------------
+
+
+@pytest.fixture()
+def sandbox(tmp_path, monkeypatch, manifest):
+    """main() against fakes, with every output path redirected under tmp_path."""
+    out, runs, cache_dir = tmp_path / "results", tmp_path / "runs", tmp_path / "cache"
+    monkeypatch.setattr(re_mod, "OUT", out)
+    monkeypatch.setattr(re_mod, "RUNS", runs)
+    monkeypatch.setattr(re_mod, "CACHE", cache_dir)
+    monkeypatch.setattr(re_mod, "SearchService", FakeService)
+    # cached_run instantiates a real cross-encoder for the rerank configs; FakeService
+    # ignores it, and loading one would pull model weights (and fail offline in CI).
+    import app.rerank.cross_encoder as ce
+
+    monkeypatch.setattr(ce, "CrossEncoderReranker", lambda model: None)
+    qrels = {q: {f"doc{t}-0": 1} for q, t in QUERIES.items()}
+    monkeypatch.setattr(re_mod, "load_queries_qrels", lambda: (dict(QUERIES), qrels))
+    monkeypatch.setattr(settings, "eval_dataset", re_mod.CANONICAL_DATASET)
+    monkeypatch.delenv("SSR_EVAL_LIMIT", raising=False)
+    monkeypatch.delenv("SSR_EVAL_REFRESH", raising=False)
+    return out, runs
+
+
+def test_canonical_run_writes_to_results(sandbox):
+    out, runs = sandbox
+    re_mod.main()
+    assert (out / "retrieval.md").read_text().startswith(
+        f"# Retrieval evaluation — BEIR/SciFact ({len(QUERIES)} test queries)\n"
+    )
+    assert json.loads((out / "retrieval.json").read_text())["n_queries"] == len(QUERIES)
+    assert not runs.exists()
+
+
+def test_limited_run_never_touches_results(sandbox, monkeypatch):
+    out, runs = sandbox
+    monkeypatch.setenv("SSR_EVAL_LIMIT", "2")
+    re_mod.main()
+    assert not out.exists()
+    run_dir = runs / "beir-scifact-test_2"
+    header = (run_dir / "retrieval.md").read_text().splitlines()[0]
+    assert "beir/scifact/test (2 queries" in header
+    assert "SSR_EVAL_LIMIT=2" in header and "non-canonical" in header
+    assert json.loads((run_dir / "retrieval.json").read_text())["n_queries"] == 2
+
+
+def test_other_dataset_never_touches_results(sandbox, monkeypatch):
+    out, runs = sandbox
+    monkeypatch.setattr(settings, "eval_dataset", "beir/scifact/train")
+    re_mod.main()
+    assert not out.exists()
+    header = (runs / f"beir-scifact-train_{len(QUERIES)}" / "retrieval.md").read_text()
+    assert header.startswith(f"# Retrieval evaluation — beir/scifact/train ({len(QUERIES)} queries")
