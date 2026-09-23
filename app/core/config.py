@@ -76,6 +76,26 @@ class Settings(BaseSettings):
     llm_base_url: str = "https://api.groq.com/openai/v1"
     llm_model: str = "openai/gpt-oss-120b"
     llm_api_key: str = ""
+    # Completion budget per generation call (sent as `max_tokens`, the name Groq, Ollama
+    # and OpenAI chat models all honour). On a reasoning model the HIDDEN reasoning
+    # tokens are spent from this same budget before any answer text, so it must cover
+    # reasoning + a 2-4 sentence cited answer + the verdict line — the old 400 let
+    # gpt-oss-120b's default (medium) reasoning truncate 7 of 50 eval answers, two to
+    # empty strings. A reply that still hits the cap is retried once at 2x (see
+    # generator.LLMGenerator.generate).
+    llm_max_completion_tokens: int = Field(default=1024, ge=16)
+    # Reasoning effort, sent as `reasoning_effort` only when it resolves to a value:
+    #   "auto"     -> "medium" for gpt-oss models (Groq and Ollama both accept it), and NOT
+    #                 sent for any other model — a non-reasoning model can reject the
+    #                 unknown parameter with a 400, so swapping SSR_LLM_MODEL stays safe.
+    #   "" / "off" -> never sent.
+    #   any other  -> sent as-is to whatever model is configured (provider vocabularies
+    #                 differ: gpt-oss takes low|medium|high, qwen3 also none|default).
+    # "medium" (gpt-oss's own default) rather than "low": on a live spot check, "low"
+    # dropped the required Verdict line on a claim that "medium" answered correctly,
+    # and verdict compliance is scored. Medium's longer reasoning (~900 tokens seen) is
+    # why llm_max_completion_tokens is 1024 with a one-shot 2x retry, not the old 400.
+    llm_reasoning_effort: str = "auto"
     # RAG-eval judge. Deliberately a different model FAMILY from the generator, not just
     # a smaller size: same-family judging compounds shared preferences, and a separate
     # model also draws on a separate provider rate-limit bucket.

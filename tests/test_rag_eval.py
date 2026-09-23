@@ -22,7 +22,7 @@ from app.eval.rag_eval import (
     predicted_label,
     resolve_answered,
 )
-from app.generate.generator import split_verdict
+from app.generate.generator import GeneratedAnswer, split_verdict
 from app.ingest.corpus import ClaimLabel
 
 
@@ -286,7 +286,21 @@ class FakeGenerator:
 
     def generate(self, query, hits):
         text, verdict = split_verdict(REPLIES[query])  # the real parser, fake model
-        return Answer(text=text, citations=["d1"], hits=hits, verdict=verdict)
+        if query == "claim five":  # a plain Answer: another Generator, no side channel
+            return Answer(text=text, citations=["d1"], hits=hits, verdict=verdict)
+        # q4 is the reply still cut off after the retry (no verdict line, as observed).
+        truncated = query == "claim four"
+        return GeneratedAnswer(
+            text=text,
+            citations=["d1"],
+            hits=hits,
+            verdict=verdict,
+            finish_reason="length" if truncated else "stop",
+            completion_tokens=50,
+            reasoning_tokens=10,
+            attempts=2 if truncated else 1,
+            truncated=truncated,
+        )
 
 
 class FakeJudge:
@@ -346,6 +360,11 @@ def test_rag_json_keeps_every_scored_query(rag_run):
         "answer": "Supported [1].",  # verdict line stripped from the display text
         "cited_doc_ids": ["d1"],
         "retrieved_doc_ids": ["d1", "d2"],
+        "finish_reason": "stop",
+        "truncated": False,
+        "generation_attempts": 1,
+        "completion_tokens": 50,
+        "reasoning_tokens": 10,
     }
     assert rows["2"]["abstention_class"] == "answered_without_evidence"
     # NEI + rationale-free qrels doc retrieved: the two oracles disagree on this one.
@@ -355,6 +374,26 @@ def test_rag_json_keeps_every_scored_query(rag_run):
     assert rows["4"]["answered_source"] == "judge" and rows["4"]["predicted_label"] == "NEI"
     assert rows["4"]["abstention_class"] == "false_abstention"
     assert rows["5"]["predicted_label"] == rag_eval.NO_VERDICT
+    assert rows["4"]["truncated"] is True and rows["4"]["finish_reason"] == "length"
+    assert rows["4"]["generation_attempts"] == 2
+    # A Generator without the side channel still yields a well-formed row.
+    assert rows["5"]["finish_reason"] is None and rows["5"]["truncated"] is False
+    assert rows["5"]["generation_attempts"] == 1 and rows["5"]["completion_tokens"] is None
+
+
+def test_truncated_answers_are_counted_in_aggregates_and_markdown(rag_run):
+    path, blob, _ = rag_run
+    assert blob["truncated_answers"] == 1 and blob["retried_answers"] == 1
+    md = (path / "rag.md").read_text()
+    assert "1 answer truncated at the token budget" in md
+    assert "| Truncated answers (hit the token budget after 1 retry) | 1 of 5 |" in md
+    assert blob["run"]["generator_max_completion_tokens"] == settings.llm_max_completion_tokens
+    assert "generator_reasoning_effort" in blob["run"]
+
+
+def test_aggregate_tolerates_rows_without_generation_fields():
+    agg = aggregate([row(True, True)])  # rows predating the fields
+    assert agg["truncated_answers"] == 0 and agg["retried_answers"] == 0
 
 
 def test_rag_json_aggregates_both_oracles_and_verdicts(rag_run):

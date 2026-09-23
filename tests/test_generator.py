@@ -3,7 +3,14 @@ from types import SimpleNamespace
 import pytest
 
 from app.core.interfaces import SearchHit, hit_passage
-from app.generate.generator import LLMGenerator, map_citations, split_verdict
+from app.generate.generator import (
+    TRUNCATION_NOTE,
+    LLMGenerator,
+    map_citations,
+    normalize_citations,
+    resolve_reasoning_effort,
+    split_verdict,
+)
 from app.generate.prompts import SYSTEM, VERDICTS, _sanitize_question, build_user_prompt
 from app.schemas.api import AnswerResponse
 
@@ -134,19 +141,33 @@ def test_system_prompt_keeps_abstention_and_adds_optional_verdict():
 
 
 class _FakeCompletions:
-    def __init__(self, reply):
-        self.reply = reply
+    """Replays (content, finish_reason) replies in order and records every request."""
+
+    def __init__(self, reply, finish_reason="stop", usage=None):
+        self.replies = reply if isinstance(reply, list) else [(reply, finish_reason)]
+        self.usage = usage
         self.calls = 0
+        self.requests: list[dict] = []
 
     def create(self, **kw):
+        self.requests.append(kw)
+        content, finish = self.replies[min(self.calls, len(self.replies) - 1)]
         self.calls += 1
-        msg = SimpleNamespace(content=self.reply)
-        return SimpleNamespace(choices=[SimpleNamespace(message=msg)])
+        msg = SimpleNamespace(content=content)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=msg, finish_reason=finish)], usage=self.usage
+        )
 
 
-def _generator(reply):
-    gen = LLMGenerator(model="m", base_url="http://localhost:1", api_key="k")
-    gen.client = SimpleNamespace(chat=SimpleNamespace(completions=_FakeCompletions(reply)))
+def _generator(reply, model="m", reasoning_effort="", max_completion_tokens=None, **fake_kw):
+    gen = LLMGenerator(
+        model=model,
+        base_url="http://localhost:1",
+        api_key="k",
+        max_completion_tokens=max_completion_tokens,
+        reasoning_effort=reasoning_effort,
+    )
+    gen.client = SimpleNamespace(chat=SimpleNamespace(completions=_FakeCompletions(reply, **fake_kw)))
     return gen
 
 
@@ -173,3 +194,99 @@ def test_answer_response_verdict_is_optional():
     r = AnswerResponse(query="q", answer="a", citations=[], hits=[])
     assert r.verdict is None
     assert AnswerResponse(query="q", answer="a", citations=[], hits=[], verdict="REFUTED").verdict
+
+
+# --- token budget, truncation, reasoning params ------------------------------
+
+
+def _usage(completion, reasoning=None):
+    details = None if reasoning is None else SimpleNamespace(reasoning_tokens=reasoning)
+    return SimpleNamespace(completion_tokens=completion, completion_tokens_details=details)
+
+
+def test_generate_sends_the_configured_budget_and_reports_usage():
+    gen = _generator("Yes [1].", max_completion_tokens=900, usage=_usage(120, 40))
+    ans = gen.generate("q", _hits(2))
+    assert gen.client.chat.completions.requests[0]["max_tokens"] == 900
+    assert (ans.finish_reason, ans.completion_tokens, ans.reasoning_tokens) == ("stop", 120, 40)
+    assert ans.attempts == 1 and ans.truncated is False
+
+
+def test_generate_tolerates_a_provider_without_usage():
+    ans = _generator("Yes [1].").generate("q", _hits(2))  # usage=None, as some backends do
+    assert ans.completion_tokens is None and ans.reasoning_tokens is None
+
+
+def test_length_finish_is_retried_once_with_a_larger_budget():
+    # The observed failure: reasoning ate the budget, the reply stopped mid-sentence.
+    replies = [("The context reports", "length"), ("Refuted [2].\nVerdict: REFUTED", "stop")]
+    gen = _generator(replies, max_completion_tokens=500)
+    ans = gen.generate("claim", _hits(3))
+    reqs = gen.client.chat.completions.requests
+    assert [r["max_tokens"] for r in reqs] == [500, 1000]
+    assert ans.attempts == 2 and ans.finish_reason == "stop" and ans.truncated is False
+    assert ans.verdict == "REFUTED" and ans.text == "Refuted [2]."
+
+
+def test_still_truncated_after_retry_is_flagged_not_passed_off_as_whole():
+    gen = _generator([("It reduces risk [1] but", "length")] * 2)
+    ans = gen.generate("claim", _hits(2))
+    assert gen.client.chat.completions.calls == 2  # exactly one retry, no more
+    assert ans.truncated is True and ans.finish_reason == "length" and ans.verdict is None
+    assert ans.text == f"It reduces risk [1] but\n\n{TRUNCATION_NOTE}"
+    assert ans.citations == ["doc0"]  # what WAS written still maps
+
+
+def test_empty_truncated_reply_is_never_served_as_an_empty_answer():
+    ans = _generator([("", "length")] * 2).generate("claim", _hits(2))
+    assert ans.text == TRUNCATION_NOTE and ans.citations == [] and ans.truncated
+
+
+@pytest.mark.parametrize(
+    ("model", "setting", "expected"),
+    [
+        ("openai/gpt-oss-120b", "auto", "medium"),  # the default backend
+        ("gpt-oss:20b", "auto", "medium"),  # Ollama's tag for the same family
+        ("llama-3.3-70b-versatile", "auto", None),  # may 400 on the param: never sent
+        ("qwen3:4b", "auto", None),
+        ("openai/gpt-oss-120b", "", None),
+        ("openai/gpt-oss-120b", "off", None),
+        ("openai/gpt-oss-120b", "High", "high"),  # explicit: sent as-is
+        ("some-reasoning-model", "medium", "medium"),
+    ],
+)
+def test_resolve_reasoning_effort(model, setting, expected):
+    assert resolve_reasoning_effort(model, setting) == expected
+
+
+def test_reasoning_effort_sent_only_when_enabled():
+    on = _generator("Yes [1].", model="openai/gpt-oss-120b", reasoning_effort="auto")
+    on.generate("q", _hits(1))
+    assert on.client.chat.completions.requests[0]["extra_body"] == {"reasoning_effort": "medium"}
+    # A non-gpt-oss model (e.g. Groq llama, or Ollama qwen) must not see the key at all —
+    # not even as null — since an unknown parameter can be rejected with a 400.
+    for model, effort in [("llama-3.3-70b-versatile", "auto"), ("openai/gpt-oss-120b", "")]:
+        off = _generator("Yes [1].", model=model, reasoning_effort=effort)
+        off.generate("q", _hits(1))
+        req = off.client.chat.completions.requests[0]
+        assert "extra_body" not in req and "reasoning_effort" not in req
+
+
+# --- fullwidth citation markers ------------------------------------------------
+
+
+def test_normalize_citations_rewrites_fullwidth_markers():
+    assert normalize_citations("A 【2】 B ［3］ C 【1†L4-L9】 D ［２］") == "A [2] B [3] C [1] D [2]"
+    assert normalize_citations("plain [1] stays") == "plain [1] stays"
+    assert normalize_citations(normalize_citations("【2】")) == "[2]"  # idempotent
+
+
+def test_map_citations_handles_fullwidth_and_keeps_range_check():
+    assert map_citations("A 【2】 and ［9］ and [1]", _hits(3)) == ["doc0", "doc1"]
+
+
+def test_generate_normalizes_fullwidth_citations_and_still_parses_verdict():
+    ans = _generator("Refuted by the trial 【2】【3】.\nVerdict: REFUTED").generate("claim", _hits(3))
+    assert ans.text == "Refuted by the trial [2][3]."  # displayed text normalised too
+    assert ans.citations == ["doc1", "doc2"]
+    assert ans.verdict == "REFUTED"

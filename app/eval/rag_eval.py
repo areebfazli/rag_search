@@ -30,9 +30,10 @@ Generator and judge use different models (separate Groq rate-limit buckets), wit
 throttle so the run stays under the free-tier limits.
 
 Alongside the aggregates, rag.json keeps every scored query (gold label, rationale
-docs, verdict, both evidence flags, answer text, citations) and the run's provenance
-(prompt hashes, git SHA, models, seed, oracle definition, label source), so a published
-number can be traced back to the exact answers and prompts behind it.
+docs, verdict, both evidence flags, answer text, citations, and how generation ended:
+finish_reason, token usage, retries) and the run's provenance (prompt hashes, git SHA,
+models, generator budget, seed, oracle definition, label source), so a published number
+can be traced back to the exact answers and prompts behind it.
 
 Run:
     uv run python -m app.eval.rag_eval
@@ -52,7 +53,7 @@ from openai import OpenAI
 
 from app.core.config import Settings, settings
 from app.core.interfaces import SearchHit, hit_passage
-from app.generate.generator import LLMGenerator
+from app.generate.generator import LLMGenerator, resolve_reasoning_effort
 from app.generate.prompts import SYSTEM, VERDICTS, build_user_prompt
 from app.ingest.corpus import (
     ClaimLabel,
@@ -299,6 +300,12 @@ def run_metadata() -> dict:
         "prompt_hash": prompt_hash(),
         "judge_prompt_hash": _sha256(JUDGE_SYSTEM),
         "generator_model": GEN_MODEL,
+        # The generator's budget and reasoning effort decide whether answers truncate
+        # (a truncated reply carries no verdict), so they are part of what a number means.
+        "generator_max_completion_tokens": settings.llm_max_completion_tokens,
+        "generator_reasoning_effort": resolve_reasoning_effort(
+            GEN_MODEL, settings.llm_reasoning_effort
+        ),
         "judge_model": JUDGE_MODEL,
         "mode": MODE,
         "reranker_model": reranker_in_effect(MODE),
@@ -386,6 +393,11 @@ def aggregate(rows: list[dict]) -> dict:
         # it instead — how often the judge would have agreed. Low agreement is the
         # ambiguity the verdict line exists to remove.
         "judge_answered_fallbacks": sum(r["answered_source"] == "judge" for r in rows),
+        # Replies still cut off at the token budget after the generator's one retry, and
+        # how many needed that retry. A truncated reply has no verdict line, so a nonzero
+        # count here depresses verdict accuracy for reasons unrelated to the model's call.
+        "truncated_answers": sum(bool(r.get("truncated")) for r in rows),
+        "retried_answers": sum((r.get("generation_attempts") or 1) > 1 for r in rows),
         "judge_verdict_agreement": _rate(
             sum(r["judge_answered"] == r["answered"] for r in with_verdict), len(with_verdict)
         ),
@@ -444,6 +456,11 @@ def _markdown(agg: dict, skipped: int, parse_failures: int) -> str:
         notes.append(
             f"{parse_failures} judge repl{'y' if parse_failures == 1 else 'ies'} unparseable"
         )
+    if truncated := agg.get("truncated_answers", 0):
+        notes.append(
+            f"{truncated} answer{'' if truncated == 1 else 's'} truncated at the token budget "
+            f"(scored as written, with no verdict line)"
+        )
     note_line = f"\n{'; '.join(notes)}.\n" if notes else ""
     k = agg["top_k"]
     cols = (*LABELS, NO_VERDICT)
@@ -471,7 +488,9 @@ def _markdown(agg: dict, skipped: int, parse_failures: int) -> str:
         f"`{NO_VERDICT}` (always wrong) if it answered.\n\n"
         f"| Metric | Score |\n|---|---|\n"
         f"| 3-class verdict accuracy | {_fmt(agg['verdict_accuracy'])} |\n"
-        f"| Verdict line parsed | {_fmt(agg['verdict_parsed_rate'])} |\n\n"
+        f"| Verdict line parsed | {_fmt(agg['verdict_parsed_rate'])} |\n"
+        f"| Truncated answers (hit the token budget after 1 retry) | "
+        f"{agg['truncated_answers']} of {agg['n']} |\n\n"
         f"| Gold \\ predicted | " + " | ".join(cols) + " |\n|---|" + "---|" * len(cols) + "\n"
         f"{confusion}\n"
         f"## Abstention — rationale oracle (headline)\n\n"
@@ -595,6 +614,13 @@ def main() -> None:
                 "answer": ans.text,
                 "cited_doc_ids": ans.citations,
                 "retrieved_doc_ids": [h.doc_id for h in hits],
+                # How the generation call ended (GeneratedAnswer side channel; a plain
+                # Answer from another Generator records None / 1 / False).
+                "finish_reason": getattr(ans, "finish_reason", None),
+                "truncated": bool(getattr(ans, "truncated", False)),
+                "generation_attempts": getattr(ans, "attempts", 1),
+                "completion_tokens": getattr(ans, "completion_tokens", None),
+                "reasoning_tokens": getattr(ans, "reasoning_tokens", None),
             }
         )
         r = rows[-1]
@@ -602,7 +628,8 @@ def main() -> None:
             f"  [{n}/{len(qids)}] q{qid:>4} {label.label:<10} -> {r['predicted_label']:<10} "
             f"{'answered' if answered else 'abstain '}({answered_source[0]}) "
             f"{'eR' if f['evidence'] else '--'}{'eQ' if f['evidence_qrels'] else '--'} "
-            f"faith={s['faithfulness']:.2f} ctx={s['context_relevance']:.2f}  {q[:40]}",
+            f"faith={s['faithfulness']:.2f} ctx={s['context_relevance']:.2f}"
+            f"{'  TRUNCATED' if r['truncated'] else ''}  {q[:40]}",
             flush=True,
         )
         time.sleep(THROTTLE_S)
@@ -632,7 +659,8 @@ def main() -> None:
         f"abstention_precision={agg['abstention_precision']} "
         f"(qrels: {agg['qrels_oracle']['abstention_precision']})  "
         f"faithfulness={agg['faithfulness_answered']}  ctx={agg['context_relevance']}  "
-        f"judge_answered_fallbacks={agg['judge_answered_fallbacks']}"
+        f"judge_answered_fallbacks={agg['judge_answered_fallbacks']}  "
+        f"truncated={agg['truncated_answers']} (retried {agg['retried_answers']})"
     )
     print(f"Wrote {OUT/'rag.md'} and {OUT/'rag.json'}")
 

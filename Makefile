@@ -1,4 +1,4 @@
-.PHONY: install index api eval eval-rag analysis test lint ci
+.PHONY: install index api eval eval-rag analysis latency test lint ci
 
 install:  ## create env + install deps
 	uv sync
@@ -14,6 +14,9 @@ eval:  ## reproduce the retrieval metrics table
 
 analysis:  ## label-stratified re-score of the cached eval runs -> eval/results/analysis.{md,json}
 	uv run --locked python -m app.eval.analysis
+
+latency:  ## per-query retrieval latency for every eval config -> eval/results/latency.{md,json}
+	uv run --locked python -m app.eval.latency
 
 eval-rag:  ## RAG answer-quality eval (needs SSR_LLM_API_KEY in .env)
 	uv run python -m app.eval.rag_eval
