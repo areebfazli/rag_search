@@ -21,3 +21,7 @@ class AnswerResponse(BaseModel):
     answer: str
     citations: list[str]
     hits: list[Hit]
+    # Additive + optional, so existing clients are unaffected. Set only when the input
+    # was a claim and the model ended with a well-formed verdict line (which is then
+    # stripped from `answer`): SUPPORTED | REFUTED | NOT ENOUGH EVIDENCE.
+    verdict: str | None = None

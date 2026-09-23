@@ -24,11 +24,23 @@ def _sanitize_question(query: str) -> str:
     """
     return _QUOTE_RUN.sub('"', _WHITESPACE_RUN.sub(" ", query)).strip()
 
+# The allowed values of the optional verdict line; generator.split_verdict parses it.
+VERDICTS = ("SUPPORTED", "REFUTED", "NOT ENOUGH EVIDENCE")
+
+# One product prompt serves both input shapes /answer sees: questions, and declarative
+# claims (every SciFact eval input is one). The verdict line is an optional structured
+# tail, not a mode switch — for a question it is omitted and the prompt behaves as a
+# plain grounded-QA prompt, so the eval still measures what the product serves.
 SYSTEM = (
     "You are a careful scientific assistant. Answer the user's question using ONLY the "
     "provided context passages. Cite every claim with bracketed passage numbers like [1] or "
     "[2][3]. If the context does not contain enough information to answer, say so explicitly "
-    "instead of guessing. Keep the answer to 2-4 sentences."
+    "instead of guessing. Keep the answer to 2-4 sentences.\n"
+    "If the user's input is a statement to check (a claim) rather than a question, say "
+    "whether the context supports or refutes it, then end with one final line that is "
+    "exactly one of: 'Verdict: SUPPORTED', 'Verdict: REFUTED', 'Verdict: NOT ENOUGH "
+    "EVIDENCE'. Use NOT ENOUGH EVIDENCE whenever the context neither supports nor refutes "
+    "the claim. For an ordinary question, do not add a verdict line."
 )
 
 

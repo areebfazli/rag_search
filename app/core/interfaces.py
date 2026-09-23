@@ -32,6 +32,10 @@ class Answer:
     text: str
     citations: list[str]
     hits: list[SearchHit]
+    # Machine-readable claim verdict ("SUPPORTED" | "REFUTED" | "NOT ENOUGH EVIDENCE"),
+    # parsed from the optional final line the prompt asks for when the input is a
+    # claim. None for ordinary questions, or when the line is missing or malformed.
+    verdict: str | None = None
 
 
 @runtime_checkable

@@ -156,4 +156,6 @@ def answer(
         ans = get_generator().generate(q, hits)  # network call — safe outside the lock
     except OpenAIError as e:  # bad key, model gone, provider down — not a server bug
         raise HTTPException(status_code=502, detail=f"LLM backend error: {type(e).__name__}")
-    return AnswerResponse(query=q, answer=ans.text, citations=ans.citations, hits=_to_hits(hits))
+    return AnswerResponse(
+        query=q, answer=ans.text, citations=ans.citations, hits=_to_hits(hits), verdict=ans.verdict
+    )

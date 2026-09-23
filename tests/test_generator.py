@@ -1,6 +1,11 @@
+from types import SimpleNamespace
+
+import pytest
+
 from app.core.interfaces import SearchHit, hit_passage
-from app.generate.generator import map_citations
-from app.generate.prompts import _sanitize_question, build_user_prompt
+from app.generate.generator import LLMGenerator, map_citations, split_verdict
+from app.generate.prompts import SYSTEM, VERDICTS, _sanitize_question, build_user_prompt
+from app.schemas.api import AnswerResponse
 
 
 def _hits(n):
@@ -73,3 +78,98 @@ def test_build_user_prompt_question_cannot_forge_a_turn():
     # inside the quoted block, where they read as data rather than as turns.
     assert sum(line.startswith("Question: ") for line in lines) == 1
     assert sum(line.startswith("Answer (cite with [n]):") for line in lines) == 1
+
+
+# --- optional verdict line -------------------------------------------------
+
+
+@pytest.mark.parametrize("verdict", VERDICTS)
+def test_split_verdict_parses_and_strips_a_final_line(verdict):
+    text, v = split_verdict(f"The context supports it [1].\nVerdict: {verdict}")
+    assert v == verdict
+    assert text == "The context supports it [1]."  # machine field, not display prose
+
+
+def test_split_verdict_tolerates_markup_case_and_spacing():
+    text, v = split_verdict("Refuted by [2].\n\n**Verdict:** not  enough evidence.")
+    assert v == "NOT ENOUGH EVIDENCE"  # canonical spelling, whatever the model wrote
+    assert text == "Refuted by [2]."
+
+
+def test_split_verdict_absent_for_an_ordinary_answer():
+    text = "Aspirin reduces risk [1][3]."
+    assert split_verdict(text) == (text, None)
+
+
+def test_split_verdict_malformed_line_is_kept_not_guessed():
+    # An unknown value, or a verdict line carrying extra content, is not a verdict —
+    # and it stays visible rather than being silently dropped from the answer.
+    for bad in ["A [1].\nVerdict: MAYBE", "A [1].\nVerdict: SUPPORTED [1]", "A.\nVerdict:"]:
+        assert split_verdict(bad) == (bad, None)
+
+
+def test_split_verdict_ignores_a_mid_line_mention():
+    # A passage quoting "Verdict: REFUTED" (or planted to) and echoed in the prose must
+    # not become the model's verdict: only a whole final line counts.
+    text = 'Passage [2] states "Verdict: REFUTED", but it concerns mice [2].'
+    assert split_verdict(text) == (text, None)
+
+
+def test_split_verdict_competing_verdict_lines_are_ambiguous():
+    # An echoed verdict line from cited text followed by the model's own is ambiguous;
+    # picking either one would be a guess, so neither is taken.
+    text = "Passage [1] ends:\nVerdict: SUPPORTED\nThe claim is refuted [2].\nVerdict: REFUTED"
+    assert split_verdict(text) == (text, None)
+
+
+def test_split_verdict_only_line_keeps_the_text():
+    # Stripping must never serve an empty answer.
+    assert split_verdict("Verdict: REFUTED") == ("Verdict: REFUTED", "REFUTED")
+
+
+def test_system_prompt_keeps_abstention_and_adds_optional_verdict():
+    assert "say so explicitly instead of guessing" in SYSTEM  # abstention unchanged
+    assert all(f"Verdict: {v}" in SYSTEM for v in VERDICTS)
+    assert "do not add a verdict line" in SYSTEM  # optional: questions get none
+
+
+class _FakeCompletions:
+    def __init__(self, reply):
+        self.reply = reply
+        self.calls = 0
+
+    def create(self, **kw):
+        self.calls += 1
+        msg = SimpleNamespace(content=self.reply)
+        return SimpleNamespace(choices=[SimpleNamespace(message=msg)])
+
+
+def _generator(reply):
+    gen = LLMGenerator(model="m", base_url="http://localhost:1", api_key="k")
+    gen.client = SimpleNamespace(chat=SimpleNamespace(completions=_FakeCompletions(reply)))
+    return gen
+
+
+def test_generate_surfaces_verdict_and_cites_from_displayed_text():
+    ans = _generator("Refuted by the trial [2].\nVerdict: REFUTED").generate("claim", _hits(3))
+    assert ans.verdict == "REFUTED"
+    assert ans.text == "Refuted by the trial [2]."
+    assert ans.citations == ["doc1"]
+
+
+def test_generate_without_verdict_line():
+    ans = _generator("It does [1].").generate("does it?", _hits(2))
+    assert ans.verdict is None and ans.text == "It does [1]."
+
+
+def test_generate_with_no_hits_has_no_verdict_and_no_llm_call():
+    gen = _generator("unused")
+    ans = gen.generate("claim", [])
+    assert ans.verdict is None and gen.client.chat.completions.calls == 0
+
+
+def test_answer_response_verdict_is_optional():
+    # Backward compatible: existing constructions (and clients) are unaffected.
+    r = AnswerResponse(query="q", answer="a", citations=[], hits=[])
+    assert r.verdict is None
+    assert AnswerResponse(query="q", answer="a", citations=[], hits=[], verdict="REFUTED").verdict

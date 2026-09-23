@@ -7,7 +7,7 @@
   <style>
     :root {
       --bg: #0f1117; --panel: #171a23; --panel-2: #1e222d; --border: #2a2f3a;
-      --text: #e6e8ee; --muted: #9aa3b2; --accent: #6ea8fe; --accent-2: #7ee2b8;
+      --text: #e6e8ee; --muted: #9aa3b2; --accent: #6ea8fe; --accent-2: #7ee2b8; --danger: #f28b82;
     }
     * { box-sizing: border-box; }
     body {
@@ -46,6 +46,13 @@
     }
     .answer { border-color: #33513f; background: #14201a; }
     .answer .label { color: var(--accent-2); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; margin-bottom: 6px; }
+    .verdict-pill {
+      display: inline-block; margin-left: 8px; padding: 2px 9px; border-radius: 999px;
+      font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; vertical-align: 1px;
+    }
+    .verdict-pill.supported { color: var(--accent-2); background: rgba(126, 226, 184, .15); border: 1px solid rgba(126, 226, 184, .4); }
+    .verdict-pill.refuted { color: var(--danger); background: rgba(242, 139, 130, .15); border: 1px solid rgba(242, 139, 130, .4); }
+    .verdict-pill.nei { color: var(--muted); background: rgba(154, 163, 178, .15); border: 1px solid rgba(154, 163, 178, .35); }
     .answer .body { font-size: 15.5px; }
     .answer .sources { color: var(--muted); font-size: 13px; margin-top: 10px; }
     .cite { color: var(--accent-2); font-weight: 600; }
@@ -101,6 +108,25 @@
     function esc(s) { const d = document.createElement('div'); d.textContent = s ?? ''; return d.innerHTML; }
     function citeMarkup(s) { return esc(s).replace(/\[(\d+)\]/g, '<span class="cite">[$1]</span>'); }
 
+    // Whitelist of known verdict values -> {label, cls}. Anything else (including
+    // null/undefined/unrecognized strings) renders no pill. The raw verdict string
+    // is only ever used as a lookup key here, never inserted into the DOM.
+    const VERDICTS = {
+      SUPPORTED: { label: 'Supported', cls: 'supported' },
+      REFUTED: { label: 'Refuted', cls: 'refuted' },
+      'NOT ENOUGH EVIDENCE': { label: 'Not Enough Evidence', cls: 'nei' },
+    };
+
+    function buildVerdictPill(verdict) {
+      if (!Object.prototype.hasOwnProperty.call(VERDICTS, verdict)) return null;
+      const v = VERDICTS[verdict];
+      const span = document.createElement('span');
+      span.className = `verdict-pill ${v.cls}`;
+      span.textContent = v.label;
+      span.setAttribute('aria-label', `Verdict: ${v.label}`);
+      return span;
+    }
+
     function renderHits(hits) {
       resultsEl.innerHTML = hits.map((h, i) => `
         <div class="card">
@@ -153,6 +179,8 @@
             <div class="body">${citeMarkup(data.answer)}</div>
             <div class="sources">Cited sources: ${data.citations.length ? data.citations.map(esc).map(c => 'doc ' + c).join(', ') : '—'}</div>
           </div>`;
+        const pill = buildVerdictPill(data.verdict);
+        if (pill) answerEl.querySelector('.label').appendChild(pill);
         renderHits(data.hits);
       } catch (err) { statusEl.textContent = `Error: ${err.message}`; }
       finally { go.disabled = ask.disabled = false; }

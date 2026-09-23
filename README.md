@@ -1,9 +1,29 @@
 # Semantic Search with RAG Engine
 
+[![CI](https://github.com/areebfazli/rag_search/actions/workflows/ci.yml/badge.svg)](https://github.com/areebfazli/rag_search/actions/workflows/ci.yml)
+
 Hybrid retrieval (**BM25 + dense embeddings**, fused with Reciprocal Rank Fusion) and grounded
 **RAG** answers, with an evaluation harness that measures every stage on **gold relevance
 labels** and paired significance tests, including two cross-encoder rerankers that, measured,
 did not earn their place in the pipeline.
+
+![Search UI: hybrid (RRF) results for "Vitamin D deficiency is associated with increased risk of multiple sclerosis" over 5,183 SciFact abstracts](docs/ui.png)
+
+## Results at a glance
+
+BEIR/SciFact, 300 test queries, gold qrels. Bold is best per column.
+
+| Config | nDCG@10 | Recall@100 |
+|---|---|---|
+| BM25 | 0.6863 | 0.9127 |
+| Dense (bge-small) | 0.7127 | 0.9417 |
+| **Hybrid (RRF)**, default | 0.7241 | **0.9650** |
+| Hybrid + rerank (MS-MARCO MiniLM) | 0.6975 | **0.9650** |
+| Hybrid + rerank (bge-reranker-base) | **0.7242** | **0.9650** |
+
+MRR@10, MAP@100 and the per-comparison significance tests are in
+[`eval/results/retrieval.md`](eval/results/retrieval.md); what the numbers mean is in
+[Findings](#evaluation-headline-artifact) below.
 
 ## Pipeline
 
@@ -33,32 +53,18 @@ Measured below, and on this corpus it does not improve ranking, so it is off by 
 
 ## Evaluation (headline artifact)
 
-Measured on BEIR/SciFact: 300 test queries, gold relevance judgments (`uv run python -m app.eval.retrieval_eval`):
+Measured on BEIR/SciFact: 300 test queries, gold relevance judgments (`make eval`; the table is
+[above](#results-at-a-glance)). Point estimates invite over-reading, so every claim below is
+backed by a **paired two-sided t-test on per-query nDCG@10** (300 pairs), reported as Δ, p, and
+per-query win/tie/loss. The full per-comparison table is committed in
+[`eval/results/retrieval.md`](eval/results/retrieval.md#significance), and the label-stratified
+re-score behind Finding 1 in [`eval/results/analysis.md`](eval/results/analysis.md).
 
-| Config | nDCG@10 | Recall@100 | MRR@10 | MAP@100 |
-|---|---|---|---|---|
-| BM25 | 0.6863 | 0.9127 | 0.6492 | 0.6439 |
-| Dense (bge-small) | 0.7127 | 0.9417 | 0.6822 | 0.6736 |
-| **Hybrid (RRF)**, default | 0.7241 | **0.9650** | 0.6886 | 0.6816 |
-| Hybrid + rerank (MS-MARCO MiniLM) | 0.6975 | **0.9650** | 0.6632 | 0.6558 |
-| Hybrid + rerank (bge-reranker-base) | **0.7242** | **0.9650** | **0.6901** | **0.6834** |
-
-Point estimates invite over-reading, so every claim below is backed by a **paired two-sided
-t-test on per-query nDCG@10** (300 pairs), reported as Δ, p, and per-query win/tie/loss:
-
-| Comparison | Δ nDCG@10 | p | W/T/L | Significant (p<0.05) |
-|---|---|---|---|---|
-| Hybrid vs BM25 | +0.0378 | 0.0007 | 72/202/26 | **yes** |
-| Hybrid vs Dense | +0.0114 | 0.2578 | 53/213/34 | no |
-| Rerank (MiniLM) vs Hybrid | −0.0266 | 0.0555 | 45/192/63 | no |
-| Rerank (bge) vs Hybrid | +0.0001 | 0.9964 | 48/196/56 | no |
-| Rerank (bge) vs Rerank (MiniLM) | +0.0266 | 0.0376 | 65/190/45 | **yes** |
-
-Six tests are reported here (the five above plus Recall@100 in Finding 1), and none are
-corrected for multiple comparisons. Bonferroni at α = 0.05 would set the bar at p ≈ 0.008, which
-only hybrid-vs-BM25 clears, so treat the two results at p ≈ 0.035–0.038 as suggestive. The
-load-bearing conclusions below are the *null* ones, which correction only strengthens; p = 0.996
-is not a near-miss.
+Six tests are reported here (the five in that significance table plus Recall@100 in Finding 1),
+and none are corrected for multiple comparisons. Bonferroni at α = 0.05 would set the bar at
+p ≈ 0.008, which only hybrid-vs-BM25 clears, so treat the two results at p ≈ 0.035–0.038 as
+suggestive. The load-bearing conclusions below are the *null* ones, which correction only
+strengthens; p = 0.996 is not a near-miss.
 
 **Findings.**
 
@@ -67,7 +73,16 @@ is not a near-miss.
 53/213/34). Where fusion does separate from dense is **Recall@100: 0.942 → 0.965 (p = 0.035,
 W/T/L 9/289/2)**, and that, not top-10 ordering, is the reason to keep it: a fuller candidate
 pool for the stages downstream. On 11 discordant queries out of 300, that is the right call on
-this evidence rather than a settled one.
+this evidence rather than a settled one.[^rrf]
+
+Stratified by SciFact's claim labels ([`eval/results/analysis.md`](eval/results/analysis.md)),
+that recall gain is **entirely on NEI claims**, the 112 of 300 where annotators found no rationale
+in any abstract but BEIR's qrels still mark the cited one relevant. All 11 discordant queries are
+NEI: hybrid gains +0.0625 Recall@100 there (p = 0.034, W/T/L 9/101/2). On the 188
+evidence-bearing (SUPPORT/CONTRADICT) claims, hybrid and dense are identical at Recall@100 on
+every query (0.9947 against rationale docs), and nDCG@10 differs by +0.0003 (p = 0.977). So the
+fuller pool is fuller in abstracts that carry no evidence: fusion does not retrieve more
+supporting or refuting evidence than dense alone on this corpus.
 
 **2. Neither cross-encoder reranker paid off.** The CPU-default MS-MARCO MiniLM, trained on
 short web queries, *costs* 0.027 nDCG@10 against plain hybrid (p = 0.056, W/T/L 45/192/63). The
@@ -90,6 +105,15 @@ also caps the damage a bad reranker can do: MiniLM scored 0.6715 reordering all 
 candidates versus 0.6975 over 32, having fewer chances to promote a bad document into the top
 10.[^depth]
 
+[^rrf]: RRF is insensitive to its k on this data: for k ∈ {1, 2, 5, 10, 20, 100}, nDCG@10 moves
+by at most 0.0046 against the default k = 60 (all p ≥ 0.19), and Recall@100 stays at 0.965 on
+every query. No fusion of these two pools could raise it much: only 3 of the 11 misses are in
+either retriever's top-100, a ceiling of 0.975. Weighting dense at 0.3 or 0.7 instead of equally
+gains no significant nDCG@10 (-0.0096, p = 0.18; +0.0034, p = 0.50) and costs recall: 0.928 at
+0.3 dense (p = 0.002), 0.952 at 0.7 (p = 0.16). The numbers are an offline replay of the cached
+top-100 lists, verified to reproduce the committed hybrid run exactly, in §4 of
+[`eval/results/analysis.md`](eval/results/analysis.md#4-rrf-sensitivity-offline-replay).
+
 [^depth]: A point estimate from the previous committed run at full depth (same model, corpus and
 fusion, with the BM25/dense/hybrid rows bit-identical), not a row in the current table. Reproduce
 with `SSR_RERANK_CANDIDATES=100 uv run python -m app.eval.retrieval_eval`.
@@ -105,7 +129,8 @@ For example, `/answer?q=Can aspirin reduce the risk of colorectal cancer?`:
 are **scored against the gold qrels rather than assumed correct**. Generator = Groq
 `llama-3.3-70b-versatile`, judge = `llama-3.1-8b-instant`, a separate, lighter model, so it
 isn't grading its own output. Random 50-claim sample (seed 13); 49 scored, 1 skipped on a
-pipeline error, counted and reported rather than silently dropped (`eval/results/rag.md`).
+pipeline error, counted and reported rather than silently dropped
+([`eval/results/rag.md`](eval/results/rag.md)).
 
 | Metric | Score |
 |---|---|
@@ -139,14 +164,46 @@ the answers it does give is solid at 0.83.
 (That old 0.50 also came from the first 10 query ids in dataset order: a head slice, not a
 sample. The harness now takes a seeded random sample and re-runs at any size via `make eval-rag`.)
 
+## Limitations
+
+- **300 queries bound what can be detected.** For hybrid vs dense, the minimum detectable effect
+  at 80% power (α = 0.05, paired) is ≈ 0.028 nDCG@10 and ≈ 0.031 Recall@100. The nulls above
+  rule out large effects, not small ones.
+- **Recall@100 has a ceiling fusion cannot move.** 8 of the 11 gold docs hybrid misses are in
+  neither retriever's top-100, so no fusion rule over these two candidate pools could recover
+  them ([`eval/results/analysis.md`](eval/results/analysis.md), §3).
+- **NEI labelling.** For the 112 NEI claims, BEIR's qrels mark the cited abstract relevant even
+  though annotators found no rationale in it, and the whole hybrid-vs-dense recall gain sits on
+  that stratum (Finding 1).
+- **The RAG eval is small.** N = 50 claims (49 scored), so every rate in that table rests on a
+  few dozen answers, and three of the four 2×2 cells on single digits.
+- **The LLM judge is single-sample and shares a model family with the generator.** Each answer is
+  judged once, and `llama-3.1-8b-instant` is a different, smaller model than the generator but
+  still Llama, so shared-family bias is not ruled out.
+- **Latency numbers are console-only.** The 7.5 s / 32.3 s / ~0.2 s per-query figures come from
+  the eval run's console output and are not in a committed artifact.
+
+## What I'd do next
+
+- **Rationale-doc abstention oracle + structured verdict** (in progress): score abstention
+  against SciFact's rationale docs rather than qrels, and have the generator end a claim's answer
+  with a structured verdict (supported / refuted / not enough evidence) alongside its citations.
+- **A judge from a different model family**, so the answer-quality numbers do not rest on Llama
+  grading Llama.
+- **Persist per-query latency** into the committed eval results, so the reranker cost claim is
+  reproducible from an artifact rather than a console log.
+- **Stratified reporting as the default**: report every retrieval comparison by claim label, not
+  only as a follow-up analysis.
+
 ## Quickstart
 
 ```bash
-uv sync                                   # Python 3.12 env + deps
-uv run python -m app.ingest.build_index   # build dense (Qdrant) + BM25 indices (one-time)
-uv run uvicorn app.api.main:app --reload  # serve UI + API at http://localhost:8000
-uv run python -m app.eval.retrieval_eval  # reproduce the metrics table above
-uv run pytest                             # tests
+uv sync                                   # Python 3.12 env + deps          (make install)
+uv run python -m app.ingest.build_index   # build dense (Qdrant) + BM25     (make index, one-time)
+uv run uvicorn app.api.main:app --reload  # UI + API at localhost:8000      (make api)
+uv run python -m app.eval.retrieval_eval  # reproduce the metrics table     (make eval)
+uv run python -m app.eval.analysis        # label-stratified re-score       (make analysis)
+uv run pytest                             # tests                           (make test)
 
 cp .env.example .env                      # only for /answer + `make eval-rag`: add a Groq key
 ```
@@ -154,11 +211,12 @@ cp .env.example .env                      # only for /answer + `make eval-rag`: 
 First run downloads the SciFact corpus (~9 MB via `ir_datasets`) and the embedding model
 (~130 MB from HuggingFace); indexing takes a few minutes. Search and `make eval` need no API
 key. Only the **grounded-answer** endpoint does, and without one `/answer` returns a clear
-503 rather than failing obscurely.
+503 rather than failing obscurely. `make analysis` re-scores the cached `make eval` runs, so run
+`make eval` first. `make lint` runs ruff, and `make ci` is what CI runs: a locked install, then
+lint + test.
 
 Open <http://localhost:8000> for the search UI, or query the API directly:
 `GET /search?q=...&mode=hybrid&top_k=8` with modes `bm25`, `dense`, `hybrid`, `hybrid_rerank`.
-(`make install|index|api|eval|test` wrap these.)
 
 ## Operational notes
 
