@@ -62,13 +62,13 @@ from app.ingest.corpus import (
 )
 from app.retrieve.service import SearchService
 
-# Generator uses the 70B model (settings.llm_model) for answer quality; the judge uses a
-# DIFFERENT, lighter model so it isn't grading its own output (avoids self-evaluation
-# bias) and draws from a separate Groq rate-limit bucket. Both need free-tier budget.
+# Generator (settings.llm_model) and judge (settings.judge_model) are different model
+# families, so the judge isn't grading its own or a sibling model's output, and they
+# draw from separate Groq rate-limit buckets. Both need free-tier budget.
 N = 50
 SEED = 13  # fixed sample: reproducible, and not just the first N ids in dataset order
 GEN_MODEL = settings.llm_model
-JUDGE_MODEL = "llama-3.1-8b-instant"
+JUDGE_MODEL = settings.judge_model
 TOP_K = 5
 MODE = "hybrid"  # the API's default mode — the eval scores what users actually get
 THROTTLE_S = 15.0  # stay under the free-tier tokens-per-minute budget

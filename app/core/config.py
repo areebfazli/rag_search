@@ -74,8 +74,12 @@ class Settings(BaseSettings):
     # Default backend: Groq (free tier, OpenAI-compatible). Override via SSR_ env
     # vars for Ollama/another provider. Supply the key through SSR_LLM_API_KEY.
     llm_base_url: str = "https://api.groq.com/openai/v1"
-    llm_model: str = "llama-3.3-70b-versatile"
+    llm_model: str = "openai/gpt-oss-120b"
     llm_api_key: str = ""
+    # RAG-eval judge. Deliberately a different model FAMILY from the generator, not just
+    # a smaller size: same-family judging compounds shared preferences, and a separate
+    # model also draws on a separate provider rate-limit bucket.
+    judge_model: str = "qwen/qwen3.8-27b"
 
 
 settings = Settings()
