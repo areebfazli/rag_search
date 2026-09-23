@@ -278,7 +278,7 @@ def test_config_defaults_and_env():
 def test_estimate_counts_every_call_with_throttle():
     calls, secs = ja.estimate(48, Config())
     assert calls == 48 * 3 * 2
-    assert secs == pytest.approx(calls * (rag_eval.THROTTLE_S + ja.EST_LATENCY_S))
+    assert secs == pytest.approx(calls * (ja.THROTTLE_S + ja.EST_LATENCY_S))
 
 
 def test_only_unlimited_run_is_canonical():

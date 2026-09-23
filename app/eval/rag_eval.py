@@ -43,13 +43,14 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import random
 import statistics
 import subprocess
 import time
 from pathlib import Path
 
-from openai import OpenAI
+from openai import OpenAI, RateLimitError
 
 from app.core.config import Settings, settings
 from app.core.interfaces import SearchHit, hit_passage
@@ -72,7 +73,16 @@ GEN_MODEL = settings.llm_model
 JUDGE_MODEL = settings.judge_model
 TOP_K = 5
 MODE = "hybrid"  # the API's default mode — the eval scores what users actually get
-THROTTLE_S = 15.0  # stay under the free-tier tokens-per-minute budget
+# Groq's free tier caps each model at 8,000 tokens/minute (x-ratelimit-limit-tokens).
+# With reasoning_effort=medium a generation is ~2-3k tokens (prompt + reasoning +
+# answer) and a judge call ~2k, so one query per 15 s overran the generator's bucket
+# and 4 of 50 queries were skipped. 30 s keeps each model under ~6k tokens/minute.
+THROTTLE_S = float(os.environ.get("SSR_RAG_THROTTLE_S", "30"))
+# A 429 that outlasts the SDK's own retries waits out a full rate-limit window and
+# retries the SAME query, rather than skipping it: a skipped query changes the sample,
+# and the sample is fixed (seed) so runs stay comparable.
+RATE_LIMIT_RETRIES = 3
+RATE_LIMIT_WAIT_S = 60.0
 OUT = Path("eval/results")
 
 # What `evidence` means. The headline is the rationale oracle; the qrels one is computed
@@ -578,11 +588,26 @@ def main() -> None:
             continue
         q, hits, label = queries[qid], retrieved[qid], labels[qid]
         try:
-            ans = generator.generate(q, hits)
-            judge_calls += 1
-            # Judge must see the SAME context the generator saw (title + full text) —
-            # a truncated view would misscore claims grounded in the cut-off part.
-            s = judge(judge_client, JUDGE_MODEL, q, [hit_passage(h) for h in hits], ans.text)
+            for attempt in range(RATE_LIMIT_RETRIES + 1):
+                try:
+                    ans = generator.generate(q, hits)
+                    judge_calls += 1
+                    # Judge must see the SAME context the generator saw (title + full
+                    # text) — a truncated view would misscore claims grounded in the
+                    # cut-off part.
+                    s = judge(
+                        judge_client, JUDGE_MODEL, q, [hit_passage(h) for h in hits], ans.text
+                    )
+                    break
+                except RateLimitError:
+                    if attempt == RATE_LIMIT_RETRIES:
+                        raise
+                    print(
+                        f"  [{n}/{len(qids)}] q{qid:>4} rate-limited; waiting "
+                        f"{RATE_LIMIT_WAIT_S:.0f}s (retry {attempt + 1}/{RATE_LIMIT_RETRIES})",
+                        flush=True,
+                    )
+                    time.sleep(RATE_LIMIT_WAIT_S)
         except JudgeParseError as e:
             parse_failures += 1
             print(f"  [{n}/{len(qids)}] q{qid:>4} JUDGE-UNPARSEABLE ({str(e)[:50]})", flush=True)

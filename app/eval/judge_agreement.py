@@ -53,7 +53,12 @@ from types import SimpleNamespace
 from app.core.config import settings
 from app.core.interfaces import SearchHit, hit_passage
 from app.eval import rag_eval
-from app.eval.rag_eval import JUDGE_SYSTEM, THROTTLE_S, JudgeParseError, judge, resolve_answered
+from app.eval.rag_eval import JUDGE_SYSTEM, JudgeParseError, judge, resolve_answered
+
+# Judge-only calls (~2k tokens each) against the judge model's 8,000 tokens/minute
+# bucket: one per 15 s stays under it. rag_eval's own throttle is longer because each of
+# its queries also spends generator reasoning tokens.
+THROTTLE_S = float(os.environ.get("SSR_JUDGE_THROTTLE_S", "15"))
 
 SOURCE = Path("eval/results/rag.json")
 OUT = Path("eval/results")  # canonical (no row limit) run only — the committed artifact
