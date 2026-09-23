@@ -1,0 +1,648 @@
+{
+  "dataset": "beir/scifact/test",
+  "n_queries": 300,
+  "candidate_depth": 100,
+  "stat_test": "student (paired, two-sided, via ranx)",
+  "max_p": 0.05,
+  "label_distribution": {
+    "SUPPORT": {
+      "n": 124,
+      "qrels_differs_from_rationale": 10
+    },
+    "CONTRADICT": {
+      "n": 64,
+      "qrels_differs_from_rationale": 3
+    },
+    "NEI": {
+      "n": 112,
+      "qrels_differs_from_rationale": 0
+    }
+  },
+  "qrels_differs_from_rationale": [
+    "133",
+    "141",
+    "275",
+    "343",
+    "385",
+    "540",
+    "619",
+    "641",
+    "728",
+    "967",
+    "1041",
+    "1132",
+    "1274"
+  ],
+  "qrels_superset_of_rationale": true,
+  "strata": [
+    {
+      "subset": "all",
+      "relevant_set": "qrels",
+      "n": 300,
+      "scores": {
+        "bm25": {
+          "ndcg@10": 0.6863002612489068,
+          "recall@100": 0.9126666666666667
+        },
+        "dense": {
+          "ndcg@10": 0.7127069247605036,
+          "recall@100": 0.9416666666666667
+        },
+        "hybrid": {
+          "ndcg@10": 0.7241151165725345,
+          "recall@100": 0.965
+        }
+      },
+      "comparisons": {
+        "hybrid_vs_dense": {
+          "ndcg@10": {
+            "delta": 0.011408191812030899,
+            "p": 0.25780337275549936,
+            "win_tie_loss": {
+              "W": 53,
+              "T": 213,
+              "L": 34
+            }
+          },
+          "recall@100": {
+            "delta": 0.023333333333333317,
+            "p": 0.03458548020947827,
+            "win_tie_loss": {
+              "W": 9,
+              "T": 289,
+              "L": 2
+            }
+          }
+        },
+        "hybrid_vs_bm25": {
+          "ndcg@10": {
+            "delta": 0.037814855323627716,
+            "p": 0.0007001725996496213,
+            "win_tie_loss": {
+              "W": 72,
+              "T": 202,
+              "L": 26
+            }
+          },
+          "recall@100": {
+            "delta": 0.05233333333333323,
+            "p": 0.00013771348886333146,
+            "win_tie_loss": {
+              "W": 18,
+              "T": 281,
+              "L": 1
+            }
+          }
+        }
+      }
+    },
+    {
+      "subset": "evidence-bearing",
+      "relevant_set": "qrels",
+      "n": 188,
+      "scores": {
+        "bm25": {
+          "ndcg@10": 0.8369383201654677,
+          "recall@100": 0.9723404255319149
+        },
+        "dense": {
+          "ndcg@10": 0.8617576840375464,
+          "recall@100": 0.9920212765957447
+        },
+        "hybrid": {
+          "ndcg@10": 0.8646316960109979,
+          "recall@100": 0.9920212765957447
+        }
+      },
+      "comparisons": {
+        "hybrid_vs_dense": {
+          "ndcg@10": {
+            "delta": 0.0028740119734514957,
+            "p": 0.7948299083939828,
+            "win_tie_loss": {
+              "W": 25,
+              "T": 145,
+              "L": 18
+            }
+          },
+          "recall@100": {
+            "delta": 0.0,
+            "p": null,
+            "win_tie_loss": {
+              "W": 0,
+              "T": 188,
+              "L": 0
+            }
+          }
+        },
+        "hybrid_vs_bm25": {
+          "ndcg@10": {
+            "delta": 0.02769337584553022,
+            "p": 0.01637399729883582,
+            "win_tie_loss": {
+              "W": 36,
+              "T": 139,
+              "L": 13
+            }
+          },
+          "recall@100": {
+            "delta": 0.019680851063829774,
+            "p": 0.041041569580835636,
+            "win_tie_loss": {
+              "W": 5,
+              "T": 183,
+              "L": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "subset": "evidence-bearing",
+      "relevant_set": "rationale",
+      "n": 188,
+      "scores": {
+        "bm25": {
+          "ndcg@10": 0.8381070773099625,
+          "recall@100": 0.9750000000000001
+        },
+        "dense": {
+          "ndcg@10": 0.8638292376090657,
+          "recall@100": 0.9946808510638298
+        },
+        "hybrid": {
+          "ndcg@10": 0.8641653197314451,
+          "recall@100": 0.9946808510638298
+        }
+      },
+      "comparisons": {
+        "hybrid_vs_dense": {
+          "ndcg@10": {
+            "delta": 0.0003360821223793442,
+            "p": 0.9770773030065933,
+            "win_tie_loss": {
+              "W": 24,
+              "T": 146,
+              "L": 18
+            }
+          },
+          "recall@100": {
+            "delta": 0.0,
+            "p": null,
+            "win_tie_loss": {
+              "W": 0,
+              "T": 188,
+              "L": 0
+            }
+          }
+        },
+        "hybrid_vs_bm25": {
+          "ndcg@10": {
+            "delta": 0.02605824242148258,
+            "p": 0.024108274415142062,
+            "win_tie_loss": {
+              "W": 34,
+              "T": 142,
+              "L": 12
+            }
+          },
+          "recall@100": {
+            "delta": 0.019680851063829663,
+            "p": 0.041041569580835636,
+            "win_tie_loss": {
+              "W": 5,
+              "T": 183,
+              "L": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "subset": "NEI",
+      "relevant_set": "qrels",
+      "n": 112,
+      "scores": {
+        "bm25": {
+          "ndcg@10": 0.43344351949610793,
+          "recall@100": 0.8125
+        },
+        "dense": {
+          "ndcg@10": 0.4625145788311817,
+          "recall@100": 0.8571428571428571
+        },
+        "hybrid": {
+          "ndcg@10": 0.48824800108654237,
+          "recall@100": 0.9196428571428571
+        }
+      },
+      "comparisons": {
+        "hybrid_vs_dense": {
+          "ndcg@10": {
+            "delta": 0.025733422255360683,
+            "p": 0.19133812829620853,
+            "win_tie_loss": {
+              "W": 28,
+              "T": 68,
+              "L": 16
+            }
+          },
+          "recall@100": {
+            "delta": 0.0625,
+            "p": 0.03419778785833758,
+            "win_tie_loss": {
+              "W": 9,
+              "T": 101,
+              "L": 2
+            }
+          }
+        },
+        "hybrid_vs_bm25": {
+          "ndcg@10": {
+            "delta": 0.05480448159043444,
+            "p": 0.016391272940134007,
+            "win_tie_loss": {
+              "W": 36,
+              "T": 63,
+              "L": 13
+            }
+          },
+          "recall@100": {
+            "delta": 0.1071428571428571,
+            "p": 0.0011036392319947786,
+            "win_tie_loss": {
+              "W": 13,
+              "T": 98,
+              "L": 1
+            }
+          }
+        }
+      }
+    }
+  ],
+  "misses": [
+    {
+      "qid": "437",
+      "label": "NEI",
+      "doc_id": "18399038",
+      "rationale_doc": false,
+      "hybrid_recall@100": 0.0,
+      "bm25_rank": 983,
+      "dense_rank": null,
+      "reachable": false
+    },
+    {
+      "qid": "502",
+      "label": "NEI",
+      "doc_id": "13071728",
+      "rationale_doc": false,
+      "hybrid_recall@100": 0.0,
+      "bm25_rank": 295,
+      "dense_rank": null,
+      "reachable": false
+    },
+    {
+      "qid": "560",
+      "label": "NEI",
+      "doc_id": "40096222",
+      "rationale_doc": false,
+      "hybrid_recall@100": 0.0,
+      "bm25_rank": 266,
+      "dense_rank": null,
+      "reachable": false
+    },
+    {
+      "qid": "619",
+      "label": "CONTRADICT",
+      "doc_id": "2565138",
+      "rationale_doc": false,
+      "hybrid_recall@100": 0.5,
+      "bm25_rank": 397,
+      "dense_rank": null,
+      "reachable": false
+    },
+    {
+      "qid": "913",
+      "label": "NEI",
+      "doc_id": "3203590",
+      "rationale_doc": false,
+      "hybrid_recall@100": 0.0,
+      "bm25_rank": 1893,
+      "dense_rank": 56,
+      "reachable": true
+    },
+    {
+      "qid": "975",
+      "label": "NEI",
+      "doc_id": "5304891",
+      "rationale_doc": false,
+      "hybrid_recall@100": 0.0,
+      "bm25_rank": 316,
+      "dense_rank": null,
+      "reachable": false
+    },
+    {
+      "qid": "1110",
+      "label": "CONTRADICT",
+      "doc_id": "13770184",
+      "rationale_doc": true,
+      "hybrid_recall@100": 0.0,
+      "bm25_rank": 1068,
+      "dense_rank": null,
+      "reachable": false
+    },
+    {
+      "qid": "1175",
+      "label": "NEI",
+      "doc_id": "31272411",
+      "rationale_doc": false,
+      "hybrid_recall@100": 0.0,
+      "bm25_rank": 57,
+      "dense_rank": null,
+      "reachable": true
+    },
+    {
+      "qid": "1199",
+      "label": "NEI",
+      "doc_id": "16760369",
+      "rationale_doc": false,
+      "hybrid_recall@100": 0.0,
+      "bm25_rank": 1836,
+      "dense_rank": null,
+      "reachable": false
+    },
+    {
+      "qid": "1213",
+      "label": "NEI",
+      "doc_id": "14407673",
+      "rationale_doc": false,
+      "hybrid_recall@100": 0.0,
+      "bm25_rank": 1687,
+      "dense_rank": 65,
+      "reachable": true
+    },
+    {
+      "qid": "1332",
+      "label": "NEI",
+      "doc_id": "5304891",
+      "rationale_doc": false,
+      "hybrid_recall@100": 0.0,
+      "bm25_rank": 175,
+      "dense_rank": null,
+      "reachable": false
+    }
+  ],
+  "rrf_sensitivity": {
+    "n": 300,
+    "baseline": {
+      "k": 60,
+      "dense_weight": 0.5
+    },
+    "union_recall@100_ceiling": 0.975,
+    "rows": [
+      {
+        "k": 1,
+        "dense_weight": 0.5,
+        "baseline": false,
+        "scores": {
+          "ndcg@10": 0.7278249537652932,
+          "recall@100": 0.965
+        },
+        "vs_baseline": {
+          "ndcg@10": {
+            "delta": 0.003709837192758747,
+            "p": 0.6083387488084671,
+            "win_tie_loss": {
+              "W": 27,
+              "T": 241,
+              "L": 32
+            }
+          },
+          "recall@100": {
+            "delta": 0.0,
+            "p": null,
+            "win_tie_loss": {
+              "W": 0,
+              "T": 300,
+              "L": 0
+            }
+          }
+        }
+      },
+      {
+        "k": 2,
+        "dense_weight": 0.5,
+        "baseline": false,
+        "scores": {
+          "ndcg@10": 0.7287189953636264,
+          "recall@100": 0.965
+        },
+        "vs_baseline": {
+          "ndcg@10": {
+            "delta": 0.00460387879109192,
+            "p": 0.4774944792271166,
+            "win_tie_loss": {
+              "W": 24,
+              "T": 246,
+              "L": 30
+            }
+          },
+          "recall@100": {
+            "delta": 0.0,
+            "p": null,
+            "win_tie_loss": {
+              "W": 0,
+              "T": 300,
+              "L": 0
+            }
+          }
+        }
+      },
+      {
+        "k": 5,
+        "dense_weight": 0.5,
+        "baseline": false,
+        "scores": {
+          "ndcg@10": 0.7267087606043131,
+          "recall@100": 0.965
+        },
+        "vs_baseline": {
+          "ndcg@10": {
+            "delta": 0.0025936440317786413,
+            "p": 0.56527750542117,
+            "win_tie_loss": {
+              "W": 22,
+              "T": 256,
+              "L": 22
+            }
+          },
+          "recall@100": {
+            "delta": 0.0,
+            "p": null,
+            "win_tie_loss": {
+              "W": 0,
+              "T": 300,
+              "L": 0
+            }
+          }
+        }
+      },
+      {
+        "k": 10,
+        "dense_weight": 0.5,
+        "baseline": false,
+        "scores": {
+          "ndcg@10": 0.7287075984093395,
+          "recall@100": 0.965
+        },
+        "vs_baseline": {
+          "ndcg@10": {
+            "delta": 0.004592481836805051,
+            "p": 0.22431748198749293,
+            "win_tie_loss": {
+              "W": 21,
+              "T": 265,
+              "L": 14
+            }
+          },
+          "recall@100": {
+            "delta": 0.0,
+            "p": null,
+            "win_tie_loss": {
+              "W": 0,
+              "T": 300,
+              "L": 0
+            }
+          }
+        }
+      },
+      {
+        "k": 20,
+        "dense_weight": 0.5,
+        "baseline": false,
+        "scores": {
+          "ndcg@10": 0.7265117667946394,
+          "recall@100": 0.965
+        },
+        "vs_baseline": {
+          "ndcg@10": {
+            "delta": 0.00239665022210489,
+            "p": 0.3439163392475596,
+            "win_tie_loss": {
+              "W": 13,
+              "T": 277,
+              "L": 10
+            }
+          },
+          "recall@100": {
+            "delta": 0.0,
+            "p": null,
+            "win_tie_loss": {
+              "W": 0,
+              "T": 300,
+              "L": 0
+            }
+          }
+        }
+      },
+      {
+        "k": 60,
+        "dense_weight": 0.5,
+        "baseline": true,
+        "scores": {
+          "ndcg@10": 0.7241151165725345,
+          "recall@100": 0.965
+        },
+        "vs_baseline": null
+      },
+      {
+        "k": 100,
+        "dense_weight": 0.5,
+        "baseline": false,
+        "scores": {
+          "ndcg@10": 0.7236031584002972,
+          "recall@100": 0.965
+        },
+        "vs_baseline": {
+          "ndcg@10": {
+            "delta": -0.000511958172237259,
+            "p": 0.19465177341360845,
+            "win_tie_loss": {
+              "W": 1,
+              "T": 295,
+              "L": 4
+            }
+          },
+          "recall@100": {
+            "delta": 0.0,
+            "p": null,
+            "win_tie_loss": {
+              "W": 0,
+              "T": 300,
+              "L": 0
+            }
+          }
+        }
+      },
+      {
+        "k": 60,
+        "dense_weight": 0.3,
+        "baseline": false,
+        "scores": {
+          "ndcg@10": 0.7145566524401048,
+          "recall@100": 0.9276666666666668
+        },
+        "vs_baseline": {
+          "ndcg@10": {
+            "delta": -0.009558464132429667,
+            "p": 0.17685915078786144,
+            "win_tie_loss": {
+              "W": 34,
+              "T": 225,
+              "L": 41
+            }
+          },
+          "recall@100": {
+            "delta": -0.03733333333333322,
+            "p": 0.0018144130055809842,
+            "win_tie_loss": {
+              "W": 1,
+              "T": 286,
+              "L": 13
+            }
+          }
+        }
+      },
+      {
+        "k": 60,
+        "dense_weight": 0.7,
+        "baseline": false,
+        "scores": {
+          "ndcg@10": 0.7274781044092862,
+          "recall@100": 0.9516666666666667
+        },
+        "vs_baseline": {
+          "ndcg@10": {
+            "delta": 0.0033629878367517074,
+            "p": 0.49647410568489125,
+            "win_tie_loss": {
+              "W": 29,
+              "T": 247,
+              "L": 24
+            }
+          },
+          "recall@100": {
+            "delta": -0.013333333333333308,
+            "p": 0.1576454627599947,
+            "win_tie_loss": {
+              "W": 2,
+              "T": 292,
+              "L": 6
+            }
+          }
+        }
+      }
+    ]
+  },
+  "interpretation": "Fusion's significant Recall@100 gain over dense on the full set (+0.0233, p = 0.0346, W/T/L 9/289/2) comes from the **NEI** claims: 11 of the 11 queries where the two differ are NEI, and on that stratum hybrid gains +0.0625 (p = 0.0342, W/T/L 9/101/2). On the 188 evidence-bearing claims, hybrid and dense are **identical at Recall@100** \u2014 every query tied, against either relevant set (0.9947 on rationale docs, 0.9920 on qrels) \u2014 and their nDCG@10 on rationale docs differs by +0.0003 (p = 0.9771). For an NEI claim the qrels doc is a cited abstract in which annotators found no rationale, so the recall fusion adds is recall of documents that cannot ground a SUPPORT or CONTRADICT verdict. It still widens the candidate pool, which is why hybrid stays the default, but it is not evidence that fusion finds more supporting or refuting abstracts than dense alone; on this corpus it does not. Of the 11 gold docs hybrid misses, 9 belong to NEI claims and 8 were in neither retriever's top-100, so no fusion rule over these two candidate pools could have recovered them. All p-values are uncorrected; p = 0.0342 on 11 discordant queries is suggestive, not settled."
+}
