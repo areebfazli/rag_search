@@ -7,15 +7,19 @@ raising. That is precisely what happened with ``bool("false")``.
 import json
 import subprocess
 
+import httpx
+import openai
 import pytest
 
 from app.core.config import settings
 from app.core.interfaces import Answer, SearchHit
 from app.eval import rag_eval
 from app.eval.rag_eval import (
+    DailyTokenBudgetExhausted,
     JudgeParseError,
     _as_bool,
     _as_score,
+    _is_daily_cap,
     _parse,
     aggregate,
     evidence_flags,
@@ -314,18 +318,23 @@ class FakeJudge:
         return {"answered": q != "claim four", "faithfulness": 0.9, "context_relevance": 0.5}
 
 
-def _run_main(tmp_path, monkeypatch, mode="hybrid"):
-    fake_judge = FakeJudge()
-    monkeypatch.setattr(rag_eval, "OUT", tmp_path)
+def _patch_main(tmp_path, monkeypatch, out, mode="hybrid", generator=FakeGenerator, judge=None):
+    fake_judge = judge if judge is not None else FakeJudge()
+    monkeypatch.setattr(rag_eval, "OUT", out)
     monkeypatch.setattr(rag_eval, "MODE", mode)
     monkeypatch.setattr(rag_eval, "THROTTLE_S", 0.0)
     monkeypatch.setattr(rag_eval, "load_queries_qrels", lambda: (dict(QUERIES), QRELS))
     monkeypatch.setattr(rag_eval, "load_claim_labels", lambda query_ids=None: CLAIM_LABELS)
     monkeypatch.setattr(rag_eval, "scifact_source_zip", lambda: tmp_path / "missing.zip")
     monkeypatch.setattr(rag_eval, "SearchService", FakeService)
-    monkeypatch.setattr(rag_eval, "LLMGenerator", FakeGenerator)
+    monkeypatch.setattr(rag_eval, "LLMGenerator", generator)
     monkeypatch.setattr(rag_eval, "OpenAI", lambda **kw: None)
     monkeypatch.setattr(rag_eval, "judge", fake_judge)
+    return fake_judge
+
+
+def _run_main(tmp_path, monkeypatch, mode="hybrid"):
+    fake_judge = _patch_main(tmp_path, monkeypatch, tmp_path, mode=mode)
     rag_eval.main()
     return json.loads((tmp_path / "rag.json").read_text()), fake_judge
 
@@ -487,3 +496,151 @@ def test_git_sha_tolerates_no_git(monkeypatch):
     monkeypatch.setattr(subprocess, "run", no_git)
     assert rag_eval._git_sha() is None
     assert rag_eval.run_metadata()["git_sha"] is None
+
+
+# --- rate limits: per-minute 429s are retried, a daily-cap 429 ends the run -----
+
+# Groq's 429 bodies, as the openai client stringifies them. Only the window differs.
+TPM_MESSAGE = (
+    "Error code: 429 - {'error': {'message': 'Rate limit reached for model "
+    "`openai/gpt-oss-120b` in organization `org_test` service tier `on_demand` on tokens "
+    "per minute (TPM): Limit 8000, Used 7400, Requested 3100. Please try again in 18.75s.', "
+    "'type': 'tokens', 'code': 'rate_limit_exceeded'}}"
+)
+TPD_MESSAGE = (
+    "Error code: 429 - {'error': {'message': 'Rate limit reached for model "
+    "`openai/gpt-oss-120b` in organization `org_test` service tier `on_demand` on tokens "
+    "per day (TPD): Limit 200000, Used 198900, Requested 3100. Please try again in 14m2.4s.', "
+    "'type': 'tokens', 'code': 'rate_limit_exceeded'}}"
+)
+WAIT_S = 12.5  # distinct from THROTTLE_S (0.0 in these runs) so the two sleeps can't blur
+
+
+def rate_limit_error(message: str) -> openai.RateLimitError:
+    request = httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions")
+    response = httpx.Response(status_code=429, request=request, json={"error": {"message": message}})
+    return openai.RateLimitError(message=message, response=response, body=None)
+
+
+class FlakyGenerator(FakeGenerator):
+    """FakeGenerator that raises ``errors`` (in order) for one query, then answers."""
+
+    calls: list[tuple[str, list]]
+    fail_query: str
+    errors: list[Exception]
+
+    def generate(self, query, hits):
+        type(self).calls.append((query, hits))
+        if query == self.fail_query and self.errors:
+            raise self.errors.pop(0)
+        return super().generate(query, hits)
+
+
+class FlakyJudge(FakeJudge):
+    def __init__(self, fail_query=None, errors=()):
+        super().__init__()
+        self.queries: list[str] = []
+        self.fail_query, self.errors = fail_query, list(errors)
+
+    def __call__(self, client, model, q, contexts, answer):
+        self.queries.append(q)
+        if q == self.fail_query and self.errors:
+            raise self.errors.pop(0)
+        return super().__call__(client, model, q, contexts, answer)
+
+
+@pytest.fixture()
+def rate_limited(tmp_path, monkeypatch):
+    """Patch main() for rate-limit tests; returns (setup, sleeps, out).
+
+    ``setup(source, fail_query, errors)`` makes the generator or the judge raise
+    ``errors`` for ``fail_query`` and returns (generator_cls, judge). ``out`` is a
+    not-yet-existing results dir, so "nothing written" also covers the mkdir.
+    """
+    sleeps: list[float] = []
+    monkeypatch.setattr(rag_eval.time, "sleep", sleeps.append)
+    monkeypatch.setattr(rag_eval, "RATE_LIMIT_WAIT_S", WAIT_S)
+    out = tmp_path / "results"
+
+    def setup(source, fail_query, errors):
+        gen = type("Gen", (FlakyGenerator,), {"calls": [], "fail_query": None, "errors": []})
+        fake_judge = FlakyJudge()
+        if source == "generate":
+            gen.fail_query, gen.errors = fail_query, list(errors)
+        else:
+            fake_judge.fail_query, fake_judge.errors = fail_query, list(errors)
+        _patch_main(tmp_path, monkeypatch, out, generator=gen, judge=fake_judge)
+        return gen, fake_judge
+
+    return setup, sleeps, out
+
+
+def test_is_daily_cap_distinguishes_tpd_from_tpm():
+    assert _is_daily_cap(rate_limit_error(TPD_MESSAGE)) is True
+    assert _is_daily_cap(rate_limit_error(TPM_MESSAGE)) is False
+    # Case-insensitive, and either marker alone is enough.
+    assert _is_daily_cap(rate_limit_error("Limit reached on Tokens Per Day")) is True
+    assert _is_daily_cap(rate_limit_error("429: limit exceeded (TPD)")) is True
+    assert _is_daily_cap(rate_limit_error("requests per day (RPD): Limit 1000")) is True
+    # Per-minute and unlabelled 429s stay retryable.
+    assert _is_daily_cap(rate_limit_error("requests per minute (RPM): Limit 30")) is False
+    assert _is_daily_cap(rate_limit_error("Error code: 429 - Too Many Requests")) is False
+
+
+def test_daily_token_budget_exhausted_is_not_a_rate_limit_error():
+    # main()'s inner `except RateLimitError` must not re-catch it and retry.
+    assert issubclass(DailyTokenBudgetExhausted, RuntimeError)
+    assert not issubclass(DailyTokenBudgetExhausted, openai.RateLimitError)
+
+
+@pytest.mark.parametrize("source", ["generate", "judge"])
+def test_daily_cap_stops_the_run_without_retry_or_writing(rate_limited, source):
+    setup, sleeps, out = rate_limited
+    gen, fake_judge = setup(source, "claim three", [rate_limit_error(TPD_MESSAGE)])
+    with pytest.raises(SystemExit) as exc:
+        rag_eval.main()
+    msg = str(exc.value.code)
+    assert "daily token cap is exhausted" in msg and "Nothing was written" in msg
+    assert "tokens per day (TPD)" in msg
+    # No retry: no rate-limit wait, and the failing query was attempted exactly once.
+    assert WAIT_S not in sleeps
+    assert [q for q, _ in gen.calls].count("claim three") == 1
+    assert fake_judge.queries.count("claim three") == (1 if source == "judge" else 0)
+    # A partial run never overwrites the committed artifact.
+    assert not (out / "rag.json").exists()
+    assert not (out / "rag.md").exists()
+    assert not out.exists()
+
+
+@pytest.mark.parametrize("source", ["generate", "judge"])
+def test_per_minute_rate_limit_retries_the_same_query(rate_limited, source):
+    setup, sleeps, out = rate_limited
+    fails = rag_eval.RATE_LIMIT_RETRIES - 1  # succeeds on the last allowed attempt
+    gen, fake_judge = setup(source, "claim two", [rate_limit_error(TPM_MESSAGE)] * fails)
+    rag_eval.main()  # completes: no SystemExit
+    assert sleeps.count(WAIT_S) == fails
+    # Each retry re-runs generate + judge for the SAME query with the same hits.
+    tries = [hits for q, hits in gen.calls if q == "claim two"]
+    assert len(tries) == fails + 1 and all(h == tries[0] for h in tries)
+    judge_tries = fake_judge.queries.count("claim two")
+    assert judge_tries == (fails + 1 if source == "judge" else 1)
+    # Every other query ran once, and the retried one is scored, not skipped.
+    assert len(gen.calls) == len(QUERIES) + fails
+    blob = json.loads((out / "rag.json").read_text())
+    assert (out / "rag.md").exists()
+    assert blob["skipped"] == 0 and blob["skip_reasons"] == {}
+    assert blob["n"] == len(QUERIES)
+    assert {r["query_id"] for r in blob["rows"]} == set(QUERIES)
+
+
+def test_per_minute_rate_limit_skips_the_query_once_retries_are_exhausted(rate_limited):
+    setup, sleeps, out = rate_limited
+    attempts = rag_eval.RATE_LIMIT_RETRIES + 1
+    gen, _ = setup("generate", "claim two", [rate_limit_error(TPM_MESSAGE)] * (attempts + 1))
+    rag_eval.main()  # the run survives: the query is skipped, not fatal
+    assert sleeps.count(WAIT_S) == rag_eval.RATE_LIMIT_RETRIES
+    assert [q for q, _ in gen.calls].count("claim two") == attempts
+    blob = json.loads((out / "rag.json").read_text())
+    assert blob["skipped"] == 1 and blob["skip_reasons"] == {"RateLimitError": 1}
+    assert {r["query_id"] for r in blob["rows"]} == set(QUERIES) - {"2"}
+    assert blob["n"] == len(QUERIES) - 1

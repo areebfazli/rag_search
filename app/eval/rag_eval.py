@@ -83,6 +83,21 @@ THROTTLE_S = float(os.environ.get("SSR_RAG_THROTTLE_S", "30"))
 # and the sample is fixed (seed) so runs stay comparable.
 RATE_LIMIT_RETRIES = 3
 RATE_LIMIT_WAIT_S = 60.0
+# Groq also caps tokens per DAY (rolling 24 h; 200k for gpt-oss-120b on the free
+# tier), and the rate-limit headers don't expose it. Waiting a minute can't clear that,
+# so a daily-cap 429 ends the run at once, before anything is written: a partial run
+# must never overwrite the committed artifact. Rough per-query cost (prompt + medium
+# reasoning + answer, and the judge call), measured on the 2026-09 runs:
+EST_GEN_TOKENS_PER_QUERY = 3500
+EST_JUDGE_TOKENS_PER_QUERY = 2000
+
+
+class DailyTokenBudgetExhausted(RuntimeError):
+    """The provider's tokens-per-day cap is hit; retrying within the run is pointless."""
+
+
+def _is_daily_cap(e: Exception) -> bool:
+    return "per day" in str(e).lower() or "(tpd)" in str(e).lower()
 OUT = Path("eval/results")
 
 # What `evidence` means. The headline is the rationale oracle; the qrels one is computed
@@ -574,6 +589,13 @@ def main() -> None:
         flush=True,
     )
 
+    print(
+        f"Estimated LLM spend: ~{len(retrieved) * EST_GEN_TOKENS_PER_QUERY:,} tokens on "
+        f"{GEN_MODEL}, ~{len(retrieved) * EST_JUDGE_TOKENS_PER_QUERY:,} on {JUDGE_MODEL} "
+        f"(check the provider's daily cap; Groq free tier is 200k/day for gpt-oss-120b); "
+        f"~{len(retrieved) * THROTTLE_S / 60:.0f} min at a {THROTTLE_S:.0f}s throttle.",
+        flush=True,
+    )
     generator = LLMGenerator(model=GEN_MODEL)
     judge_client = OpenAI(
         base_url=settings.llm_base_url, api_key=settings.llm_api_key, max_retries=5, timeout=30.0
@@ -599,7 +621,9 @@ def main() -> None:
                         judge_client, JUDGE_MODEL, q, [hit_passage(h) for h in hits], ans.text
                     )
                     break
-                except RateLimitError:
+                except RateLimitError as e:
+                    if _is_daily_cap(e):
+                        raise DailyTokenBudgetExhausted(str(e)) from e
                     if attempt == RATE_LIMIT_RETRIES:
                         raise
                     print(
@@ -608,6 +632,14 @@ def main() -> None:
                         flush=True,
                     )
                     time.sleep(RATE_LIMIT_WAIT_S)
+        except DailyTokenBudgetExhausted as e:
+            raise SystemExit(
+                f"\nStopped at query {n}/{len(qids)}: the provider's daily token cap is "
+                f"exhausted.\n  {str(e)[:300]}\nNothing was written; "
+                f"{OUT / 'rag.json'} is unchanged. Re-run once the daily budget recovers "
+                f"(~{len(retrieved) * EST_GEN_TOKENS_PER_QUERY:,} generator + "
+                f"~{len(retrieved) * EST_JUDGE_TOKENS_PER_QUERY:,} judge tokens needed)."
+            ) from None
         except JudgeParseError as e:
             parse_failures += 1
             print(f"  [{n}/{len(qids)}] q{qid:>4} JUDGE-UNPARSEABLE ({str(e)[:50]})", flush=True)
