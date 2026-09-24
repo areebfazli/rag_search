@@ -111,7 +111,7 @@ def test_split_verdict_absent_for_an_ordinary_answer():
 def test_split_verdict_malformed_line_is_kept_not_guessed():
     # An unknown value, or a verdict line carrying extra content, is not a verdict —
     # and it stays visible rather than being silently dropped from the answer.
-    for bad in ["A [1].\nVerdict: MAYBE", "A [1].\nVerdict: SUPPORTED [1]", "A.\nVerdict:"]:
+    for bad in ["A [1].\nVerdict: MAYBE", "A [1].\nVerdict: SUPPORTED because [1]", "A.\nVerdict:"]:
         assert split_verdict(bad) == (bad, None)
 
 
@@ -290,3 +290,16 @@ def test_generate_normalizes_fullwidth_citations_and_still_parses_verdict():
     assert ans.text == "Refuted by the trial [2][3]."  # displayed text normalised too
     assert ans.citations == ["doc1", "doc2"]
     assert ans.verdict == "REFUTED"
+
+
+@pytest.mark.parametrize(
+    "tail, verdict",
+    [
+        ("Verdict: REFUTED[1]", "REFUTED"),
+        ("Verdict: SUPPORTED [1][3].", "SUPPORTED"),
+        ("**Verdict: NOT ENOUGH EVIDENCE** [2]", "NOT ENOUGH EVIDENCE"),
+    ],
+)
+def test_split_verdict_tolerates_trailing_citations(tail, verdict):
+    body, v = split_verdict(f"The context refutes it [1].\n{tail}")
+    assert v == verdict and body == "The context refutes it [1]."

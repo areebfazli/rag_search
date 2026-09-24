@@ -35,13 +35,15 @@ _CITE = re.compile(r"\[(\d+)\]")
 # browsing-style tail like 【2†L3-L5】 — or with fullwidth square brackets ［2］. \d also
 # matches fullwidth digits, which int() reads, so ［２］ becomes [2] too.
 _WIDE_CITE = re.compile(r"[【［]\s*(\d+)\s*(?:†[^】］\n]*)?[】］]")
-# A well-formed verdict line: the whole line, tolerating the markdown emphasis, quotes
-# and trailing period models like to add, but nothing else (no trailing citations, no
-# prose) — anything looser starts matching sentences that merely mention a verdict.
+# A well-formed verdict line: the whole line, tolerating the markdown emphasis, quotes,
+# trailing period and trailing [n] citation markers models like to add, but nothing else
+# (no prose) — anything looser starts matching sentences that merely mention a verdict.
+# Citations are allowed because gpt-oss writes "Verdict: REFUTED[1]" routinely: 5 of 8
+# unparsed verdicts in the 2026-09-24 run were exactly that, all matching the gold label.
 _MARKUP = r"[\s*_`'\"]*"
 _VERDICT_ALT = "|".join(v.replace(" ", r"\s+") for v in VERDICTS)
 _VERDICT_LINE = re.compile(
-    rf"^{_MARKUP}verdict{_MARKUP}:{_MARKUP}({_VERDICT_ALT}){_MARKUP}\.?{_MARKUP}$",
+    rf"^{_MARKUP}verdict{_MARKUP}:{_MARKUP}({_VERDICT_ALT}){_MARKUP}(?:\s*\[\d+\])*\.?{_MARKUP}$",
     re.IGNORECASE,
 )
 # Any line that *starts* like a verdict — used to detect a second, competing one.
