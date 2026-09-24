@@ -1,45 +1,45 @@
 {
   "n": 50,
   "evidence_rate": 0.58,
-  "answered_rate": 0.6,
-  "abstention_precision": 0.8,
-  "abstention_recall": 0.7619,
-  "false_abstention_rate": 0.1379,
-  "answered_without_evidence_rate": 0.1667,
+  "answered_rate": 0.66,
+  "abstention_precision": 0.8824,
+  "abstention_recall": 0.7143,
+  "false_abstention_rate": 0.069,
+  "answered_without_evidence_rate": 0.1818,
   "oracle": "rationale",
   "quadrants": {
-    "answered_with_evidence": 25,
-    "answered_without_evidence": 5,
-    "false_abstention": 4,
-    "correct_abstention": 16
+    "answered_with_evidence": 27,
+    "answered_without_evidence": 6,
+    "false_abstention": 2,
+    "correct_abstention": 15
   },
   "qrels_oracle": {
     "evidence_rate": 0.82,
-    "abstention_precision": 0.35,
-    "abstention_recall": 0.7778,
-    "false_abstention_rate": 0.3171,
-    "answered_without_evidence_rate": 0.0667,
+    "abstention_precision": 0.3529,
+    "abstention_recall": 0.6667,
+    "false_abstention_rate": 0.2683,
+    "answered_without_evidence_rate": 0.0909,
     "quadrants": {
-      "answered_with_evidence": 28,
-      "answered_without_evidence": 2,
-      "false_abstention": 13,
-      "correct_abstention": 7
+      "answered_with_evidence": 30,
+      "answered_without_evidence": 3,
+      "false_abstention": 11,
+      "correct_abstention": 6
     }
   },
-  "verdict_accuracy": 0.7,
-  "verdict_parsed_rate": 0.86,
+  "verdict_accuracy": 0.78,
+  "verdict_parsed_rate": 0.94,
   "confusion": {
     "SUPPORT": {
-      "SUPPORT": 12,
+      "SUPPORT": 14,
       "CONTRADICT": 1,
       "NEI": 2,
-      "NONE": 4
+      "NONE": 2
     },
     "CONTRADICT": {
       "SUPPORT": 0,
-      "CONTRADICT": 9,
-      "NEI": 4,
-      "NONE": 0
+      "CONTRADICT": 11,
+      "NEI": 1,
+      "NONE": 1
     },
     "NEI": {
       "SUPPORT": 4,
@@ -48,10 +48,12 @@
       "NONE": 0
     }
   },
-  "judge_answered_fallbacks": 7,
+  "judge_answered_fallbacks": 3,
+  "truncated_answers": 0,
+  "retried_answers": 0,
   "judge_verdict_agreement": 1.0,
-  "faithfulness_answered": 0.9767,
-  "context_relevance": 0.703,
+  "faithfulness_answered": 0.8333,
+  "context_relevance": 0.615,
   "by_label": {
     "SUPPORT": {
       "n": 19,
@@ -59,7 +61,7 @@
     },
     "CONTRADICT": {
       "n": 13,
-      "answered": 9
+      "answered": 12
     },
     "NEI": {
       "n": 18,
@@ -67,19 +69,63 @@
     }
   },
   "generator_model": "openai/gpt-oss-120b",
-  "judge_model": "qwen/qwen3.8-27b",
+  "judge_model": "nvidia/nemotron-3-ultra-550b-a55b:free",
+  "generator_provider": "openrouter",
+  "judge_provider": "openrouter",
   "top_k": 5,
   "sample_seed": 13,
   "skipped": 0,
   "skip_reasons": {},
   "judge_parse_failures": 0,
   "judge_calls": 50,
+  "cost": {
+    "reported_usd": 0.004898,
+    "counted_usd": 0.004898,
+    "unreported_paid_generations": 0,
+    "ceiling_usd": 0.1,
+    "judge_reported_usd": 0.0
+  },
   "run": {
-    "git_sha": "1edff63c6b54a9aa39cc6f5171581c0b75ede368",
+    "git_sha": "133e9c7a998d8435ed4a413fc2976148b7d96596",
     "prompt_hash": "d0921f4e69fc32f9da7ab88f4f7c88bc3cb25591bc5db11793807133c4bbd78b",
     "judge_prompt_hash": "62bb62544847d70bb5839669e2974f9e79aca5311745d5660a6746261448d86f",
     "generator_model": "openai/gpt-oss-120b",
-    "judge_model": "qwen/qwen3.8-27b",
+    "generator_provider": "openrouter",
+    "generator_base_url": "https://openrouter.ai/api/v1",
+    "generator_extra_body": {
+      "provider": {
+        "order": [
+          "akashml/bf16",
+          "deepinfra/bf16"
+        ],
+        "allow_fallbacks": false,
+        "quantizations": [
+          "bf16"
+        ],
+        "max_price": {
+          "prompt": 0.03,
+          "completion": 0.17
+        }
+      }
+    },
+    "generator_max_completion_tokens": 1024,
+    "generator_reasoning_effort": "medium",
+    "generator_reasoning_param": "reasoning.effort",
+    "judge_model": "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "judge_provider": "openrouter",
+    "judge_base_url": "https://openrouter.ai/api/v1",
+    "judge_extra_body": {
+      "provider": {
+        "allow_fallbacks": false,
+        "max_price": {
+          "prompt": 0,
+          "completion": 0
+        }
+      },
+      "reasoning": {
+        "effort": "none"
+      }
+    },
     "mode": "hybrid",
     "reranker_model": null,
     "top_k": 5,
@@ -95,7 +141,8 @@
       "dataset": "beir/scifact/test",
       "source_zip_sha256": "536e14446a0ba56ed1398ab1055f39fe852686ecad24a6306c80c490fa8e0165"
     },
-    "answered_source": "verdict line when parsed (answered = verdict != NOT ENOUGH EVIDENCE); the judge's `answered` field only when no verdict line was parsed"
+    "answered_source": "verdict line when parsed (answered = verdict != NOT ENOUGH EVIDENCE); the judge's `answered` field only when no verdict line was parsed",
+    "throttle_s": 5.0
   },
   "rows": [
     {
@@ -119,7 +166,7 @@
       "evidence_qrels": true,
       "abstention_class": "answered_with_evidence",
       "abstention_class_qrels": "answered_with_evidence",
-      "answer": "The passage reports that the Aedes aegypti C\u2011type lectin mosGCTL\u20111 \u201cis induced by WNV\u201d\u30101\u3011.",
+      "answer": "Verdict: SUPPORTED",
       "cited_doc_ids": [],
       "retrieved_doc_ids": [
         "12885341",
@@ -127,7 +174,14 @@
         "34287602",
         "10648422",
         "6144969"
-      ]
+      ],
+      "finish_reason": "stop",
+      "truncated": false,
+      "generation_attempts": 1,
+      "completion_tokens": 100,
+      "reasoning_tokens": 0,
+      "generation_cost_usd": 7.379e-05,
+      "generation_provider": "AkashML"
     },
     {
       "query_id": "598",
@@ -150,15 +204,24 @@
       "evidence_qrels": true,
       "abstention_class": "answered_with_evidence",
       "abstention_class_qrels": "answered_with_evidence",
-      "answer": "Verdict: REFUTED",
-      "cited_doc_ids": [],
+      "answer": "The Finnish mass screening program led to a marked decline in cervical cancer incidence (from 15.4 to 2.7 per\u202f10\u2075 woman\u2011years) rather than an increase, and similar declines were observed in comparative data from Finland versus the Netherlands[1]. Thus, the claim that nationwide cytology\u2011based screening programs have increased cervical cancer incidence is not supported by the provided evidence.",
+      "cited_doc_ids": [
+        "36355784"
+      ],
       "retrieved_doc_ids": [
         "36355784",
         "46695481",
         "25742130",
         "27446873",
         "27873158"
-      ]
+      ],
+      "finish_reason": "stop",
+      "truncated": false,
+      "generation_attempts": 1,
+      "completion_tokens": 264,
+      "reasoning_tokens": 0,
+      "generation_cost_usd": 0.00013038,
+      "generation_provider": "AkashML"
     },
     {
       "query_id": "1180",
@@ -181,15 +244,25 @@
       "evidence_qrels": true,
       "abstention_class": "answered_with_evidence",
       "abstention_class_qrels": "answered_with_evidence",
-      "answer": "The context describes MDA5 as a cytoplasmic RNA sensor that detects viral RNA and initiates type\u202fI interferon responses to RNA virus infection (e.g., coronavirus, encephalomyocarditis virus, infectious bursal disease virus)\u30102\u2020L1-L4\u3011\u30105\u2020L1-L4\u3011.",
-      "cited_doc_ids": [],
+      "answer": "The context describes MDA5 as a cytoplasmic RNA sensor that detects viral RNA and initiates type\u202fI interferon responses, including recognition of coronavirus and infectious bursal disease virus RNAs[2][5].",
+      "cited_doc_ids": [
+        "2566674",
+        "14474178"
+      ],
       "retrieved_doc_ids": [
         "44366096",
         "2566674",
         "31272411",
         "10627801",
         "14474178"
-      ]
+      ],
+      "finish_reason": "stop",
+      "truncated": false,
+      "generation_attempts": 1,
+      "completion_tokens": 270,
+      "reasoning_tokens": 206,
+      "generation_cost_usd": 0.00010338,
+      "generation_provider": "AkashML"
     },
     {
       "query_id": "1221",
@@ -207,7 +280,7 @@
       "answered_source": "verdict",
       "judge_answered": false,
       "faithfulness": 1.0,
-      "context_relevance": 0.1,
+      "context_relevance": 0.0,
       "evidence": false,
       "evidence_qrels": false,
       "abstention_class": "correct_abstention",
@@ -220,7 +293,14 @@
         "7211056",
         "16732790",
         "2402323"
-      ]
+      ],
+      "finish_reason": "stop",
+      "truncated": false,
+      "generation_attempts": 1,
+      "completion_tokens": 135,
+      "reasoning_tokens": 127,
+      "generation_cost_usd": 8.469e-05,
+      "generation_provider": "AkashML"
     },
     {
       "query_id": "386",
@@ -243,15 +323,24 @@
       "evidence_qrels": true,
       "abstention_class": "answered_with_evidence",
       "abstention_class_qrels": "answered_with_evidence",
-      "answer": "Verdict: SUPPORTED",
-      "cited_doc_ids": [],
+      "answer": "The study found that most peripheral IV drug errors occurred when giving bolus doses or preparing drugs that required multiple\u2011step preparation[1].",
+      "cited_doc_ids": [
+        "16495649"
+      ],
       "retrieved_doc_ids": [
         "16495649",
         "21260231",
         "42404093",
         "38799797",
         "12258338"
-      ]
+      ],
+      "finish_reason": "stop",
+      "truncated": false,
+      "generation_attempts": 1,
+      "completion_tokens": 145,
+      "reasoning_tokens": 131,
+      "generation_cost_usd": 9.266e-05,
+      "generation_provider": "AkashML"
     },
     {
       "query_id": "775",
@@ -267,7 +356,7 @@
       "answered_source": "verdict",
       "judge_answered": false,
       "faithfulness": 1.0,
-      "context_relevance": 0.2,
+      "context_relevance": 0.0,
       "evidence": false,
       "evidence_qrels": false,
       "abstention_class": "correct_abstention",
@@ -280,7 +369,14 @@
         "12552297",
         "27635177",
         "43014661"
-      ]
+      ],
+      "finish_reason": "stop",
+      "truncated": false,
+      "generation_attempts": 1,
+      "completion_tokens": 91,
+      "reasoning_tokens": 0,
+      "generation_cost_usd": 6.476e-05,
+      "generation_provider": "AkashML"
     },
     {
       "query_id": "1279",
@@ -295,8 +391,8 @@
       "answered": true,
       "answered_source": "verdict",
       "judge_answered": true,
-      "faithfulness": 0.8,
-      "context_relevance": 0.9,
+      "faithfulness": 0.0,
+      "context_relevance": 0.5,
       "evidence": false,
       "evidence_qrels": true,
       "abstention_class": "answered_without_evidence",
@@ -309,7 +405,14 @@
         "52180874",
         "25589047",
         "1900152"
-      ]
+      ],
+      "finish_reason": "stop",
+      "truncated": false,
+      "generation_attempts": 1,
+      "completion_tokens": 361,
+      "reasoning_tokens": 433,
+      "generation_cost_usd": 0.00012332,
+      "generation_provider": "AkashML"
     },
     {
       "query_id": "859",
@@ -327,7 +430,7 @@
       "answered_source": "verdict",
       "judge_answered": true,
       "faithfulness": 1.0,
-      "context_relevance": 0.9,
+      "context_relevance": 0.4,
       "evidence": true,
       "evidence_qrels": true,
       "abstention_class": "answered_with_evidence",
@@ -340,7 +443,14 @@
         "12315072",
         "9076196",
         "13007205"
-      ]
+      ],
+      "finish_reason": "stop",
+      "truncated": false,
+      "generation_attempts": 1,
+      "completion_tokens": 220,
+      "reasoning_tokens": 0,
+      "generation_cost_usd": 9.536e-05,
+      "generation_provider": "AkashML"
     },
     {
       "query_id": "1339",
@@ -358,20 +468,29 @@
       "answered_source": "verdict",
       "judge_answered": true,
       "faithfulness": 1.0,
-      "context_relevance": 0.9,
+      "context_relevance": 1.0,
       "evidence": true,
       "evidence_qrels": true,
       "abstention_class": "answered_with_evidence",
       "abstention_class_qrels": "answered_with_evidence",
-      "answer": "Verdict: REFUTED",
-      "cited_doc_ids": [],
+      "answer": "The systematic review reported that ultrasound imaging significantly reduced the risk of traumatic procedures (risk ratio\u202f0.27,\u202fP\u202f=\u202f0.005) compared with standard palpation methods [1]. Thus, ultrasound guidance does not raise, but rather lowers, the number of traumatic needle\u2011insertion events.",
+      "cited_doc_ids": [
+        "15482274"
+      ],
       "retrieved_doc_ids": [
         "15482274",
         "52874170",
         "11718220",
         "18062308",
         "25691541"
-      ]
+      ],
+      "finish_reason": "stop",
+      "truncated": false,
+      "generation_attempts": 1,
+      "completion_tokens": 361,
+      "reasoning_tokens": 0,
+      "generation_cost_usd": 0.00014096,
+      "generation_provider": "AkashML"
     },
     {
       "query_id": "1150",
@@ -389,20 +508,29 @@
       "answered_source": "verdict",
       "judge_answered": true,
       "faithfulness": 1.0,
-      "context_relevance": 0.95,
+      "context_relevance": 1.0,
       "evidence": true,
       "evidence_qrels": true,
       "abstention_class": "answered_with_evidence",
       "abstention_class_qrels": "answered_with_evidence",
-      "answer": "The passage reports that Tetraspanin\u202f3 is required for leukemia stem\u2011cell self\u2011renewal and disease propagation, and that its inhibition blocks growth of AML patient samples, indicating it plays a causal role in AML development and progression\u30101\u3011.",
-      "cited_doc_ids": [],
+      "answer": "The passage reports that Tetraspanin\u202f3 is required for leukemia stem\u2011cell self\u2011renewal and disease propagation, and that its inhibition blocks growth of AML patient samples, identifying it as an important regulator of aggressive leukemias[1].",
+      "cited_doc_ids": [
+        "11369420"
+      ],
       "retrieved_doc_ids": [
         "11369420",
         "5765455",
         "9460704",
         "8427306",
         "25832301"
-      ]
+      ],
+      "finish_reason": "stop",
+      "truncated": false,
+      "generation_attempts": 1,
+      "completion_tokens": 317,
+      "reasoning_tokens": 0,
+      "generation_cost_usd": 0.00010762,
+      "generation_provider": "AkashML"
     },
     {
       "query_id": "350",
@@ -417,23 +545,28 @@
       "answered": true,
       "answered_source": "verdict",
       "judge_answered": true,
-      "faithfulness": 0.8,
-      "context_relevance": 0.9,
+      "faithfulness": 0.0,
+      "context_relevance": 0.3,
       "evidence": false,
       "evidence_qrels": true,
       "abstention_class": "answered_without_evidence",
       "abstention_class_qrels": "answered_with_evidence",
-      "answer": "The context indicates that IF3 participates in selecting the initiator tRNA during initiation, implying that discrimination between initiator and elongation tRNAs relies on IF3 [1].",
-      "cited_doc_ids": [
-        "16927286"
-      ],
+      "answer": "Verdict: SUPPORTED",
+      "cited_doc_ids": [],
       "retrieved_doc_ids": [
         "16927286",
         "23342686",
         "30261663",
         "13072112",
         "39729277"
-      ]
+      ],
+      "finish_reason": "stop",
+      "truncated": false,
+      "generation_attempts": 1,
+      "completion_tokens": 229,
+      "reasoning_tokens": 0,
+      "generation_cost_usd": 8.648e-05,
+      "generation_provider": "AkashML"
     },
     {
       "query_id": "820",
@@ -449,7 +582,7 @@
       "answered_source": "verdict",
       "judge_answered": false,
       "faithfulness": 1.0,
-      "context_relevance": 0.2,
+      "context_relevance": 0.0,
       "evidence": false,
       "evidence_qrels": false,
       "abstention_class": "correct_abstention",
@@ -462,7 +595,14 @@
         "36540079",
         "25799020",
         "8712839"
-      ]
+      ],
+      "finish_reason": "stop",
+      "truncated": false,
+      "generation_attempts": 1,
+      "completion_tokens": 152,
+      "reasoning_tokens": 170,
+      "generation_cost_usd": 7.354e-05,
+      "generation_provider": "AkashML"
     },
     {
       "query_id": "637",
@@ -478,7 +618,7 @@
       "answered_source": "verdict",
       "judge_answered": false,
       "faithfulness": 1.0,
-      "context_relevance": 0.8,
+      "context_relevance": 0.3,
       "evidence": false,
       "evidence_qrels": true,
       "abstention_class": "correct_abstention",
@@ -491,7 +631,14 @@
         "31612088",
         "31019903",
         "73473433"
-      ]
+      ],
+      "finish_reason": "stop",
+      "truncated": false,
+      "generation_attempts": 1,
+      "completion_tokens": 166,
+      "reasoning_tokens": 0,
+      "generation_cost_usd": 7.502e-05,
+      "generation_provider": "AkashML"
     },
     {
       "query_id": "1298",
@@ -503,18 +650,18 @@
       "qrels_doc_ids": [
         "11718220"
       ],
-      "verdict": null,
-      "predicted_label": "NONE",
+      "verdict": "SUPPORTED",
+      "predicted_label": "SUPPORT",
       "answered": true,
-      "answered_source": "judge",
+      "answered_source": "verdict",
       "judge_answered": true,
       "faithfulness": 1.0,
-      "context_relevance": 0.95,
+      "context_relevance": 1.0,
       "evidence": true,
       "evidence_qrels": true,
       "abstention_class": "answered_with_evidence",
       "abstention_class_qrels": "answered_with_evidence",
-      "answer": "The CLOTS trial in 2,518 immobile acute\u2011stroke patients found that thigh\u2011length graduated compression stockings resulted in a 10.0\u202f% DVT rate versus 10.5\u202f% without stockings, an absolute reduction of only 0.5\u202f% that was not statistically significant, leading the investigators to conclude that the data do not support using thigh\u2011length GCS in",
+      "answer": "Verdict: SUPPORTED",
       "cited_doc_ids": [],
       "retrieved_doc_ids": [
         "11718220",
@@ -522,7 +669,14 @@
         "34338075",
         "29981186",
         "1387104"
-      ]
+      ],
+      "finish_reason": "stop",
+      "truncated": false,
+      "generation_attempts": 1,
+      "completion_tokens": 185,
+      "reasoning_tokens": 0,
+      "generation_cost_usd": 0.0001111,
+      "generation_provider": "AkashML"
     },
     {
       "query_id": "956",
@@ -537,13 +691,13 @@
       "answered": true,
       "answered_source": "verdict",
       "judge_answered": true,
-      "faithfulness": 1.0,
-      "context_relevance": 0.9,
+      "faithfulness": 0.9,
+      "context_relevance": 0.95,
       "evidence": false,
       "evidence_qrels": true,
       "abstention_class": "answered_without_evidence",
       "abstention_class_qrels": "answered_with_evidence",
-      "answer": "The provided studies describe how GLP\u20111R can engage multiple intracellular pathways and exhibit biased agonism, indicating that its pleiotropic coupling to different effectors yields distinct signaling outcomes\u30101\u2020L1-L4\u3011\u30103\u2020L1-L4\u3011.",
+      "answer": "Verdict: SUPPORTED",
       "cited_doc_ids": [],
       "retrieved_doc_ids": [
         "12956194",
@@ -551,7 +705,14 @@
         "21754541",
         "3610282",
         "31107919"
-      ]
+      ],
+      "finish_reason": "stop",
+      "truncated": false,
+      "generation_attempts": 1,
+      "completion_tokens": 149,
+      "reasoning_tokens": 0,
+      "generation_cost_usd": 8.5e-05,
+      "generation_provider": "AkashML"
     },
     {
       "query_id": "539",
@@ -569,20 +730,29 @@
       "answered_source": "verdict",
       "judge_answered": true,
       "faithfulness": 1.0,
-      "context_relevance": 0.95,
+      "context_relevance": 1.0,
       "evidence": true,
       "evidence_qrels": true,
       "abstention_class": "answered_with_evidence",
       "abstention_class_qrels": "answered_with_evidence",
-      "answer": "The study of older patients with type\u202f2 diabetes found that having severe hypoglycemic episodes that required hospitalization was linked to a higher risk of developing dementia, with hazard ratios increasing with the number of episodes (e.g., HR\u202f1.26 for one episode, HR\u202f1.94 for three or more)\u30101\u3011.",
-      "cited_doc_ids": [],
+      "answer": "The study of older patients with type\u202f2 diabetes found that severe hypoglycemic episodes requiring hospitalization were linked to a higher risk of developing dementia, with hazard ratios increasing with the number of episodes (e.g., HR\u202f1.26 for one episode, HR\u202f1.94 for three or more)[1].",
+      "cited_doc_ids": [
+        "13282296"
+      ],
       "retrieved_doc_ids": [
         "13282296",
         "21472388",
         "11953232",
         "14682243",
         "20697217"
-      ]
+      ],
+      "finish_reason": "stop",
+      "truncated": false,
+      "generation_attempts": 1,
+      "completion_tokens": 146,
+      "reasoning_tokens": 84,
+      "generation_cost_usd": 0.00010516,
+      "generation_provider": "AkashML"
     },
     {
       "query_id": "236",
@@ -600,7 +770,7 @@
       "answered_source": "verdict",
       "judge_answered": false,
       "faithfulness": 1.0,
-      "context_relevance": 0.8,
+      "context_relevance": 0.5,
       "evidence": true,
       "evidence_qrels": true,
       "abstention_class": "false_abstention",
@@ -613,7 +783,14 @@
         "36708463",
         "22490293",
         "28390999"
-      ]
+      ],
+      "finish_reason": "stop",
+      "truncated": false,
+      "generation_attempts": 1,
+      "completion_tokens": 111,
+      "reasoning_tokens": 0,
+      "generation_cost_usd": 7.734e-05,
+      "generation_provider": "AkashML"
     },
     {
       "query_id": "702",
@@ -629,7 +806,7 @@
       "answered_source": "verdict",
       "judge_answered": false,
       "faithfulness": 1.0,
-      "context_relevance": 0.2,
+      "context_relevance": 0.0,
       "evidence": false,
       "evidence_qrels": true,
       "abstention_class": "correct_abstention",
@@ -642,7 +819,14 @@
         "38675228",
         "19950357",
         "20402596"
-      ]
+      ],
+      "finish_reason": "stop",
+      "truncated": false,
+      "generation_attempts": 1,
+      "completion_tokens": 136,
+      "reasoning_tokens": 0,
+      "generation_cost_usd": 6.974e-05,
+      "generation_provider": "AkashML"
     },
     {
       "query_id": "759",
@@ -655,25 +839,35 @@
         "1805641"
       ],
       "verdict": null,
-      "predicted_label": "NEI",
-      "answered": false,
+      "predicted_label": "NONE",
+      "answered": true,
       "answered_source": "judge",
-      "judge_answered": false,
-      "faithfulness": 0.0,
-      "context_relevance": 0.9,
+      "judge_answered": true,
+      "faithfulness": 0.9,
+      "context_relevance": 0.95,
       "evidence": true,
       "evidence_qrels": true,
-      "abstention_class": "false_abstention",
-      "abstention_class_qrels": "false_abstention",
-      "answer": "Mathematical modelling in Tanzania showed that replacing existing treatment with",
-      "cited_doc_ids": [],
+      "abstention_class": "answered_with_evidence",
+      "abstention_class_qrels": "answered_with_evidence",
+      "answer": "Mathematical modelling studies have found that introducing ACTs can markedly lower malaria transmission compared with non\u2011gametocytocidal regimens. In Tanzania, a model predicted up to a 53\u202f% reduction in infection prevalence when all treatment was switched to ACT, with impacts comparable to insecticide\u2011treated nets in low\u2011transmission areas[1]. A separate model of Cambodian elimination efforts showed that high\u2011coverage ACT treatment produced a sustained, long\u2011term decline in parasite prevalence, whereas non\u2011ACT strategies had far smaller effects[2].",
+      "cited_doc_ids": [
+        "1805641",
+        "3929361"
+      ],
       "retrieved_doc_ids": [
         "1805641",
         "3929361",
         "12409683",
         "10617916",
         "18074797"
-      ]
+      ],
+      "finish_reason": "stop",
+      "truncated": false,
+      "generation_attempts": 1,
+      "completion_tokens": 355,
+      "reasoning_tokens": 276,
+      "generation_cost_usd": 0.00014015,
+      "generation_provider": "AkashML"
     },
     {
       "query_id": "1336",
@@ -690,23 +884,28 @@
       "answered": true,
       "answered_source": "verdict",
       "judge_answered": true,
-      "faithfulness": 1.0,
-      "context_relevance": 0.9,
+      "faithfulness": 0.0,
+      "context_relevance": 0.8,
       "evidence": true,
       "evidence_qrels": true,
       "abstention_class": "answered_with_evidence",
       "abstention_class_qrels": "answered_with_evidence",
-      "answer": "The study found that recipients of cord\u2011blood grafts achieved T\u2011cell receptor diversity similar to that of healthy individuals, indicating no reduction in diversity after transplantation [2].",
-      "cited_doc_ids": [
-        "27910499"
-      ],
+      "answer": "Verdict: REFUTED",
+      "cited_doc_ids": [],
       "retrieved_doc_ids": [
         "27243019",
         "27910499",
         "43587663",
         "20220731",
         "24795767"
-      ]
+      ],
+      "finish_reason": "stop",
+      "truncated": false,
+      "generation_attempts": 1,
+      "completion_tokens": 131,
+      "reasoning_tokens": 133,
+      "generation_cost_usd": 7.687e-05,
+      "generation_provider": "AkashML"
     },
     {
       "query_id": "452",
@@ -726,12 +925,12 @@
       "answered_source": "verdict",
       "judge_answered": true,
       "faithfulness": 1.0,
-      "context_relevance": 0.9,
+      "context_relevance": 1.0,
       "evidence": false,
       "evidence_qrels": false,
       "abstention_class": "answered_without_evidence",
       "abstention_class_qrels": "answered_without_evidence",
-      "answer": "The single\u2011cell RNA\u2011seq analysis revealed abundant (12\u201324\u202f%) random monoallelic expression of autosomal genes, showing that genetically identical cells can differ markedly in which allele is transcribed [4]. Likewise, allelic expression studies in T\u2011cell clones demonstrated both monoallelic and biallelic expression, indicating considerable expression variability among identical cells [5].",
+      "answer": "The single\u2011cell RNA\u2011seq study found abundant (12\u201324\u202f%) random monoallelic expression of autosomal genes and considerable variation among closely related embryonic cells, indicating that genetically identical cells can differ markedly in which allele they express[4]. Similarly, allelic expression analyses in T\u2011cell clones showed both monoallelic and biallelic expression patterns, demonstrating independent regulation of alleles in genetically identical cells[5].",
       "cited_doc_ids": [
         "9154703",
         "36242796"
@@ -742,7 +941,14 @@
         "9196472",
         "9154703",
         "36242796"
-      ]
+      ],
+      "finish_reason": "stop",
+      "truncated": false,
+      "generation_attempts": 1,
+      "completion_tokens": 233,
+      "reasoning_tokens": 163,
+      "generation_cost_usd": 8.731e-05,
+      "generation_provider": "AkashML"
     },
     {
       "query_id": "971",
@@ -765,21 +971,31 @@
       "answered": true,
       "answered_source": "judge",
       "judge_answered": true,
-      "faithfulness": 0.85,
+      "faithfulness": 0.9,
       "context_relevance": 0.95,
       "evidence": true,
       "evidence_qrels": true,
       "abstention_class": "answered_with_evidence",
       "abstention_class_qrels": "answered_with_evidence",
-      "answer": "",
-      "cited_doc_ids": [],
+      "answer": "The trials show that HPV\u2011based primary screening identifies more CIN\u202f2 lesions than cytology alone. In women aged 35\u201160, the first round of HPV screening detected CIN\u202f2 at twice the rate of conventional cytology (relative detection\u202f=\u202f2.00) whereas the second round showed fewer new CIN\u202f2 detections, indicating earlier and more sensitive identification of existing CIN\u202f2 lesions[4]. This higher detection at the initial screen demonstrates greater longitudinal sensitivity of HPV testing for CIN\u202f2 compared with conventional cytology[1].",
+      "cited_doc_ids": [
+        "46695481",
+        "27873158"
+      ],
       "retrieved_doc_ids": [
         "46695481",
         "27446873",
         "6561200",
         "27873158",
         "9764256"
-      ]
+      ],
+      "finish_reason": "stop",
+      "truncated": false,
+      "generation_attempts": 1,
+      "completion_tokens": 533,
+      "reasoning_tokens": 0,
+      "generation_cost_usd": 0.00020788,
+      "generation_provider": "AkashML"
     },
     {
       "query_id": "811",
@@ -797,12 +1013,12 @@
       "answered_source": "verdict",
       "judge_answered": true,
       "faithfulness": 1.0,
-      "context_relevance": 0.9,
+      "context_relevance": 1.0,
       "evidence": true,
       "evidence_qrels": true,
       "abstention_class": "answered_with_evidence",
       "abstention_class_qrels": "answered_with_evidence",
-      "answer": "The passage reports that mice lacking the SVCT2 transporter (Slc23a1\u2212/\u2212) have dramatically reduced ascorbic\u2011acid uptake, with undetectable or markedly lowered vitamin\u202fC levels in blood and tissues, leading to perinatal lethality\u30101\u2020L4-L9\u3011. This contradicts the claim of greatly increased ascorbic\u2011acid levels in brain and adrenals.",
+      "answer": "Verdict: REFUTED",
       "cited_doc_ids": [],
       "retrieved_doc_ids": [
         "19799455",
@@ -810,7 +1026,14 @@
         "23868856",
         "8698208",
         "7221410"
-      ]
+      ],
+      "finish_reason": "stop",
+      "truncated": false,
+      "generation_attempts": 1,
+      "completion_tokens": 151,
+      "reasoning_tokens": 0,
+      "generation_cost_usd": 8.678e-05,
+      "generation_provider": "AkashML"
     },
     {
       "query_id": "536",
@@ -828,20 +1051,29 @@
       "answered_source": "verdict",
       "judge_answered": true,
       "faithfulness": 1.0,
-      "context_relevance": 0.95,
+      "context_relevance": 1.0,
       "evidence": true,
       "evidence_qrels": true,
       "abstention_class": "answered_with_evidence",
       "abstention_class_qrels": "answered_with_evidence",
-      "answer": "Verdict: SUPPORTED",
-      "cited_doc_ids": [],
+      "answer": "The context reports that activation of orexin (hypocretin)\u2011producing neurons is required for rats to develop a panic\u2011prone state, and that blocking orexin signaling prevents these panic responses[1].",
+      "cited_doc_ids": [
+        "16056514"
+      ],
       "retrieved_doc_ids": [
         "16056514",
         "14419116",
         "9194077",
         "17506075",
         "14924526"
-      ]
+      ],
+      "finish_reason": "stop",
+      "truncated": false,
+      "generation_attempts": 1,
+      "completion_tokens": 143,
+      "reasoning_tokens": 91,
+      "generation_cost_usd": 7.255e-05,
+      "generation_provider": "AkashML"
     },
     {
       "query_id": "718",
@@ -853,18 +1085,18 @@
       "qrels_doc_ids": [
         "17587795"
       ],
-      "verdict": null,
-      "predicted_label": "NEI",
-      "answered": false,
-      "answered_source": "judge",
-      "judge_answered": false,
+      "verdict": "REFUTED",
+      "predicted_label": "CONTRADICT",
+      "answered": true,
+      "answered_source": "verdict",
+      "judge_answered": true,
       "faithfulness": 0.0,
       "context_relevance": 0.2,
       "evidence": true,
       "evidence_qrels": true,
-      "abstention_class": "false_abstention",
-      "abstention_class_qrels": "false_abstention",
-      "answer": "The context reports",
+      "abstention_class": "answered_with_evidence",
+      "abstention_class_qrels": "answered_with_evidence",
+      "answer": "Verdict: REFUTED",
       "cited_doc_ids": [],
       "retrieved_doc_ids": [
         "17587795",
@@ -872,7 +1104,14 @@
         "18895793",
         "22038539",
         "7808055"
-      ]
+      ],
+      "finish_reason": "stop",
+      "truncated": false,
+      "generation_attempts": 1,
+      "completion_tokens": 268,
+      "reasoning_tokens": 299,
+      "generation_cost_usd": 0.00010478,
+      "generation_provider": "AkashML"
     },
     {
       "query_id": "1012",
@@ -895,15 +1134,24 @@
       "evidence_qrels": true,
       "abstention_class": "answered_with_evidence",
       "abstention_class_qrels": "answered_with_evidence",
-      "answer": "The study of 69 patients with non\u2011toxic multinodular goitre reported a median thyroid volume decrease from 73\u202fml to 29\u202fml (\u224860\u202f% reduction) after radioiodine treatment, confirming a substantial size reduction\u30101\u3011.",
-      "cited_doc_ids": [],
+      "answer": "The study of 69 patients with non\u2011toxic multinodular goitre treated with radioactive iodine reported a median thyroid volume decrease from 73\u202fml to 29\u202fml (\u224860\u202f% reduction) over 24\u202fmonths, confirming that radioiodine markedly reduces goitre size[1].",
+      "cited_doc_ids": [
+        "9745001"
+      ],
       "retrieved_doc_ids": [
         "9745001",
         "43122426",
         "26026009",
         "6751418",
         "37912677"
-      ]
+      ],
+      "finish_reason": "stop",
+      "truncated": false,
+      "generation_attempts": 1,
+      "completion_tokens": 333,
+      "reasoning_tokens": 0,
+      "generation_cost_usd": 0.0001272,
+      "generation_provider": "AkashML"
     },
     {
       "query_id": "237",
@@ -919,7 +1167,7 @@
       "answered_source": "verdict",
       "judge_answered": false,
       "faithfulness": 1.0,
-      "context_relevance": 0.2,
+      "context_relevance": 0.0,
       "evidence": false,
       "evidence_qrels": true,
       "abstention_class": "correct_abstention",
@@ -932,7 +1180,14 @@
         "34386619",
         "12824568",
         "17416520"
-      ]
+      ],
+      "finish_reason": "stop",
+      "truncated": false,
+      "generation_attempts": 1,
+      "completion_tokens": 175,
+      "reasoning_tokens": 0,
+      "generation_cost_usd": 8.63e-05,
+      "generation_provider": "AkashML"
     },
     {
       "query_id": "300",
@@ -948,7 +1203,7 @@
       "answered_source": "verdict",
       "judge_answered": false,
       "faithfulness": 1.0,
-      "context_relevance": 0.2,
+      "context_relevance": 0.0,
       "evidence": false,
       "evidence_qrels": true,
       "abstention_class": "correct_abstention",
@@ -961,7 +1216,14 @@
         "25937484",
         "15551129",
         "21622715"
-      ]
+      ],
+      "finish_reason": "stop",
+      "truncated": false,
+      "generation_attempts": 1,
+      "completion_tokens": 293,
+      "reasoning_tokens": 298,
+      "generation_cost_usd": 0.00011347,
+      "generation_provider": "AkashML"
     },
     {
       "query_id": "613",
@@ -973,26 +1235,35 @@
       "qrels_doc_ids": [
         "9638032"
       ],
-      "verdict": null,
-      "predicted_label": "NONE",
+      "verdict": "SUPPORTED",
+      "predicted_label": "SUPPORT",
       "answered": true,
-      "answered_source": "judge",
+      "answered_source": "verdict",
       "judge_answered": true,
       "faithfulness": 1.0,
-      "context_relevance": 0.95,
+      "context_relevance": 1.0,
       "evidence": true,
       "evidence_qrels": true,
       "abstention_class": "answered_with_evidence",
       "abstention_class_qrels": "answered_with_evidence",
-      "answer": "The study reports that raising microtubule acetylation\u2014by deacetylase inhibition, \u03b1\u2011tubulin acetyltransferase expression, or knockdown of HDAC6/Sirt2\u2014prevents mutant LRRK",
-      "cited_doc_ids": [],
+      "answer": "The study reports that raising microtubule acetylation\u2014by deacetylase inhibition, \u03b1TAT1 overexpression, or knockdown of HDAC6/Sirt2\u2014prevents mutant LRRK2 from associating with microtubules and restores both axonal transport and locomotor performance in vivo [1].",
+      "cited_doc_ids": [
+        "9638032"
+      ],
       "retrieved_doc_ids": [
         "9638032",
         "16056410",
         "36830715",
         "42035464",
         "27134527"
-      ]
+      ],
+      "finish_reason": "stop",
+      "truncated": false,
+      "generation_attempts": 1,
+      "completion_tokens": 417,
+      "reasoning_tokens": 0,
+      "generation_cost_usd": 0.00012273,
+      "generation_provider": "AkashML"
     },
     {
       "query_id": "587",
@@ -1008,12 +1279,12 @@
       "answered_source": "verdict",
       "judge_answered": false,
       "faithfulness": 1.0,
-      "context_relevance": 0.2,
+      "context_relevance": 0.3,
       "evidence": false,
       "evidence_qrels": true,
       "abstention_class": "correct_abstention",
       "abstention_class_qrels": "false_abstention",
-      "answer": "Verdict: NOT ENOUGH EVIDENCE",
+      "answer": "The provided passages describe Sox2\u2011GFP transgenic mice and note that Sox2\u2011GFP cells include subpopulations with different proliferation levels, but they do not give quantitative data on the proportion of GFP\u2011positive cells that co\u2011express proliferation markers. Therefore, the claim that fewer than ten percent of GFP\u2011positive cells colocalize with proliferation markers is not addressed by the context.",
       "cited_doc_ids": [],
       "retrieved_doc_ids": [
         "7142113",
@@ -1021,7 +1292,14 @@
         "16999023",
         "42855554",
         "39048693"
-      ]
+      ],
+      "finish_reason": "stop",
+      "truncated": false,
+      "generation_attempts": 1,
+      "completion_tokens": 318,
+      "reasoning_tokens": 0,
+      "generation_cost_usd": 0.00010335,
+      "generation_provider": "AkashML"
     },
     {
       "query_id": "551",
@@ -1037,7 +1315,7 @@
       "answered_source": "verdict",
       "judge_answered": false,
       "faithfulness": 1.0,
-      "context_relevance": 0.2,
+      "context_relevance": 0.5,
       "evidence": false,
       "evidence_qrels": false,
       "abstention_class": "correct_abstention",
@@ -1050,7 +1328,14 @@
         "9283422",
         "2825380",
         "34905328"
-      ]
+      ],
+      "finish_reason": "stop",
+      "truncated": false,
+      "generation_attempts": 1,
+      "completion_tokens": 187,
+      "reasoning_tokens": 0,
+      "generation_cost_usd": 8.006e-05,
+      "generation_provider": "AkashML"
     },
     {
       "query_id": "597",
@@ -1072,20 +1357,30 @@
       "answered_source": "verdict",
       "judge_answered": true,
       "faithfulness": 1.0,
-      "context_relevance": 0.95,
+      "context_relevance": 1.0,
       "evidence": true,
       "evidence_qrels": true,
       "abstention_class": "answered_with_evidence",
       "abstention_class_qrels": "answered_with_evidence",
-      "answer": "The Finnish data show that cervical cancer incidence fell from 15.4 per\u202f10\u2075 woman\u2011years in the early 1960s to 2.7 per\u202f10\u2075 in 1991, and later reports indicate continued declines (e.g., 4.0 per\u202f100,000 in 2003) compared with higher earlier rates\u30101\u2020L7-L12\u3011\u30102\u2020L9-L13\u3011.",
-      "cited_doc_ids": [],
+      "answer": "The Finnish data show that cervical cancer incidence fell from 15.4 per\u202f10\u2075 woman\u2011years in the early 1960s to 2.7 per\u202f10\u2075 in 1991, and incidence rates have continued to decline in later years (e.g., 4.0 per\u202f100,000 in 2003)[1][2].",
+      "cited_doc_ids": [
+        "36355784",
+        "25742130"
+      ],
       "retrieved_doc_ids": [
         "36355784",
         "25742130",
         "12779444",
         "23136735",
         "27446873"
-      ]
+      ],
+      "finish_reason": "stop",
+      "truncated": false,
+      "generation_attempts": 1,
+      "completion_tokens": 223,
+      "reasoning_tokens": 117,
+      "generation_cost_usd": 0.00010313,
+      "generation_provider": "AkashML"
     },
     {
       "query_id": "124",
@@ -1108,15 +1403,24 @@
       "evidence_qrels": true,
       "abstention_class": "answered_with_evidence",
       "abstention_class_qrels": "answered_with_evidence",
-      "answer": "The systematic review reported that antiretroviral therapy is strongly associated with a reduction in tuberculosis incidence in all baseline CD4 count categories (HR\u202f0.16 for <200\u202fcells/\u00b5l, HR\u202f0.34 for 200\u2013350\u202fcells/\u00b5l, HR\u202f0.43 for >350\u202fcells/\u00b5l, and HR\u202f0.35 overall)\u30101\u3011.",
-      "cited_doc_ids": [],
+      "answer": "The systematic review reported that antiretroviral therapy was strongly associated with a reduction in tuberculosis incidence in all baseline CD4 count categories, including <200, 200\u2013350, >350 cells/\u00b5l and overall, demonstrating benefit across a broad range of CD4 strata [1].",
+      "cited_doc_ids": [
+        "4883040"
+      ],
       "retrieved_doc_ids": [
         "4883040",
         "7111021",
         "31363207",
         "13899137",
         "21479231"
-      ]
+      ],
+      "finish_reason": "stop",
+      "truncated": false,
+      "generation_attempts": 1,
+      "completion_tokens": 363,
+      "reasoning_tokens": 300,
+      "generation_cost_usd": 0.00015117,
+      "generation_provider": "AkashML"
     },
     {
       "query_id": "5",
@@ -1134,20 +1438,29 @@
       "answered_source": "verdict",
       "judge_answered": true,
       "faithfulness": 1.0,
-      "context_relevance": 0.9,
+      "context_relevance": 1.0,
       "evidence": true,
       "evidence_qrels": true,
       "abstention_class": "answered_with_evidence",
       "abstention_class_qrels": "answered_with_evidence",
-      "answer": "The study found an overall prevalence of abnormal prion protein of 493 per\u202fmillion people, which is essentially 1 in\u202f2,000 (\u2248500 per\u202fmillion)\u30101\u3011.",
-      "cited_doc_ids": [],
+      "answer": "The survey found 16 positives among 32,441 appendix samples, giving an overall prevalence of 493 per\u202fmillion people, which is roughly 1 in\u202f2,000 ([1]).",
+      "cited_doc_ids": [
+        "13734012"
+      ],
       "retrieved_doc_ids": [
         "13734012",
         "103007",
         "18617259",
         "841371",
         "76415938"
-      ]
+      ],
+      "finish_reason": "stop",
+      "truncated": false,
+      "generation_attempts": 1,
+      "completion_tokens": 182,
+      "reasoning_tokens": 0,
+      "generation_cost_usd": 9.991e-05,
+      "generation_provider": "AkashML"
     },
     {
       "query_id": "593",
@@ -1165,7 +1478,7 @@
       "answered_source": "verdict",
       "judge_answered": true,
       "faithfulness": 1.0,
-      "context_relevance": 0.95,
+      "context_relevance": 1.0,
       "evidence": true,
       "evidence_qrels": true,
       "abstention_class": "answered_with_evidence",
@@ -1180,7 +1493,14 @@
         "24408040",
         "13481731",
         "27240667"
-      ]
+      ],
+      "finish_reason": "stop",
+      "truncated": false,
+      "generation_attempts": 1,
+      "completion_tokens": 271,
+      "reasoning_tokens": 213,
+      "generation_cost_usd": 0.00011648,
+      "generation_provider": "AkashML"
     },
     {
       "query_id": "830",
@@ -1190,18 +1510,18 @@
       "qrels_doc_ids": [
         "1897324"
       ],
-      "verdict": null,
+      "verdict": "NOT ENOUGH EVIDENCE",
       "predicted_label": "NEI",
       "answered": false,
-      "answered_source": "judge",
+      "answered_source": "verdict",
       "judge_answered": false,
-      "faithfulness": 0.0,
-      "context_relevance": 0.2,
+      "faithfulness": 1.0,
+      "context_relevance": 0.0,
       "evidence": false,
       "evidence_qrels": false,
       "abstention_class": "correct_abstention",
       "abstention_class_qrels": "correct_abstention",
-      "answer": "",
+      "answer": "Verdict: NOT ENOUGH EVIDENCE",
       "cited_doc_ids": [],
       "retrieved_doc_ids": [
         "735130",
@@ -1209,7 +1529,14 @@
         "52873726",
         "8417211",
         "46305977"
-      ]
+      ],
+      "finish_reason": "stop",
+      "truncated": false,
+      "generation_attempts": 1,
+      "completion_tokens": 219,
+      "reasoning_tokens": 0,
+      "generation_cost_usd": 9.51e-05,
+      "generation_provider": "AkashML"
     },
     {
       "query_id": "56",
@@ -1227,20 +1554,29 @@
       "answered_source": "verdict",
       "judge_answered": true,
       "faithfulness": 1.0,
-      "context_relevance": 0.95,
+      "context_relevance": 1.0,
       "evidence": true,
       "evidence_qrels": true,
       "abstention_class": "answered_with_evidence",
       "abstention_class_qrels": "answered_with_evidence",
-      "answer": "The passage reports that ApoE4\u2011expressing human iPSC\u2011derived neurons show increased amyloid\u2011\u03b2 production, elevated tau phosphorylation, and degeneration of GABAergic neurons\u30101\u3011.",
-      "cited_doc_ids": [],
+      "answer": "The passage reports that APOE4\u2011expressing human iPSC\u2011derived neurons show higher tau phosphorylation, increased amyloid\u2011\u03b2 (A\u03b2) production, and degeneration of GABAergic neurons[1]. This directly matches the claim.",
+      "cited_doc_ids": [
+        "4709641"
+      ],
       "retrieved_doc_ids": [
         "4709641",
         "4459491",
         "11659421",
         "10641715",
         "13969173"
-      ]
+      ],
+      "finish_reason": "stop",
+      "truncated": false,
+      "generation_attempts": 1,
+      "completion_tokens": 230,
+      "reasoning_tokens": 0,
+      "generation_cost_usd": 9.286e-05,
+      "generation_provider": "AkashML"
     },
     {
       "query_id": "716",
@@ -1256,7 +1592,7 @@
       "answered_source": "verdict",
       "judge_answered": false,
       "faithfulness": 1.0,
-      "context_relevance": 0.1,
+      "context_relevance": 0.0,
       "evidence": false,
       "evidence_qrels": false,
       "abstention_class": "correct_abstention",
@@ -1269,7 +1605,14 @@
         "6820680",
         "37438296",
         "9159495"
-      ]
+      ],
+      "finish_reason": "stop",
+      "truncated": false,
+      "generation_attempts": 1,
+      "completion_tokens": 136,
+      "reasoning_tokens": 0,
+      "generation_cost_usd": 6.956e-05,
+      "generation_provider": "AkashML"
     },
     {
       "query_id": "1140",
@@ -1287,20 +1630,29 @@
       "answered_source": "verdict",
       "judge_answered": true,
       "faithfulness": 1.0,
-      "context_relevance": 0.95,
+      "context_relevance": 1.0,
       "evidence": true,
       "evidence_qrels": true,
       "abstention_class": "answered_with_evidence",
       "abstention_class_qrels": "answered_with_evidence",
-      "answer": "The Physicians\u2019 Health Study II found that supplementation with vitamin\u202fE (400\u202fIU every other day) did not reduce the incidence of prostate cancer (hazard ratio\u202f0.97; not statistically significant)\u30101\u3011.",
-      "cited_doc_ids": [],
+      "answer": "The Physicians\u2019 Health Study II found that vitamin\u202fE supplementation (400\u202fIU every other day) did not reduce prostate cancer risk (HR\u202f0.97; not significant)[1].",
+      "cited_doc_ids": [
+        "12009265"
+      ],
       "retrieved_doc_ids": [
         "12009265",
         "308862",
         "24581365",
         "6407356",
         "25513319"
-      ]
+      ],
+      "finish_reason": "stop",
+      "truncated": false,
+      "generation_attempts": 1,
+      "completion_tokens": 197,
+      "reasoning_tokens": 145,
+      "generation_cost_usd": 0.00011137,
+      "generation_provider": "AkashML"
     },
     {
       "query_id": "552",
@@ -1316,7 +1668,7 @@
       "answered_source": "verdict",
       "judge_answered": false,
       "faithfulness": 1.0,
-      "context_relevance": 0.8,
+      "context_relevance": 0.0,
       "evidence": false,
       "evidence_qrels": true,
       "abstention_class": "correct_abstention",
@@ -1329,7 +1681,14 @@
         "10675756",
         "11415809",
         "14340571"
-      ]
+      ],
+      "finish_reason": "stop",
+      "truncated": false,
+      "generation_attempts": 1,
+      "completion_tokens": 156,
+      "reasoning_tokens": 0,
+      "generation_cost_usd": 8.778e-05,
+      "generation_provider": "AkashML"
     },
     {
       "query_id": "171",
@@ -1347,22 +1706,27 @@
       "answered_source": "verdict",
       "judge_answered": true,
       "faithfulness": 1.0,
-      "context_relevance": 0.9,
+      "context_relevance": 1.0,
       "evidence": true,
       "evidence_qrels": true,
       "abstention_class": "answered_with_evidence",
       "abstention_class_qrels": "answered_with_evidence",
-      "answer": "The passage describes basophils as being activated in SLE and promoting autoantibody production that leads to lupus nephritis, indicating they contribute to disease rather than counteract it [1].",
-      "cited_doc_ids": [
-        "12670680"
-      ],
+      "answer": "Verdict: REFUTED",
+      "cited_doc_ids": [],
       "retrieved_doc_ids": [
         "12670680",
         "14938990",
         "28149602",
         "28015516",
         "1049501"
-      ]
+      ],
+      "finish_reason": "stop",
+      "truncated": false,
+      "generation_attempts": 1,
+      "completion_tokens": 157,
+      "reasoning_tokens": 164,
+      "generation_cost_usd": 8.135e-05,
+      "generation_provider": "AkashML"
     },
     {
       "query_id": "834",
@@ -1377,21 +1741,31 @@
       "answered": true,
       "answered_source": "verdict",
       "judge_answered": true,
-      "faithfulness": 0.85,
+      "faithfulness": 0.8,
       "context_relevance": 0.6,
       "evidence": false,
       "evidence_qrels": false,
       "abstention_class": "answered_without_evidence",
       "abstention_class_qrels": "answered_without_evidence",
-      "answer": "The passages describe that nitric\u2011oxide synthase can produce both superoxide and nitric oxide, which then combine to form peroxynitrite without involving NOX2 activity\u30101\u2020L1-L9\u3011\u30102\u2020L4-L9\u3011.",
-      "cited_doc_ids": [],
+      "answer": "The passages describe that nitric\u2011oxide synthase (NOS) can produce both superoxide and nitric oxide, which then react to form peroxynitrite without involving NOX2 activity[1][2].",
+      "cited_doc_ids": [
+        "23100962",
+        "23122306"
+      ],
       "retrieved_doc_ids": [
         "23100962",
         "23122306",
         "46328296",
         "12631182",
         "7230315"
-      ]
+      ],
+      "finish_reason": "stop",
+      "truncated": false,
+      "generation_attempts": 1,
+      "completion_tokens": 229,
+      "reasoning_tokens": 0,
+      "generation_cost_usd": 8.993e-05,
+      "generation_provider": "AkashML"
     },
     {
       "query_id": "721",
@@ -1424,7 +1798,14 @@
         "5476778",
         "5800138",
         "13106686"
-      ]
+      ],
+      "finish_reason": "stop",
+      "truncated": false,
+      "generation_attempts": 1,
+      "completion_tokens": 293,
+      "reasoning_tokens": 272,
+      "generation_cost_usd": 0.00010255,
+      "generation_provider": "AkashML"
     },
     {
       "query_id": "75",
@@ -1439,8 +1820,8 @@
       "answered": false,
       "answered_source": "verdict",
       "judge_answered": false,
-      "faithfulness": 1.0,
-      "context_relevance": 0.2,
+      "faithfulness": 0.0,
+      "context_relevance": 0.0,
       "evidence": false,
       "evidence_qrels": true,
       "abstention_class": "correct_abstention",
@@ -1453,7 +1834,14 @@
         "37768883",
         "25657127",
         "36233757"
-      ]
+      ],
+      "finish_reason": "stop",
+      "truncated": false,
+      "generation_attempts": 1,
+      "completion_tokens": 177,
+      "reasoning_tokens": 0,
+      "generation_cost_usd": 9.633e-05,
+      "generation_provider": "AkashML"
     },
     {
       "query_id": "295",
@@ -1471,20 +1859,30 @@
       "answered_source": "judge",
       "judge_answered": true,
       "faithfulness": 1.0,
-      "context_relevance": 0.95,
+      "context_relevance": 0.8,
       "evidence": true,
       "evidence_qrels": true,
       "abstention_class": "answered_with_evidence",
       "abstention_class_qrels": "answered_with_evidence",
-      "answer": "The passages describe how dendritic cells shape ILC function in the gut: CD14\u207a dendritic cells promote conversion of ILC3 to CD127\u207a ILC1, while CD14\u207b dendritic cells drive the opposite transition, indicating that DC\u2011derived cues determine ILC composition and phenotype in the intestine\u30102\u3011. Additionally, TNF\u2011\u03b1 from CD103\u207bCD11b\u207a dendritic cells synergizes with IL\u201123 to induce IL\u201117A production by IL\u20117",
-      "cited_doc_ids": [],
+      "answer": "The literature describes direct interactions between dendritic cells and innate lymphoid cells that shape intestinal immunity: dendritic\u2011cell\u2011derived TNF\u2011\u03b1 synergizes with IL\u201123 to induce IL\u201117A production by ILCs, revealing a functional crosstalk that influences intestinal inflammation [4]; likewise, CD14\u207a and CD14\u207b dendritic cell subsets drive reciprocal polarization between CD127\u207a ILC1 and ILC3 in the gut, further underscoring the importance of DC\u2011ILC communication for intestinal immune regulation [2].",
+      "cited_doc_ids": [
+        "29423324",
+        "20310709"
+      ],
       "retrieved_doc_ids": [
         "24044977",
         "29423324",
         "1022115",
         "20310709",
         "22791348"
-      ]
+      ],
+      "finish_reason": "stop",
+      "truncated": false,
+      "generation_attempts": 1,
+      "completion_tokens": 291,
+      "reasoning_tokens": 0,
+      "generation_cost_usd": 9.747e-05,
+      "generation_provider": "AkashML"
     },
     {
       "query_id": "1270",
@@ -1515,7 +1913,14 @@
         "14843502",
         "20491205",
         "43855756"
-      ]
+      ],
+      "finish_reason": "stop",
+      "truncated": false,
+      "generation_attempts": 1,
+      "completion_tokens": 124,
+      "reasoning_tokens": 0,
+      "generation_cost_usd": 8.15e-05,
+      "generation_provider": "AkashML"
     },
     {
       "query_id": "238",
@@ -1531,7 +1936,7 @@
       "answered_source": "verdict",
       "judge_answered": false,
       "faithfulness": 1.0,
-      "context_relevance": 0.4,
+      "context_relevance": 0.2,
       "evidence": false,
       "evidence_qrels": true,
       "abstention_class": "correct_abstention",
@@ -1544,7 +1949,14 @@
         "32556431",
         "13290521",
         "18421962"
-      ]
+      ],
+      "finish_reason": "stop",
+      "truncated": false,
+      "generation_attempts": 1,
+      "completion_tokens": 127,
+      "reasoning_tokens": 0,
+      "generation_cost_usd": 6.509e-05,
+      "generation_provider": "AkashML"
     },
     {
       "query_id": "1014",
@@ -1573,7 +1985,14 @@
         "1227277",
         "4658268",
         "2266471"
-      ]
+      ],
+      "finish_reason": "stop",
+      "truncated": false,
+      "generation_attempts": 1,
+      "completion_tokens": 141,
+      "reasoning_tokens": 132,
+      "generation_cost_usd": 8.154e-05,
+      "generation_provider": "AkashML"
     },
     {
       "query_id": "1088",
@@ -1585,18 +2004,18 @@
       "qrels_doc_ids": [
         "37549932"
       ],
-      "verdict": "NOT ENOUGH EVIDENCE",
-      "predicted_label": "NEI",
-      "answered": false,
+      "verdict": "REFUTED",
+      "predicted_label": "CONTRADICT",
+      "answered": true,
       "answered_source": "verdict",
-      "judge_answered": false,
-      "faithfulness": 1.0,
-      "context_relevance": 0.2,
+      "judge_answered": true,
+      "faithfulness": 0.0,
+      "context_relevance": 0.0,
       "evidence": false,
       "evidence_qrels": false,
-      "abstention_class": "correct_abstention",
-      "abstention_class_qrels": "correct_abstention",
-      "answer": "Verdict: NOT ENOUGH EVIDENCE",
+      "abstention_class": "answered_without_evidence",
+      "abstention_class_qrels": "answered_without_evidence",
+      "answer": "Verdict: REFUTED",
       "cited_doc_ids": [],
       "retrieved_doc_ids": [
         "24282306",
@@ -1604,7 +2023,14 @@
         "31902335",
         "33638477",
         "3840043"
-      ]
+      ],
+      "finish_reason": "stop",
+      "truncated": false,
+      "generation_attempts": 1,
+      "completion_tokens": 247,
+      "reasoning_tokens": 245,
+      "generation_cost_usd": 8.273e-05,
+      "generation_provider": "AkashML"
     },
     {
       "query_id": "1274",
@@ -1624,7 +2050,7 @@
       "answered_source": "verdict",
       "judge_answered": false,
       "faithfulness": 1.0,
-      "context_relevance": 0.8,
+      "context_relevance": 0.3,
       "evidence": true,
       "evidence_qrels": true,
       "abstention_class": "false_abstention",
@@ -1637,7 +2063,14 @@
         "22632303",
         "4406819",
         "7145763"
-      ]
+      ],
+      "finish_reason": "stop",
+      "truncated": false,
+      "generation_attempts": 1,
+      "completion_tokens": 173,
+      "reasoning_tokens": 0,
+      "generation_cost_usd": 8.242e-05,
+      "generation_provider": "AkashML"
     }
   ]
 }
