@@ -90,11 +90,14 @@ domain-appropriate `bge-reranker-base` repairs exactly that damage, beating Mini
 0.027 (p = 0.038), and then lands on top of doing nothing at all: **Δ = +0.0001, p = 0.996**.
 
 **3. So the reranker *choice* matters and reranking itself doesn't.** A mismatched cross-encoder
-degrades ranking; the right one returns you to where you started, expensively. Over the same 300
-queries on a 4-core laptop CPU, reranking a 32-candidate slice costs **7.5 s/query (MiniLM)** and
-**32.3 s/query (bge)** against ~0.2 s/query for hybrid alone: ~160× the latency for a
-statistical tie. **Hybrid RRF is the default**; reranking stays available behind
-`mode=hybrid_rerank`.
+degrades ranking; the right one returns you to where you started, expensively. On a 4-core
+laptop CPU, reranking a 32-candidate slice costs **3.94 s/query (MiniLM)** and **23.4 s/query
+(bge)** against 0.124 s/query for hybrid alone: ≈188× the latency for a statistical tie (MiniLM
+≈32×). Those are per-query means of `SearchService.retrieve` after 3 warm-ups on an Intel
+i5-10210U with torch pinned to 4 threads, hybrid over all 300 queries and rerank over a seeded
+40-query sample ([`eval/results/latency.md`](eval/results/latency.md)); earlier figures here were
+console readings from the eval sweep and ran higher. **Hybrid RRF is the default**; reranking
+stays available behind `mode=hybrid_rerank`.
 
 This replaces an earlier claim in this README, that reranking "only pays off with a
 domain-appropriate model such as bge-reranker", which was never run. Measured, it is wrong: the
@@ -193,8 +196,6 @@ order: a head slice, not a sample. The harness now takes a seeded random sample 
 - **No before/after on the RAG eval.** The model change (retired Groq Llama models →
   `openai/gpt-oss-120b` / `qwen/qwen3.8-27b`) breaks comparability with the earlier published run,
   so no RAG-quality change can be attributed across it.
-- **Latency numbers are console-only.** The 7.5 s / 32.3 s / ~0.2 s per-query figures come from
-  the eval run's console output and are not in a committed artifact.
 
 ## What I'd do next
 
@@ -203,8 +204,6 @@ order: a head slice, not a sample. The harness now takes a seeded random sample 
   retry) so verdict accuracy measures judgment, not formatting.
 - **Measure judge agreement by re-sampling**: re-run the judge several times per answer to put a
   variance on faithfulness and context relevance, which currently rest on one call each.
-- **Persist per-query latency** into the committed eval results, so the reranker cost claim is
-  reproducible from an artifact rather than a console log.
 - **Stratified reporting as the default**: report every retrieval comparison by claim label, not
   only as a follow-up analysis.
 
@@ -216,6 +215,7 @@ uv run python -m app.ingest.build_index   # build dense (Qdrant) + BM25     (mak
 uv run uvicorn app.api.main:app --reload  # UI + API at localhost:8000      (make api)
 uv run python -m app.eval.retrieval_eval  # reproduce the metrics table     (make eval)
 uv run python -m app.eval.analysis        # label-stratified re-score       (make analysis)
+uv run python -m app.eval.latency         # per-query retrieval latency     (make latency)
 uv run pytest                             # tests                           (make test)
 
 cp .env.example .env                      # only for /answer + `make eval-rag`: add a Groq key
