@@ -90,10 +90,20 @@ class Settings(BaseSettings):
     llm_provider: Literal["groq", "openrouter"] = "openrouter"
     judge_provider: Literal["groq", "openrouter"] = "openrouter"
     openrouter_api_key: str = ""
-    # Generator: PAID gpt-oss-120b (the model the committed numbers were generated with),
-    # allowed only because it is in the allowlist below, and always sent with the pinned,
-    # price-capped, no-fallback routing in llm_endpoints.PAID_ROUTING (~$0.0003/query).
-    openrouter_llm_model: str = "openai/gpt-oss-120b"
+    # Generator: FREE by default, so the whole project runs on free models. An id that is
+    # not in the paid allowlist below gets `:free` appended (as the judge does) and is sent
+    # with llm_endpoints.FREE_ROUTING ($0 max_price, no fallbacks) — it never touches the
+    # allowlist or PAID_ROUTING. Ling 3.0 Flash Sante: on the 2026-09-24 bench of 10 free
+    # models it served 22/22 calls with the fastest p50 (1.1 s); it is health/medicine-tuned
+    # (SciFact is biomedical), has no expiration date, and is a different family from the
+    # Nemotron judge. It reasons by default with no parameter sent (108-1,847 hidden
+    # reasoning tokens per claim on a 2026-09-24 smoke test), and `reasoning.effort=low`
+    # did not shorten it, so llm_reasoning_effort="auto" sends it nothing; the 1024-token
+    # budget + one 2x retry below absorbs the long tail (1 of 3 claims needed the retry).
+    # The paid path is still available: SSR_OPENROUTER_LLM_MODEL=openai/gpt-oss-120b (the
+    # model the earlier committed numbers were generated with) is allowlisted, and is always
+    # sent with the pinned, price-capped, no-fallback PAID_ROUTING (~$0.0003/query).
+    openrouter_llm_model: str = "inclusionai/ling-3.0-flash-sante:free"
     # Judge: must be a `:free` id (appended if missing); a paid judge is refused. Free
     # tier: 20 req/min and, with >= $10 credits ever bought, 1,000 req/day account-wide.
     # Nemotron 3 Ultra: on a 2026-09-24 bench of 10 free models it was the only one with
@@ -102,7 +112,8 @@ class Settings(BaseSettings):
     # Backup: inclusionai/ling-3.0-flash-sante:free (also 22/22, different family).
     openrouter_judge_model: str = "nvidia/nemotron-3-ultra-550b-a55b:free"
     # The ONLY paid model ids that may ever be sent to OpenRouter (generator role only).
-    # Anything else not ending in `:free` is refused before any network call.
+    # A configured generator id outside it is normalised to its `:free` variant; any other
+    # non-`:free` id reaching a request is refused before any network call.
     openrouter_paid_model_allowlist: tuple[str, ...] = ("openai/gpt-oss-120b",)
     # Hard per-run spend ceiling for rag_eval (USD, OpenRouter-reported cost; unreported
     # cost counts at the max_price caps). The run stops, writing nothing, before a query
@@ -129,6 +140,7 @@ class Settings(BaseSettings):
     #   "auto"     -> "medium" for gpt-oss models (Groq and Ollama both accept it), and NOT
     #                 sent for any other model — a non-reasoning model can reject the
     #                 unknown parameter with a 400, so swapping SSR_LLM_MODEL stays safe.
+    #                 The default free Ling generator gets nothing: it reasons on its own.
     #   "" / "off" -> never sent.
     #   any other  -> sent as-is to whatever model is configured (provider vocabularies
     #                 differ: gpt-oss takes low|medium|high, qwen3 also none|default).

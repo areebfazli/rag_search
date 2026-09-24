@@ -7,8 +7,10 @@ rag_eval and judge_agreement cannot disagree about which endpoint, key or model 
 Precedence — the PROVIDER setting decides everything else:
 
 * ``openrouter``: base URL is the constant ``OPENROUTER_BASE_URL`` (SSR_LLM_BASE_URL is
-  never consulted), key is ``openrouter_api_key``, model is ``openrouter_llm_model``
-  (generator) / ``openrouter_judge_model`` with ``:free`` appended if missing (judge).
+  never consulted), key is ``openrouter_api_key``, model is ``openrouter_judge_model``
+  with ``:free`` appended if missing (judge) / ``openrouter_llm_model`` (generator), which
+  is sent as-is only if it is in ``openrouter_paid_model_allowlist`` and otherwise also
+  gets ``:free`` appended — so the default free generator never meets the allowlist.
 * ``groq`` (any OpenAI-compatible endpoint): ``llm_base_url`` / ``llm_api_key`` /
   ``llm_model`` or ``judge_model``. An openrouter.ai base URL is refused here, so the
   Groq key is never sent to OpenRouter, and the OpenRouter key is only ever paired with
@@ -210,12 +212,24 @@ def provider_of(role: Role, s: Settings | None = None) -> Provider:
     return s.llm_provider if role == "generator" else s.judge_provider
 
 
+def openrouter_generator_id(model: str, allowlist: tuple[str, ...] | list[str]) -> str:
+    """The generator id sent to OpenRouter: an allowlisted paid id as-is (it then needs
+    PAID_ROUTING), anything else normalised to its ``:free`` variant (FREE_ROUTING) —
+    the judge's rule, minus the allowlist exception. A free id is never checked against
+    the allowlist, and a non-allowlisted id can only ever be sent as ``:free``."""
+    return model if model in allowlist else free_id(model)
+
+
 def model_id(role: Role, s: Settings | None = None, provider: Provider | None = None) -> str:
     """The model id a role sends, with no key or URL checks (safe at import time)."""
     s = settings if s is None else s
     provider = provider or provider_of(role, s)
     if provider == "openrouter":
-        return s.openrouter_llm_model if role == "generator" else free_id(s.openrouter_judge_model)
+        if role == "generator":
+            return openrouter_generator_id(
+                s.openrouter_llm_model, tuple(s.openrouter_paid_model_allowlist)
+            )
+        return free_id(s.openrouter_judge_model)
     return s.llm_model if role == "generator" else base_model(s.judge_model)
 
 

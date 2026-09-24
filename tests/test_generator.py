@@ -249,6 +249,9 @@ def test_empty_truncated_reply_is_never_served_as_an_empty_answer():
         ("gpt-oss:20b", "auto", "medium"),  # Ollama's tag for the same family
         ("llama-3.3-70b-versatile", "auto", None),  # may 400 on the param: never sent
         ("qwen3:4b", "auto", None),
+        # The default free generator reasons on its own; "auto" never adds gpt-oss's effort.
+        ("inclusionai/ling-3.0-flash-sante:free", "auto", None),
+        ("inclusionai/ling-3.0-flash-sante:free", "low", "low"),  # explicit: sent as-is
         ("openai/gpt-oss-120b", "", None),
         ("openai/gpt-oss-120b", "off", None),
         ("openai/gpt-oss-120b", "High", "high"),  # explicit: sent as-is

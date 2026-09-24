@@ -27,9 +27,10 @@ evidence was actually retrieved, and scored under two definitions of evidence:
   so earlier published numbers stay traceable and the two can be compared per run.
 
 Generator and judge use different model families, each on the provider its setting names
-(app.core.llm_endpoints; default: paid gpt-oss-120b generator and free Qwen3.8 judge on
-OpenRouter, under the spend policy), with a provider-aware throttle so the run stays under
-the free-tier limits and a hard per-run spend ceiling (SSR_RAG_MAX_SPEND_USD).
+(app.core.llm_endpoints; default: free Ling 3.0 Flash Sante generator and free Nemotron 3
+Ultra judge on OpenRouter, under the spend policy — a $0 run), with a provider-aware
+throttle so the run stays under the free-tier limits and a hard per-run spend ceiling
+(SSR_RAG_MAX_SPEND_USD) for when a paid generator is configured.
 
 Alongside the aggregates, rag.json keeps every scored query (gold label, rationale
 docs, verdict, both evidence flags, answer text, citations, and how generation ended:
@@ -94,13 +95,18 @@ MODE = "hybrid"  # the API's default mode — the eval scores what users actuall
 #   answer) and a judge call ~2k, so one query per 15 s overran the generator's bucket
 #   and 4 of 50 queries were skipped. 30 s keeps each model under ~6k tokens/minute.
 # * OpenRouter's free tier allows 20 requests/min account-wide across ALL `:free`
-#   models (paid models are not under that cap): 3.5 s per free request per query stays
-#   under it with margin, floored at 5 s.
+#   models (paid models are not under that cap). With the default free generator AND free
+#   judge, one query is up to 3 free requests (generation, its truncation retry, the
+#   judge). The sleep is 4 s per possible free request (12 s/query), and it comes on top
+#   of the calls' own latency, so any 60 s window holds at most 5 query starts: <= 15
+#   requests even if every generation retries (~10 typical), vs the cap of 20. A paid
+#   generator leaves only the judge on the free cap: the 5 s floor, <= 12/min.
 _THROTTLE_ENV = os.environ.get("SSR_RAG_THROTTLE_S")
 THROTTLE_S: float | None = float(_THROTTLE_ENV) if _THROTTLE_ENV else None
 GROQ_THROTTLE_S = 30.0
-OPENROUTER_S_PER_FREE_REQUEST = 3.5
+OPENROUTER_S_PER_FREE_REQUEST = 4.0
 OPENROUTER_MIN_THROTTLE_S = 5.0
+OPENROUTER_FREE_REQUESTS_PER_MIN = 20  # account-wide, all `:free` models
 # A 429 that outlasts the SDK's own retries waits out a full rate-limit window and
 # retries the SAME query, rather than skipping it: a skipped query changes the sample,
 # and the sample is fixed (seed) so runs stay comparable.
@@ -156,18 +162,25 @@ def _is_fatal(e: Exception) -> bool:
     return isinstance(e, APIStatusError) and e.status_code in (401, 402)
 
 
+def free_requests_per_query(gen: LLMEndpoint, judge: LLMEndpoint) -> tuple[int, int]:
+    """(typical, worst) requests one query makes against OpenRouter's free-tier caps:
+    the judge's one call if it is a free OpenRouter model, plus 1 for a free OpenRouter
+    generator — 2 in the worst case (the truncation retry)."""
+    judge_free = int(judge.provider == "openrouter" and not judge.paid)
+    gen_free = int(gen.provider == "openrouter" and not gen.paid)
+    return judge_free + gen_free, judge_free + 2 * gen_free
+
+
 def default_throttle_s(gen: LLMEndpoint | None = None, judge: LLMEndpoint | None = None) -> float:
     """Per-query sleep for this provider mix (see THROTTLE_S)."""
     if THROTTLE_S is not None:
         return THROTTLE_S
-    gen_provider = gen.provider if gen else GEN_PROVIDER
-    judge_provider = judge.provider if judge else JUDGE_PROVIDER
-    if "groq" in (gen_provider, judge_provider):
+    gen = gen or resolve_endpoint("generator", require_key=False)
+    judge = judge or resolve_endpoint("judge", require_key=False)
+    if "groq" in (gen.provider, judge.provider):
         return GROQ_THROTTLE_S
-    free_requests = (1 if judge_provider == "openrouter" else 0) + (
-        2 if gen is not None and gen.provider == "openrouter" and not gen.paid else 0
-    )  # a free generator can need 2 (the truncation retry)
-    return max(OPENROUTER_MIN_THROTTLE_S, free_requests * OPENROUTER_S_PER_FREE_REQUEST)
+    _, worst = free_requests_per_query(gen, judge)
+    return max(OPENROUTER_MIN_THROTTLE_S, worst * OPENROUTER_S_PER_FREE_REQUEST)
 
 
 def worst_case_generation_cost(gen: LLMEndpoint) -> float:
@@ -412,6 +425,7 @@ def run_metadata(gen: LLMEndpoint | None = None, judge_ep: LLMEndpoint | None = 
     each role's provider, base URL, model id and the provider fields sent — never a key."""
     gen = gen or resolve_endpoint("generator", require_key=False)
     judge_ep = judge_ep or resolve_endpoint("judge", require_key=False)
+    effort = resolve_reasoning_effort(gen.model, settings.llm_reasoning_effort)
     return {
         "git_sha": _git_sha(),
         "prompt_hash": prompt_hash(),
@@ -423,11 +437,11 @@ def run_metadata(gen: LLMEndpoint | None = None, judge_ep: LLMEndpoint | None = 
         # The generator's budget and reasoning effort decide whether answers truncate
         # (a truncated reply carries no verdict), so they are part of what a number means.
         "generator_max_completion_tokens": settings.llm_max_completion_tokens,
-        "generator_reasoning_effort": resolve_reasoning_effort(
-            gen.model, settings.llm_reasoning_effort
-        ),
+        "generator_reasoning_effort": effort,
+        # None when no reasoning field is sent at all (e.g. the default free Ling model).
         "generator_reasoning_param": (
-            "reasoning.effort" if gen.provider == "openrouter" else "reasoning_effort"
+            None if effort is None
+            else "reasoning.effort" if gen.provider == "openrouter" else "reasoning_effort"
         ),
         "judge_model": judge_ep.model,
         "judge_provider": judge_ep.provider,
@@ -667,15 +681,23 @@ def _estimate_line(n: int, gen: LLMEndpoint, judge_ep: LLMEndpoint, throttle: fl
                 f"{PAID_MAX_PRICE_USD_PER_M} USD/1M tokens"
             )
         else:
-            per_q = 1 if role == "judge" else 2
-            parts.append(
-                f"  {role}: up to {per_q * n} free requests to {ep.model} ($0; OpenRouter "
-                f"free tier: 20/min, {OPENROUTER_FREE_REQUESTS_PER_DAY:,}/day account-wide)"
-            )
+            count = f"{n}" if role == "judge" else f"{n}-{2 * n}"  # generator may retry once
+            parts.append(f"  {role}: {count} free requests to {ep.model} ($0)")
+    typical, worst = free_requests_per_query(gen, judge_ep)
+    if worst:
+        both = "both roles are free: $0 run; " if typical == 2 else ""
+        total = f"{n * typical}" if typical == worst else f"{n * typical}-{n * worst}"
+        parts.append(
+            f"  total: {total} free OpenRouter requests ({both}free tier: "
+            f"{OPENROUTER_FREE_REQUESTS_PER_MIN}/min and {OPENROUTER_FREE_REQUESTS_PER_DAY:,}"
+            f"/day account-wide, shared with everything else on the account today)"
+        )
+    ceiling = f"${settings.rag_max_spend_usd:.2f} (SSR_RAG_MAX_SPEND_USD)"
+    if not gen.paid:
+        ceiling += ", est. and worst-case spend $0 (no paid role)"
     return (
         "Estimated LLM usage:\n" + "\n".join(parts) + "\n"
-        f"  spend ceiling: ${settings.rag_max_spend_usd:.2f} (SSR_RAG_MAX_SPEND_USD); "
-        f"~{n * throttle / 60:.0f} min at a {throttle:.1f}s throttle."
+        f"  spend ceiling: {ceiling}; ~{n * throttle / 60:.0f} min at a {throttle:.1f}s throttle."
     )
 
 
@@ -686,6 +708,7 @@ def main() -> None:
     judge_ep = resolve_endpoint("judge")
     print(describe_with_ignored(gen_ep), describe_with_ignored(judge_ep), sep="\n", flush=True)
     throttle = default_throttle_s(gen_ep, judge_ep)
+    free_lo, free_hi = free_requests_per_query(gen_ep, judge_ep)
     ceiling = settings.rag_max_spend_usd
 
     queries, qrels = load_queries_qrels()
@@ -821,7 +844,8 @@ def main() -> None:
                 f"Nothing was written; {OUT / 'rag.json'} is unchanged. Re-run once the daily "
                 f"budget recovers (~{len(retrieved) * EST_GEN_TOKENS_PER_QUERY:,} generator + "
                 f"~{len(retrieved) * EST_JUDGE_TOKENS_PER_QUERY:,} judge tokens, "
-                f"~{len(retrieved)} judge requests needed)."
+                f"{len(retrieved) * free_lo}-{len(retrieved) * free_hi} free OpenRouter "
+                f"requests needed)."
             ) from None
         except SpendCeilingReached as e:
             raise SystemExit(
@@ -905,6 +929,7 @@ def main() -> None:
                     "counted_usd": round(counted, 6),
                     "unreported_paid_generations": unreported_paid,
                     "ceiling_usd": ceiling,
+                    "generator_paid": gen_ep.paid,  # False: a $0 run (both roles free)
                     "judge_reported_usd": round(getattr(judge_client, "cost_usd", 0.0), 6),
                 },
                 # Provenance + per-query detail go after the aggregates, so the headline

@@ -6,9 +6,9 @@ backend via SSR_LLM_PROVIDER=groq + SSR_LLM_BASE_URL, with no code change). Maps
 document ids so answers are traceable to sources, and parses the optional final
 verdict line (claims only) into Answer.verdict.
 
-On a reasoning model (gpt-oss) the hidden reasoning is billed against the same
-completion budget as the answer, so a too-small budget truncates the reply — possibly
-to nothing. generate() reads finish_reason, retries a truncated reply once with a
+On a reasoning model (gpt-oss; the default free Ling generator also reasons by default)
+the hidden reasoning is billed against the same completion budget as the answer, so a
+too-small budget truncates the reply — possibly to nothing. generate() reads finish_reason, retries a truncated reply once with a
 larger budget, and flags one that is still cut off instead of passing it off as whole.
 """
 from __future__ import annotations
@@ -121,6 +121,8 @@ def resolve_reasoning_effort(model: str, setting: str) -> str | None:
     See Settings.llm_reasoning_effort: "auto" sends "medium" to gpt-oss only, because an
     OpenAI-compatible backend serving a non-reasoning model may reject the parameter
     outright; ""/"off" never sends it; anything else is an explicit choice, sent as-is.
+    Every other model — the default free Ling generator included, which reasons on its
+    own and did not shorten its reasoning for effort=low — gets nothing under "auto".
     """
     value = setting.strip().lower()
     if value in {"", "off"}:

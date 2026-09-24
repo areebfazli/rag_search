@@ -11,7 +11,8 @@ import httpx
 import openai
 import pytest
 
-from app.core.config import settings
+from app.core.config import Settings, settings
+from app.core.llm_endpoints import FREE_ROUTING, PAID_ROUTING, LLMEndpoint
 from app.core.interfaces import Answer, SearchHit
 from app.eval import rag_eval
 from app.eval.rag_eval import (
@@ -325,12 +326,22 @@ class FakeJudge:
         return {"answered": q != "claim four", "faithfulness": 0.9, "context_relevance": 0.5}
 
 
-def _patch_main(tmp_path, monkeypatch, out, mode="hybrid", generator=FakeGenerator, judge=None):
+DEFAULT_GEN_MODEL = Settings.model_fields["openrouter_llm_model"].default
+PAID_GEN_MODEL = "openai/gpt-oss-120b"
+
+
+def _patch_main(
+    tmp_path, monkeypatch, out, mode="hybrid", generator=FakeGenerator, judge=None,
+    gen_model=DEFAULT_GEN_MODEL,
+):
     fake_judge = judge if judge is not None else FakeJudge()
-    # Pin the default provider mix with a fake key, so the run neither depends on the
-    # developer's .env nor needs one (CI has none). Nothing here touches the network.
+    # Pin the provider mix and generator model with a fake key, so the run neither depends
+    # on the developer's .env nor needs one (CI has none). Nothing here touches the network.
+    # gen_model=PAID_GEN_MODEL exercises the paid, spend-capped path.
     monkeypatch.setattr(settings, "llm_provider", "openrouter")
     monkeypatch.setattr(settings, "judge_provider", "openrouter")
+    monkeypatch.setattr(settings, "openrouter_llm_model", gen_model)
+    monkeypatch.setattr(settings, "openrouter_paid_model_allowlist", (PAID_GEN_MODEL,))
     monkeypatch.setattr(settings, "openrouter_api_key", FAKE_OPENROUTER_KEY)
     monkeypatch.setattr(rag_eval, "OUT", out)
     monkeypatch.setattr(rag_eval, "MODE", mode)
@@ -345,8 +356,8 @@ def _patch_main(tmp_path, monkeypatch, out, mode="hybrid", generator=FakeGenerat
     return fake_judge
 
 
-def _run_main(tmp_path, monkeypatch, mode="hybrid"):
-    fake_judge = _patch_main(tmp_path, monkeypatch, tmp_path, mode=mode)
+def _run_main(tmp_path, monkeypatch, mode="hybrid", gen_model=DEFAULT_GEN_MODEL):
+    fake_judge = _patch_main(tmp_path, monkeypatch, tmp_path, mode=mode, gen_model=gen_model)
     rag_eval.main()
     return json.loads((tmp_path / "rag.json").read_text()), fake_judge
 
@@ -354,6 +365,12 @@ def _run_main(tmp_path, monkeypatch, mode="hybrid"):
 @pytest.fixture()
 def rag_run(tmp_path, monkeypatch):
     blob, fake_judge = _run_main(tmp_path, monkeypatch)
+    return tmp_path, blob, fake_judge
+
+
+@pytest.fixture()
+def paid_rag_run(tmp_path, monkeypatch):
+    blob, fake_judge = _run_main(tmp_path, monkeypatch, gen_model=PAID_GEN_MODEL)
     return tmp_path, blob, fake_judge
 
 
@@ -688,14 +705,50 @@ def test_is_daily_cap_recognises_openrouter_free_tier():
     assert _is_daily_cap(err(20)) is False
 
 
-def test_rag_json_records_providers_and_cost_but_never_the_key(rag_run):
+def test_default_run_is_all_free(capsys, rag_run):
     path, blob, _ = rag_run
+    run = blob["run"]
+    assert run["generator_model"] == DEFAULT_GEN_MODEL and DEFAULT_GEN_MODEL.endswith(":free")
+    assert run["judge_model"].endswith(":free")
+    assert run["generator_extra_body"] == {"provider": FREE_ROUTING}  # no paid pinning
+    assert run["generator_reasoning_effort"] is None and run["generator_reasoning_param"] is None
+    # A free generator is never counted at the paid worst case, even when unreported (q5).
+    assert blob["cost"]["generator_paid"] is False
+    assert blob["cost"]["unreported_paid_generations"] == 0
+    assert blob["cost"]["counted_usd"] == blob["cost"]["reported_usd"]
+    out = capsys.readouterr().out
+    assert "both roles are free: $0 run" in out and "worst-case spend $0 (no paid role)" in out
+    assert "total: 10-15 free OpenRouter requests" in out  # 5 claims x (1-2 gen + 1 judge)
+    assert "paid requests" not in out and "(paid)" not in out
+
+
+def test_estimate_line_free_vs_paid():
+    url = "https://openrouter.ai/api/v1"
+    judge_ep = LLMEndpoint("judge", "openrouter", url, "nvidia/nemotron-3-ultra-550b-a55b:free")
+    free = rag_eval._estimate_line(
+        50, LLMEndpoint("generator", "openrouter", url, DEFAULT_GEN_MODEL), judge_ep, 12.0
+    )
+    assert f"generator: 50-100 free requests to {DEFAULT_GEN_MODEL} ($0)" in free
+    assert "judge: 50 free requests" in free
+    assert "total: 100-150 free OpenRouter requests (both roles are free: $0 run" in free
+    assert "1,000/day" in free and "~10 min at a 12.0s throttle" in free
+    paid = rag_eval._estimate_line(
+        50, LLMEndpoint("generator", "openrouter", url, PAID_GEN_MODEL), judge_ep, 5.0
+    )
+    assert "generator: 50-100 paid requests" in paid and "worst case $" in paid
+    assert "total: 50 free OpenRouter requests (free tier" in paid  # the judge only
+    assert "both roles are free" not in paid and "no paid role" not in paid
+
+
+def test_rag_json_records_providers_and_cost_but_never_the_key(paid_rag_run):
+    path, blob, _ = paid_rag_run
     run = blob["run"]
     assert run["generator_provider"] == "openrouter" and run["judge_provider"] == "openrouter"
     assert run["generator_base_url"] == run["judge_base_url"] == "https://openrouter.ai/api/v1"
-    assert run["judge_model"].endswith(":free")
-    assert run["generator_extra_body"]["provider"]["allow_fallbacks"] is False
+    assert run["generator_model"] == PAID_GEN_MODEL and run["judge_model"].endswith(":free")
+    assert run["generator_extra_body"] == {"provider": PAID_ROUTING}
     assert run["generator_reasoning_param"] == "reasoning.effort"
+    assert blob["cost"]["generator_paid"] is True
     # q5's generator is a plain Answer (no cost side channel): counted at the worst case.
     assert blob["cost"]["reported_usd"] == pytest.approx((len(QUERIES) - 1) * GEN_COST_USD)
     assert blob["cost"]["unreported_paid_generations"] == 1
@@ -706,26 +759,31 @@ def test_rag_json_records_providers_and_cost_but_never_the_key(rag_run):
 
 
 def test_throttle_is_provider_aware(monkeypatch):
-    from app.core.llm_endpoints import LLMEndpoint
-
     monkeypatch.setattr(rag_eval, "THROTTLE_S", None)  # no SSR_RAG_THROTTLE_S override
     url = "https://openrouter.ai/api/v1"
     paid = LLMEndpoint("generator", "openrouter", url, "openai/gpt-oss-120b")
-    free_gen = LLMEndpoint("generator", "openrouter", url, "z-ai/glm-5.2:free")
-    judge_ep = LLMEndpoint("judge", "openrouter", url, "qwen/qwen3.8-27b:free")
+    free_gen = LLMEndpoint("generator", "openrouter", url, DEFAULT_GEN_MODEL)
+    judge_ep = LLMEndpoint("judge", "openrouter", url, "nvidia/nemotron-3-ultra-550b-a55b:free")
     groq = LLMEndpoint("generator", "groq", "https://api.groq.com/openai/v1", "openai/gpt-oss-120b")
     assert rag_eval.default_throttle_s(groq, judge_ep) == 30.0
     # One free request per query (the judge): the 5 s floor, <= 12 free requests/min.
     assert rag_eval.default_throttle_s(paid, judge_ep) == 5.0
-    # A free generator adds up to 2 free requests: 3 x 3.5 s keeps it under 20/min.
-    assert rag_eval.default_throttle_s(free_gen, judge_ep) == pytest.approx(10.5)
+    assert rag_eval.free_requests_per_query(paid, judge_ep) == (1, 1)
+    # The default: free generator (1, or 2 with the truncation retry) + free judge.
+    assert rag_eval.free_requests_per_query(free_gen, judge_ep) == (2, 3)
+    throttle = rag_eval.default_throttle_s(free_gen, judge_ep)
+    assert throttle == pytest.approx(12.0)
+    # Worst case, every query retrying: query starts in any 60 s window x 3 requests stays
+    # under the 20/min free cap with margin (sleep alone spaces them; latency only helps).
+    worst_per_min = (60 // throttle) * 3
+    assert worst_per_min <= 15 < rag_eval.OPENROUTER_FREE_REQUESTS_PER_MIN
     monkeypatch.setattr(rag_eval, "THROTTLE_S", 1.0)
     assert rag_eval.default_throttle_s(paid, judge_ep) == 1.0
 
 
 def test_spend_ceiling_stops_the_run_before_writing(tmp_path, monkeypatch):
     out = tmp_path / "results"
-    _patch_main(tmp_path, monkeypatch, out)
+    _patch_main(tmp_path, monkeypatch, out, gen_model=PAID_GEN_MODEL)
     # Room for exactly two queries at the worst-case bound: the third is refused up front.
     worst = rag_eval.worst_case_generation_cost(rag_eval.resolve_endpoint("generator"))
     monkeypatch.setattr(settings, "rag_max_spend_usd", 2 * GEN_COST_USD + worst)
@@ -743,7 +801,7 @@ def test_unreported_paid_cost_counts_at_the_worst_case(tmp_path, monkeypatch):
             ans.cost_usd = None
             return ans
 
-    _patch_main(tmp_path, monkeypatch, tmp_path, generator=Unreported)
+    _patch_main(tmp_path, monkeypatch, tmp_path, generator=Unreported, gen_model=PAID_GEN_MODEL)
     rag_eval.main()
     cost = json.loads((tmp_path / "rag.json").read_text())["cost"]
     worst = rag_eval.worst_case_generation_cost(rag_eval.resolve_endpoint("generator"))
