@@ -327,6 +327,10 @@ class FakeJudge:
 
 
 DEFAULT_GEN_MODEL = Settings.model_fields["openrouter_llm_model"].default
+# Env the harness reads; cleared in every main() test so a developer's shell can't leak in.
+RAG_ENV = (
+    "SSR_RAG_N", "SSR_RAG_DATASET", "SSR_EVAL_LIMIT", "SSR_EVAL_REFRESH", "SSR_RAG_CHECK_QUOTA",
+)
 PAID_GEN_MODEL = "openai/gpt-oss-120b"
 
 
@@ -344,10 +348,19 @@ def _patch_main(
     monkeypatch.setattr(settings, "openrouter_paid_model_allowlist", (PAID_GEN_MODEL,))
     monkeypatch.setattr(settings, "openrouter_api_key", FAKE_OPENROUTER_KEY)
     monkeypatch.setattr(rag_eval, "OUT", out)
+    # Checkpoints and non-canonical runs stay under tmp_path, never the real data/.
+    monkeypatch.setattr(rag_eval, "CACHE", tmp_path / "cache")
+    monkeypatch.setattr(rag_eval, "RUNS", tmp_path / "runs")
+    for var in RAG_ENV:
+        monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr(rag_eval, "MODE", mode)
     monkeypatch.setattr(rag_eval, "THROTTLE_S", 0.0)
-    monkeypatch.setattr(rag_eval, "load_queries_qrels", lambda: (dict(QUERIES), QRELS))
-    monkeypatch.setattr(rag_eval, "load_claim_labels", lambda query_ids=None: CLAIM_LABELS)
+    monkeypatch.setattr(
+        rag_eval, "load_queries_qrels", lambda dataset=None: (dict(QUERIES), QRELS)
+    )
+    monkeypatch.setattr(
+        rag_eval, "load_claim_labels", lambda dataset=None, query_ids=None: CLAIM_LABELS
+    )
     monkeypatch.setattr(rag_eval, "scifact_source_zip", lambda: tmp_path / "missing.zip")
     monkeypatch.setattr(rag_eval, "SearchService", FakeService)
     monkeypatch.setattr(rag_eval, "LLMGenerator", generator)
@@ -825,6 +838,356 @@ def test_auth_or_credit_errors_stop_the_run_instead_of_skipping(rate_limited, st
 def test_missing_openrouter_key_fails_before_any_work(tmp_path, monkeypatch):
     _patch_main(tmp_path, monkeypatch, tmp_path)
     monkeypatch.setattr(settings, "openrouter_api_key", "")
-    monkeypatch.setattr(rag_eval, "load_queries_qrels", lambda: pytest.fail("ran retrieval"))
+    monkeypatch.setattr(
+        rag_eval, "load_queries_qrels", lambda dataset=None: pytest.fail("ran retrieval")
+    )
     with pytest.raises(Exception, match="SSR_OPENROUTER_API_KEY"):
         rag_eval.main()
+
+
+# --- sample size, dataset, canonical-output guard ------------------------------------------
+
+
+def test_samples_nest_so_runs_of_different_n_share_a_prefix():
+    ids = [str(i) for i in range(1, 301)]
+    s50, s300 = rag_eval.sample_claims(ids, 50), rag_eval.sample_claims(ids, 300)
+    assert s50 == s300[:50]
+    assert rag_eval.sample_claims(ids, None) == s300  # "all"
+    assert rag_eval.sample_claims(list(reversed(ids)), 50) == s50  # input order is irrelevant
+    assert s50 != sorted(ids)[:50]  # a real shuffle, not the first ids
+
+
+def test_committed_sample_is_the_first_50_of_the_full_test_split():
+    # The committed 50-claim artifact must be exactly the prefix of the N=all sample, so a
+    # 300-claim run nests over it. Test query ids come straight from the source archive
+    # (no ir_datasets, no network); skipped where the archive isn't downloaded (CI).
+    import zipfile
+    from pathlib import Path
+
+    src = rag_eval.scifact_source_zip()
+    if not src.exists():
+        pytest.skip("SciFact source archive not downloaded")
+    with zipfile.ZipFile(src) as zf:
+        lines = zf.read("scifact/qrels/test.tsv").decode().splitlines()[1:]
+    test_ids = {line.split("\t")[0] for line in lines if line.strip()}
+    assert len(test_ids) == 300
+    committed = json.loads(Path("eval/results/rag.json").read_text())
+    ids = [r["query_id"] for r in committed["rows"]]
+    assert rag_eval.sample_claims(test_ids, 50) == ids[:50]
+    assert rag_eval.sample_claims(test_ids, None)[: len(ids)] == ids
+
+
+def test_parse_n():
+    assert rag_eval.parse_n(None) == rag_eval.N == 50  # default unchanged
+    assert rag_eval.parse_n("") == 50
+    assert rag_eval.parse_n("all") is None and rag_eval.parse_n(" ALL ") is None
+    assert rag_eval.parse_n("300") == 300
+    for bad in ("0", "-3", "fifty"):
+        with pytest.raises(ValueError):
+            rag_eval.parse_n(bad)
+
+
+def test_output_dir_only_canonical_test_split_writes_eval_results(monkeypatch, tmp_path):
+    monkeypatch.setattr(rag_eval, "OUT", tmp_path / "results")
+    monkeypatch.setattr(rag_eval, "RUNS", tmp_path / "runs")
+    ph = "abcdef0123456789"
+    assert rag_eval.output_dir(rag_eval.CANONICAL_DATASET, 0, 300, ph) == (tmp_path / "results", True)
+    train, canonical = rag_eval.output_dir("beir/scifact/train", 0, 100, ph)
+    assert not canonical and train == tmp_path / "runs" / "rag_beir-scifact-train_100_abcdef01"
+    # A limited (smoke) run on the test split is never canonical either.
+    smoke, canonical = rag_eval.output_dir(rag_eval.CANONICAL_DATASET, 5, 5, ph)
+    assert not canonical and smoke.parent == tmp_path / "runs"
+
+
+def test_train_split_run_never_touches_eval_results(tmp_path, monkeypatch, capsys):
+    out = tmp_path / "results"
+    _patch_main(tmp_path, monkeypatch, out)
+    seen = {}
+
+    def load(dataset=None):
+        seen["queries"] = dataset
+        return dict(QUERIES), QRELS
+
+    def labels(dataset=None, query_ids=None):
+        seen["labels"] = dataset
+        return CLAIM_LABELS
+
+    monkeypatch.setattr(rag_eval, "load_queries_qrels", load)
+    monkeypatch.setattr(rag_eval, "load_claim_labels", labels)
+    monkeypatch.setenv("SSR_RAG_DATASET", "beir/scifact/train")
+    monkeypatch.setenv("SSR_RAG_N", "all")
+    rag_eval.main()
+    assert seen == {"queries": "beir/scifact/train", "labels": "beir/scifact/train"}
+    assert not out.exists()  # the committed-artifact dir is never created
+    runs = tmp_path / "runs"
+    (run_dir,) = runs.iterdir()
+    assert run_dir.name == f"rag_beir-scifact-train_5_{rag_eval.prompt_hash()[:8]}"
+    blob = json.loads((run_dir / "rag.json").read_text())
+    assert blob["run"]["dataset"] == "beir/scifact/train" and blob["run"]["canonical"] is False
+    assert blob["run"]["n_requested"] == "all" and blob["run"]["n_sample"] == 5
+    assert blob["run"]["label_source"]["dataset"] == "beir/scifact/train"
+    assert "5 claims from beir/scifact/train" in (run_dir / "rag.md").read_text()
+    assert "non-canonical" in capsys.readouterr().out
+
+
+def test_smoke_limit_on_test_split_is_non_canonical(tmp_path, monkeypatch):
+    out = tmp_path / "results"
+    _patch_main(tmp_path, monkeypatch, out)
+    monkeypatch.setenv("SSR_EVAL_LIMIT", "2")
+    rag_eval.main()
+    assert not out.exists()
+    (run_dir,) = (tmp_path / "runs").iterdir()
+    assert json.loads((run_dir / "rag.json").read_text())["n"] == 2
+
+
+def test_canonical_run_with_a_different_n_prints_a_loud_notice(tmp_path, monkeypatch, capsys):
+    _patch_main(tmp_path, monkeypatch, tmp_path)
+    (tmp_path / "rag.json").write_text(json.dumps({"n": 3, "run": {"n_requested": 3}}))
+    rag_eval.main()
+    out = capsys.readouterr().out
+    assert "NOTICE: this canonical run REPLACES" in out
+    assert "committed sample: N=3 claims -> this run: N=5 claims" in out
+    assert out.split("[1/5]")[0].count("NOTICE") == 1  # up front, before any LLM call
+    assert out.count("NOTICE") == 2  # and again when it writes
+    # Same N as committed (the rewritten file records n_sample=5): no notice.
+    rag_eval.main()
+    assert "NOTICE" not in capsys.readouterr().out
+
+
+# --- checkpoint + resume --------------------------------------------------------------------
+
+
+def _sample_order():
+    return rag_eval.sample_claims(QUERIES, rag_eval.N)
+
+
+def _checkpoint_files(tmp_path):
+    return sorted((tmp_path / "cache").glob("*.json"))
+
+
+def test_daily_cap_stop_checkpoints_done_rows_and_the_rerun_resumes(rate_limited, tmp_path):
+    setup, _, out = rate_limited
+    order = _sample_order()
+    fail_qid = order[2]  # two rows complete before the cap hits
+    fail_q = QUERIES[fail_qid]
+    gen, _ = setup("generate", fail_q, [rate_limit_error(OPENROUTER_DAILY_MESSAGE)])
+    with pytest.raises(SystemExit) as exc:
+        rag_eval.main()
+    msg = str(exc.value.code)
+    assert "resume by re-running the same command after the quota resets" in msg.lower()
+    assert "2/5 completed rows are checkpointed" in msg
+    assert not out.exists()  # nothing written to the output dir until every row is done
+    (ckpt,) = _checkpoint_files(tmp_path)
+    assert set(json.loads(ckpt.read_text())["rows"]) == set(order[:2])
+
+    # Quota reset: the same command resumes and runs ONLY the three remaining rows.
+    gen2, judge2 = setup("generate", None, [])
+    rag_eval.main()
+    assert [q for q, _ in gen2.calls] == [QUERIES[q] for q in order[2:]]
+    assert judge2.queries == [QUERIES[q] for q in order[2:]]
+    blob = json.loads((out / "rag.json").read_text())
+    assert [r["query_id"] for r in blob["rows"]] == order  # sample order, resumed included
+    assert blob["n"] == 5 and blob["skipped"] == 0
+    assert blob["judge_calls"] == 5  # cumulative across both sessions
+    assert blob["run"]["checkpoint_signature"] == ckpt.stem
+
+
+def test_resumed_output_matches_an_uninterrupted_run(rate_limited, tmp_path, monkeypatch):
+    setup, _, out = rate_limited
+    setup("generate", QUERIES[_sample_order()[3]], [rate_limit_error(TPD_MESSAGE)])
+    with pytest.raises(SystemExit):
+        rag_eval.main()
+    setup("generate", None, [])
+    rag_eval.main()
+    resumed = json.loads((out / "rag.json").read_text())
+    setup("generate", None, [])
+    monkeypatch.setenv("SSR_EVAL_REFRESH", "1")  # the same run, uninterrupted, from scratch
+    rag_eval.main()
+    fresh = json.loads((out / "rag.json").read_text())
+    for k in ("rows", "verdict_accuracy", "quadrants", "confusion", "judge_calls"):
+        assert resumed[k] == fresh[k], k
+
+
+def test_skipped_rows_are_not_checkpointed_and_are_retried(rate_limited, tmp_path):
+    setup, _, out = rate_limited
+    gen, _ = setup("generate", "claim two", [RuntimeError("upstream 500")])
+    rag_eval.main()  # completes with the row skipped
+    blob = json.loads((out / "rag.json").read_text())
+    assert blob["skipped"] == 1 and "2" not in {r["query_id"] for r in blob["rows"]}
+    (ckpt,) = _checkpoint_files(tmp_path)
+    assert "2" not in json.loads(ckpt.read_text())["rows"]
+    gen2, _ = setup("generate", None, [])
+    rag_eval.main()
+    assert [q for q, _ in gen2.calls] == ["claim two"]  # only the skipped row re-runs
+    blob = json.loads((out / "rag.json").read_text())
+    assert blob["n"] == 5 and blob["skipped"] == 0
+
+
+def test_unparseable_judge_rows_are_not_checkpointed(rate_limited, tmp_path):
+    setup, _, out = rate_limited
+    setup("judge", "claim four", [JudgeParseError("garbage")])
+    rag_eval.main()
+    (ckpt,) = _checkpoint_files(tmp_path)
+    assert "4" not in json.loads(ckpt.read_text())["rows"]
+    gen2, _ = setup("generate", None, [])
+    rag_eval.main()
+    assert [q for q, _ in gen2.calls] == ["claim four"]
+
+
+@pytest.mark.parametrize(
+    "content", ["{not json", "null", "[]", '{"signature": "x", "rows": []}', "ROWS_BAD_SHAPE"]
+)
+def test_corrupt_checkpoint_degrades_to_recompute(rate_limited, tmp_path, content):
+    setup, _, out = rate_limited
+    setup("generate", None, [])
+    rag_eval.main()
+    (ckpt,) = _checkpoint_files(tmp_path)
+    if content == "ROWS_BAD_SHAPE":  # right signature, but every row is unusable
+        blob = json.loads(ckpt.read_text())
+        blob["rows"] = {q: {"query_id": q} for q in blob["rows"]} | {"1": "not a row"}
+        content = json.dumps(blob)
+    ckpt.write_text(content)
+    gen2, _ = setup("generate", None, [])
+    rag_eval.main()  # no crash: everything is recomputed
+    assert sorted(q for q, _ in gen2.calls) == sorted(QUERIES.values())
+    assert json.loads((out / "rag.json").read_text())["n"] == 5
+
+
+def test_eval_refresh_ignores_the_checkpoint(rate_limited, tmp_path, monkeypatch):
+    setup, _, _ = rate_limited
+    setup("generate", None, [])
+    rag_eval.main()
+    gen2, _ = setup("generate", None, [])
+    monkeypatch.setenv("SSR_EVAL_REFRESH", "1")
+    rag_eval.main()
+    assert len(gen2.calls) == len(QUERIES)
+
+
+def test_complete_checkpoint_rewrites_the_artifact_with_no_llm_calls(rate_limited, tmp_path):
+    setup, _, out = rate_limited
+    setup("generate", None, [])
+    rag_eval.main()
+    first = json.loads((out / "rag.json").read_text())
+    gen2, judge2 = setup("generate", None, [])
+    rag_eval.main()
+    assert gen2.calls == [] and judge2.queries == []
+    assert json.loads((out / "rag.json").read_text())["rows"] == first["rows"]
+
+
+def _endpoints(gen_model=DEFAULT_GEN_MODEL):
+    url = "https://openrouter.ai/api/v1"
+    return (
+        LLMEndpoint("generator", "openrouter", url, gen_model),
+        LLMEndpoint("judge", "openrouter", url, "nvidia/nemotron-3-ultra-550b-a55b:free"),
+    )
+
+
+def test_signature_tracks_everything_that_changes_a_row(monkeypatch):
+    gen, judge_ep = _endpoints()
+    base = rag_eval.rag_signature(rag_eval.signature_fields("beir/scifact/test", 50, gen, judge_ep))
+    same = rag_eval.rag_signature(rag_eval.signature_fields("beir/scifact/test", 50, gen, judge_ep))
+    assert base == same
+
+    def sig(dataset="beir/scifact/test", n=50, g=gen, j=judge_ep):
+        return rag_eval.rag_signature(rag_eval.signature_fields(dataset, n, g, j))
+
+    changed = {
+        "n": sig(n=300),
+        "dataset": sig(dataset="beir/scifact/train"),
+        "generator model": sig(g=_endpoints("openai/gpt-oss-120b")[0]),
+        "judge model": sig(j=LLMEndpoint("judge", "openrouter", judge_ep.base_url, "other:free")),
+        "provider": sig(g=LLMEndpoint("generator", "groq", "https://api.groq.com/openai/v1", "m")),
+    }
+    with monkeypatch.context() as m:
+        m.setattr(rag_eval, "SYSTEM", rag_eval.SYSTEM + " Be brief.")
+        changed["prompt"] = sig()
+    with monkeypatch.context() as m:
+        m.setattr(rag_eval, "JUDGE_SYSTEM", rag_eval.JUDGE_SYSTEM + " Strictly.")
+        changed["judge prompt"] = sig()
+    for attr, value in (("TOP_K", 8), ("MODE", "bm25"), ("SEED", 7)):
+        with monkeypatch.context() as m:
+            m.setattr(rag_eval, attr, value)
+            changed[attr] = sig()
+    for field, value in (("llm_max_completion_tokens", 4096), ("llm_reasoning_effort", "high")):
+        with monkeypatch.context() as m:
+            m.setattr(settings, field, value)
+            changed[field] = sig()
+    assert all(s != base for s in changed.values()), [k for k, s in changed.items() if s == base]
+    assert len(set(changed.values())) == len(changed)
+    # Git-independent: a new commit that changes none of the above keeps the checkpoint.
+    monkeypatch.setattr(rag_eval, "_git_sha", lambda: "deadbeef")
+    assert sig() == base
+
+
+# --- up-front estimate + optional quota check -------------------------------------------------
+
+
+def test_request_estimate_counts_gen_retry_and_judge():
+    gen, judge_ep = _endpoints()
+    est = rag_eval.request_estimate(300, gen, judge_ep, 12.0, 0.24)
+    assert est["requests"] == 672  # 300 x (1 + 0.24 + 1)
+    assert est["free_requests"] == 672 and est["free_requests_worst"] == 900
+    assert est["seconds"] == 300 * (12.0 + rag_eval.EST_QUERY_LATENCY_S)
+    paid = rag_eval.request_estimate(300, _endpoints(PAID_GEN_MODEL)[0], judge_ep, 5.0, 0.24)
+    assert paid["requests"] == 672 and paid["free_requests"] == 300  # only the judge is free
+
+
+def test_estimate_is_printed_for_the_remaining_rows(tmp_path, monkeypatch, capsys):
+    _run_main(tmp_path, monkeypatch)
+    head = capsys.readouterr().out.split("[1/5]")[0]
+    assert "Remaining work: 5 of 5 claims" in head
+    assert "~12 LLM requests (per claim: 1 generation + 0.24 expected truncation" in head
+
+
+def _key_info(remaining, limit=1000):
+    return {"data": {"label": "x", "free_model_daily_requests": {
+        "used": limit - remaining, "limit": limit, "remaining": remaining}}}
+
+
+def test_free_requests_remaining_parses_the_key_response():
+    assert rag_eval.free_requests_remaining(_key_info(255)) == (255, 1000)
+    assert rag_eval.free_requests_remaining({"data": {"label": "x"}}) == (None, None)
+    assert rag_eval.free_requests_remaining(None) == (None, None)
+
+
+def test_check_quota_aborts_when_short_and_prints_both_numbers(capsys):
+    gen, judge_ep = _endpoints()
+    est = rag_eval.request_estimate(300, gen, judge_ep, 12.0, 0.24)
+    with pytest.raises(SystemExit) as exc:
+        rag_eval.check_quota(est, gen, judge_ep, fetch=lambda key: _key_info(255))
+    assert "255 free requests left today < ~672 needed" in str(exc.value.code)
+    assert "255 free OpenRouter requests left today (of 1000); this run needs ~672" in (
+        capsys.readouterr().out
+    )
+    rag_eval.check_quota(est, gen, judge_ep, fetch=lambda key: _key_info(1000))  # enough: no exit
+
+
+@pytest.mark.parametrize("fetch", [lambda key: {"data": {}}, lambda key: 1 / 0])
+def test_check_quota_fails_closed(fetch):
+    gen, judge_ep = _endpoints()
+    est = rag_eval.request_estimate(10, gen, judge_ep, 12.0, 0.24)
+    with pytest.raises(SystemExit, match="aborting before any LLM call"):
+        rag_eval.check_quota(est, gen, judge_ep, fetch=fetch)
+
+
+@pytest.mark.parametrize("how", ["flag", "env"])
+def test_check_quota_in_main_aborts_before_any_llm_call(rate_limited, monkeypatch, how):
+    setup, _, out = rate_limited
+    gen, fake_judge = setup("generate", None, [])
+    keys = []
+    monkeypatch.setattr(rag_eval, "fetch_key_info", lambda key: keys.append(key) or _key_info(3))
+    argv = ["--check-quota"] if how == "flag" else []
+    if how == "env":
+        monkeypatch.setenv("SSR_RAG_CHECK_QUOTA", "1")
+    with pytest.raises(SystemExit, match="3 free requests left today < ~12 needed"):
+        rag_eval.main(argv)
+    assert gen.calls == [] and fake_judge.queries == [] and not out.exists()
+    assert keys == [FAKE_OPENROUTER_KEY]  # sent the OpenRouter key, to the OpenRouter URL only
+    assert rag_eval.OPENROUTER_KEY_URL == "https://openrouter.ai/api/v1/key"
+
+
+def test_quota_check_is_off_by_default(rate_limited, monkeypatch):
+    setup, _, _ = rate_limited
+    setup("generate", None, [])
+    monkeypatch.setattr(rag_eval, "fetch_key_info", lambda key: pytest.fail("called /key"))
+    rag_eval.main()

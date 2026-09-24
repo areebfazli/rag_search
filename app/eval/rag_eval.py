@@ -38,11 +38,52 @@ finish_reason, token usage, retries) and the run's provenance (prompt hashes, gi
 models, generator budget, seed, oracle definition, label source), so a published number
 can be traced back to the exact answers and prompts behind it.
 
+Sample, dataset and output (env, SSR_ prefix like the rest of the repo):
+
+* ``SSR_RAG_N`` — claims to sample (default 50; ``all`` = the whole split). The sample is
+  a seeded shuffle (SEED) of the split's sorted query ids, cut to the first N, so samples
+  NEST: the first 50 of N=300 are exactly the 50-claim sample, and runs of different N
+  can be compared on their common prefix.
+* ``SSR_RAG_DATASET`` — the split (default settings.eval_dataset, i.e. the canonical
+  ``beir/scifact/test``). ``beir/scifact/train`` (809 claims, disjoint from test) is for
+  prompt development: retrieval runs over the same corpus, labels come from the same
+  source archive.
+* ``SSR_EVAL_LIMIT`` — smoke subset: keep only the first n sampled claims.
+
+Canonical-output rule: eval/results/rag.{md,json} (the committed artifact) is written
+ONLY by a run on the canonical test split with no SSR_EVAL_LIMIT. Every other run — any
+train-split run, any limited run — writes to
+``data/eval_runs/rag_<dataset-slug>_<n>_<prompt-hash8>/`` (gitignored) and can never touch
+eval/results/. A canonical run whose sample size differs from the one recorded in the
+committed rag.json (e.g. SSR_RAG_N=all replacing the 50-claim artifact) prints a loud
+notice up front and again when it writes: it is replacing the headline with a different N.
+
+Checkpoint + resume: every completed row is persisted at once (atomic temp file +
+os.replace) to ``data/eval_cache/rag/<signature>.json``, where the signature covers
+everything that changes a row (dataset, sample size, seed, both endpoints, both prompt
+hashes, top_k, mode, token budget, reasoning setting, retrieval settings) and nothing
+git-specific. A re-run of the same command skips completed rows, so a provider's daily
+cap (Groq tokens/day, OpenRouter's free requests/day) just pauses the run: it stops with
+the checkpoint saved and the output dir untouched, and resumes after the quota resets.
+Skipped rows (pipeline errors, unparseable judge replies) are never checkpointed, so a
+re-run retries them. ``SSR_EVAL_REFRESH=1`` ignores the checkpoint; a corrupt or
+wrong-shaped one degrades to recompute.
+
+Before any LLM call the run prints the requests still needed (remaining rows x (1
+generation + the expected truncation-retry rate + 1 judge)) and the wall-clock estimate.
+``--check-quota`` (or ``SSR_RAG_CHECK_QUOTA=1``) also reads the OpenRouter key's remaining
+free requests for today (GET /api/v1/key, which is not an LLM call and is not counted
+against the quota) and aborts before any LLM call if they are fewer than needed.
+
 Run:
     uv run python -m app.eval.rag_eval
+    SSR_RAG_N=all uv run python -m app.eval.rag_eval --check-quota     # full 300-claim test
+    SSR_RAG_DATASET=beir/scifact/train SSR_RAG_N=100 uv run python -m app.eval.rag_eval
+    uv run python -m app.eval.rag_compare A.json B.json                 # McNemar, paired
 """
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import math
@@ -50,13 +91,17 @@ import os
 import random
 import statistics
 import subprocess
+import sys
 import time
+import urllib.request
+from collections.abc import Callable, Collection, Mapping, Sequence
 from pathlib import Path
 
 from openai import APIStatusError, OpenAI, RateLimitError
 
 from app.core.config import Settings, settings
 from app.core.llm_endpoints import (
+    OPENROUTER_BASE_URL,
     PAID_MAX_PRICE_USD_PER_M,
     LLMEndpoint,
     SpendPolicyError,
@@ -75,12 +120,13 @@ from app.ingest.corpus import (
     load_queries_qrels,
     scifact_source_zip,
 )
+from app.eval.retrieval_eval import CANONICAL_DATASET, _index_fingerprint
 from app.retrieve.service import SearchService
 
 # Generator and judge are different model families, so the judge isn't grading its own
 # or a sibling model's output. The ids are what llm_endpoints resolves for the provider
 # in use (main() re-resolves them with key + spend-policy checks).
-N = 50
+N = 50  # default sample size; SSR_RAG_N overrides (an int, or "all")
 SEED = 13  # fixed sample: reproducible, and not just the first N ids in dataset order
 GEN_PROVIDER = settings.llm_provider
 JUDGE_PROVIDER = settings.judge_provider
@@ -200,7 +246,23 @@ def typical_generation_cost(gen: LLMEndpoint) -> float:
     return cost_upper_bound(EST_GEN_PROMPT_TOKENS, EST_GEN_COMPLETION_TOKENS)
 
 
-OUT = Path("eval/results")
+OUT = Path("eval/results")  # canonical run only — the committed artifact
+RUNS = Path("data/eval_runs")  # every other run (gitignored)
+CACHE = Path("data/eval_cache/rag")  # per-row resume checkpoints (gitignored)
+
+# Expected share of generations that need the truncation retry, for the up-front request
+# estimate only: 12 of 50 on the committed free-Ling run (retried_answers in rag.json).
+# Once a checkpoint holds at least MIN_ROWS_FOR_OBSERVED_RETRY rows, their own rate wins.
+EXPECTED_RETRY_RATE = 0.24
+MIN_ROWS_FOR_OBSERVED_RETRY = 10
+# Rough allowance for the calls' own latency per claim (generation incl. hidden reasoning,
+# plus the judge), on top of the throttle sleep. An assumption for the estimate, not a
+# measurement.
+EST_QUERY_LATENCY_S = 8.0
+# OpenRouter's key-info endpoint: `data.free_model_daily_requests.{used,limit,remaining}`
+# for the current UTC day (docs: openrouter.ai/docs/api/reference/limits). Only ever sent
+# the OpenRouter key.
+OPENROUTER_KEY_URL = OPENROUTER_BASE_URL + "/key"
 
 # What `evidence` means. The headline is the rationale oracle; the qrels one is computed
 # alongside it in the same run so the two can be compared on identical answers.
@@ -420,14 +482,21 @@ def reranker_in_effect(mode: str) -> str | None:
     return settings.reranker_model if mode == "hybrid_rerank" else None
 
 
-def run_metadata(gen: LLMEndpoint | None = None, judge_ep: LLMEndpoint | None = None) -> dict:
+def run_metadata(
+    gen: LLMEndpoint | None = None,
+    judge_ep: LLMEndpoint | None = None,
+    dataset: str | None = None,
+    n_requested: int | str | None = None,
+) -> dict:
     """Provenance for rag.json: enough to tell whether two runs are comparable. Records
     each role's provider, base URL, model id and the provider fields sent — never a key."""
     gen = gen or resolve_endpoint("generator", require_key=False)
     judge_ep = judge_ep or resolve_endpoint("judge", require_key=False)
     effort = resolve_reasoning_effort(gen.model, settings.llm_reasoning_effort)
+    dataset = dataset or settings.eval_dataset
     return {
         "git_sha": _git_sha(),
+        "dataset": dataset,
         "prompt_hash": prompt_hash(),
         "judge_prompt_hash": _sha256(JUDGE_SYSTEM),
         "generator_model": gen.model,
@@ -450,7 +519,7 @@ def run_metadata(gen: LLMEndpoint | None = None, judge_ep: LLMEndpoint | None = 
         "mode": MODE,
         "reranker_model": reranker_in_effect(MODE),
         "top_k": TOP_K,
-        "n_requested": N,
+        "n_requested": N if n_requested is None else n_requested,
         "sample_seed": SEED,
         "oracle": ORACLE,
         "oracle_definition": ORACLE_DEFINITIONS[ORACLE],
@@ -459,7 +528,7 @@ def run_metadata(gen: LLMEndpoint | None = None, judge_ep: LLMEndpoint | None = 
         "label_source": {
             "loader": "app.ingest.corpus.load_claim_labels",
             "file": "scifact/queries.jsonl `metadata` field, BEIR SciFact source.zip",
-            "dataset": settings.eval_dataset,
+            "dataset": dataset,
             "source_zip_sha256": _file_sha256(scifact_source_zip()),
         },
         "answered_source": (
@@ -596,7 +665,10 @@ def _quadrant_md(q: dict) -> str:
     )
 
 
-def _markdown(agg: dict, skipped: int, parse_failures: int) -> str:
+def _markdown(agg: dict, skipped: int, parse_failures: int, dataset: str | None = None) -> str:
+    # The canonical header stays verbatim; any other split names itself, so a train-split
+    # table can't pass for the headline.
+    source = "SciFact claims" if dataset in (None, CANONICAL_DATASET) else f"claims from {dataset}"
     notes = []
     if skipped:
         notes.append(f"{skipped} quer{'y' if skipped == 1 else 'ies'} skipped (pipeline errors)")
@@ -623,7 +695,7 @@ def _markdown(agg: dict, skipped: int, parse_failures: int) -> str:
     return (
         f"# RAG answer quality — verdicts scored against SciFact labels, LLM-as-judge for "
         f"faithfulness\n\n"
-        f"{agg['n']} SciFact claims (random sample, seed={agg['sample_seed']}) · "
+        f"{agg['n']} {source} (random sample, seed={agg['sample_seed']}) · "
         f"top_k={k} · generator={agg['generator_model']} ({agg['generator_provider']}) · "
         f"judge={agg['judge_model']} ({agg['judge_provider']})\n"
         f"{note_line}\n"
@@ -701,7 +773,328 @@ def _estimate_line(n: int, gen: LLMEndpoint, judge_ep: LLMEndpoint, throttle: fl
     )
 
 
-def main() -> None:
+# --- sample, dataset, output guard ------------------------------------------------------
+
+
+def parse_n(raw: str | None) -> int | None:
+    """SSR_RAG_N: a positive int, or "all" (-> None: the whole split). Unset -> N."""
+    if raw is None or not raw.strip():
+        return N
+    if raw.strip().lower() == "all":
+        return None
+    n = int(raw)
+    if n < 1:
+        raise ValueError(f"SSR_RAG_N must be a positive integer or 'all', got {raw!r}")
+    return n
+
+
+def rag_dataset(env: Mapping[str, str] | None = None) -> str:
+    env = os.environ if env is None else env
+    return env.get("SSR_RAG_DATASET") or settings.eval_dataset
+
+
+def sample_claims(query_ids: Collection[str], n: int | None, seed: int = SEED) -> list[str]:
+    """The first `n` of a seeded shuffle of the sorted ids (all of them for None).
+
+    Shuffle-then-prefix is what makes samples nest: the shuffle doesn't depend on n, so
+    sample(ids, 50) == sample(ids, 300)[:50]. This is exactly how the committed 50-claim
+    sample was drawn, so it is unchanged.
+    """
+    qids = sorted(query_ids)
+    random.Random(seed).shuffle(qids)  # fixed random sample, not the first N in id order
+    return qids if n is None else qids[:n]
+
+
+def _slug(dataset: str) -> str:
+    return "".join(c if c.isalnum() else "-" for c in dataset).strip("-")
+
+
+def output_dir(dataset: str, limit: int, n_sample: int, phash: str) -> tuple[Path, bool]:
+    """Where this run's rag.{md,json} go, and whether it is the canonical run.
+
+    Only the canonical test split with no SSR_EVAL_LIMIT may write to eval/results/.
+    Anything else — every train-split run, every smoke subset — goes to
+    data/eval_runs/rag_<dataset-slug>_<n>_<prompt-hash8>/, so prompt experiments under
+    different prompts don't collide and can never overwrite the committed artifact.
+    """
+    if not limit and dataset == CANONICAL_DATASET:
+        return OUT, True
+    return RUNS / f"rag_{_slug(dataset)}_{n_sample}_{phash[:8]}", False
+
+
+def committed_sample_size(path: Path | None = None) -> int | None:
+    """Sample size recorded in the committed rag.json (None if absent or unreadable)."""
+    path = OUT / "rag.json" if path is None else path
+    try:
+        blob = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(blob, dict):
+        return None
+    run = blob.get("run") if isinstance(blob.get("run"), dict) else {}
+    for v in (run.get("n_sample"), run.get("n_requested"), blob.get("n")):
+        if isinstance(v, int) and not isinstance(v, bool):
+            return v
+    return None
+
+
+def _replace_notice(recorded: int, n_sample: int) -> str:
+    bar = "!" * 88
+    return (
+        f"\n{bar}\n"
+        f"NOTICE: this canonical run REPLACES {OUT / 'rag.md'} and {OUT / 'rag.json'}\n"
+        f"        committed sample: N={recorded} claims -> this run: N={n_sample} claims.\n"
+        f"        The headline numbers will then describe a different sample size; update the\n"
+        f"        README alongside, or use SSR_EVAL_LIMIT / a train-split run to experiment.\n"
+        f"{bar}\n"
+    )
+
+
+# --- checkpoint -------------------------------------------------------------------------
+
+# A checkpointed row is only reused if it carries what aggregate() reads.
+_CHECKPOINT_ROW_KEYS = (
+    "query_id",
+    "gold_label",
+    "predicted_label",
+    "verdict",
+    "answered",
+    "answered_source",
+    "judge_answered",
+    "faithfulness",
+    "context_relevance",
+    "evidence",
+    "evidence_qrels",
+)
+
+
+def signature_fields(
+    dataset: str, n_sample: int, gen: LLMEndpoint, judge_ep: LLMEndpoint
+) -> dict:
+    """Everything that changes a row's content. Nothing git-specific: a commit that
+    leaves every one of these alone must not invalidate hours of rate-limited work.
+
+    The sample is fixed by (dataset, n_sample, seed); each row by the two endpoints
+    (provider, base URL, model id, routing fields), both prompts, the generator's token
+    budget and reasoning setting, and the retrieval that produced its context.
+    """
+    reranker = reranker_in_effect(MODE)
+    fields: dict = {
+        "dataset": dataset,
+        "n_sample": n_sample,
+        "sample_seed": SEED,
+        "generator": gen.metadata(),
+        "judge": judge_ep.metadata(),
+        "prompt_hash": prompt_hash(),
+        "judge_prompt_hash": _sha256(JUDGE_SYSTEM),
+        "top_k": TOP_K,
+        "mode": MODE,
+        "reranker": reranker,
+        "rerank_candidates": settings.rerank_candidates if reranker else None,
+        "max_completion_tokens": settings.llm_max_completion_tokens,
+        "reasoning_effort": resolve_reasoning_effort(gen.model, settings.llm_reasoning_effort),
+        "rrf_k": settings.rrf_k,
+        "candidate_k": settings.dense_top_k,
+        "embedding_model": settings.embedding_model,
+        "embedding_query_prefix": settings.embedding_query_prefix,
+    }
+    if (index := _index_fingerprint()) is not None:
+        fields["index_manifest"] = index
+    return fields
+
+
+def rag_signature(fields: Mapping) -> str:
+    return hashlib.sha256(json.dumps(fields, sort_keys=True).encode()).hexdigest()[:16]
+
+
+def checkpoint_path(sig: str) -> Path:
+    return CACHE / f"{sig}.json"
+
+
+def load_checkpoint(path: Path, sig: str, qids: Collection[str]) -> tuple[dict[str, dict], dict]:
+    """(completed rows for this sample, cumulative stats) — ({}, {}) when there is none.
+
+    Like retrieval_eval, a corrupt or wrong-shaped checkpoint degrades to recompute
+    rather than aborting the run; a single malformed row is dropped (and redone) on its
+    own. SSR_EVAL_REFRESH=1 ignores the file.
+    """
+    if os.environ.get("SSR_EVAL_REFRESH") or not path.exists():
+        return {}, {}
+    try:
+        blob = json.loads(path.read_text())
+    except (ValueError, OSError) as e:
+        print(f"  (unreadable checkpoint, recomputing: {type(e).__name__})", flush=True)
+        return {}, {}
+    if not (isinstance(blob, dict) and isinstance(blob.get("rows"), dict)):
+        print("  (malformed checkpoint, recomputing)", flush=True)
+        return {}, {}
+    if blob.get("signature") != sig:
+        return {}, {}
+    wanted = set(qids)
+    rows = {
+        q: r
+        for q, r in blob["rows"].items()
+        if q in wanted
+        and isinstance(r, dict)
+        and r.get("query_id") == q
+        and all(k in r for k in _CHECKPOINT_ROW_KEYS)
+    }
+    stats = blob.get("stats") if isinstance(blob.get("stats"), dict) else {}
+    return rows, stats
+
+
+def save_checkpoint(path: Path, sig: str, fields: Mapping, rows: Mapping, stats: Mapping) -> None:
+    """Write-then-rename: os.replace is atomic, so a kill mid-write leaves the previous
+    good checkpoint intact rather than a truncated one."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(
+        json.dumps({"signature": sig, "fields": fields, "stats": dict(stats), "rows": rows})
+    )
+    os.replace(tmp, path)
+
+
+def _stat(stats: Mapping, key: str, default: float = 0) -> float:
+    v = stats.get(key, default)
+    return v if isinstance(v, int | float) and not isinstance(v, bool) else default
+
+
+# --- up-front estimate + optional quota check ---------------------------------------------
+
+
+def observed_retry_rate(rows: Sequence[Mapping]) -> float | None:
+    if len(rows) < MIN_ROWS_FOR_OBSERVED_RETRY:
+        return None
+    return sum((r.get("generation_attempts") or 1) > 1 for r in rows) / len(rows)
+
+
+def request_estimate(
+    remaining: int, gen: LLMEndpoint, judge_ep: LLMEndpoint, throttle: float, retry_rate: float
+) -> dict:
+    """Requests the remaining rows need: per claim, 1 generation + the expected retry
+    rate + 1 judge call (all providers), and the share of those on OpenRouter's free
+    caps (expected, and worst case with every generation retrying)."""
+    gen_free = int(gen.provider == "openrouter" and not gen.paid)
+    judge_free = int(judge_ep.provider == "openrouter" and not judge_ep.paid)
+    _, worst = free_requests_per_query(gen, judge_ep)
+
+    def up(x: float) -> int:  # ceil, without float noise turning 672.0000001 into 673
+        return math.ceil(round(x, 6))
+
+    return {
+        "rows": remaining,
+        "retry_rate": retry_rate,
+        "requests": up(remaining * (2 + retry_rate)),
+        "free_requests": up(remaining * (gen_free * (1 + retry_rate) + judge_free)),
+        "free_requests_worst": remaining * worst,
+        "seconds": remaining * (throttle + EST_QUERY_LATENCY_S),
+    }
+
+
+def _request_line(est: dict, n_total: int, n_done: int, throttle: float, retry_src: str) -> str:
+    days = ""
+    if est["free_requests"] > OPENROUTER_FREE_REQUESTS_PER_DAY:
+        days = (
+            f"\n  that is more than one day's {OPENROUTER_FREE_REQUESTS_PER_DAY:,} free requests: "
+            f"expect ~{math.ceil(est['free_requests'] / OPENROUTER_FREE_REQUESTS_PER_DAY)} "
+            f"daily-cap stops, each resumed by re-running the same command"
+        )
+    return (
+        f"Remaining work: {est['rows']} of {n_total} claims"
+        + (f" ({n_done} resumed from checkpoint)" if n_done else "")
+        + f"\n  ~{est['requests']} LLM requests (per claim: 1 generation + "
+        f"{est['retry_rate']:.2f} expected truncation retries [{retry_src}] + 1 judge); "
+        f"~{est['free_requests']} on OpenRouter's free caps (worst case "
+        f"{est['free_requests_worst']})\n"
+        f"  est. wall-clock ~{est['seconds'] / 60:.0f} min ({throttle:.1f}s throttle + "
+        f"~{EST_QUERY_LATENCY_S:.0f}s assumed call latency per claim){days}"
+    )
+
+
+def fetch_key_info(api_key: str, timeout: float = 15.0) -> dict:
+    """GET /api/v1/key on OpenRouter (key metadata; not an LLM call). The key goes only
+    to the constant OpenRouter URL and is never printed."""
+    req = urllib.request.Request(OPENROUTER_KEY_URL, headers={"Authorization": f"Bearer {api_key}"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read())
+
+
+def free_requests_remaining(info: object) -> tuple[int | None, int | None]:
+    """(remaining, daily limit) from a /key response's free_model_daily_requests."""
+    data = info.get("data", info) if isinstance(info, dict) else None
+    daily = data.get("free_model_daily_requests") if isinstance(data, dict) else None
+    if not isinstance(daily, dict):
+        return None, None
+
+    def as_int(v: object) -> int | None:
+        return v if isinstance(v, int) and not isinstance(v, bool) else None
+
+    return as_int(daily.get("remaining")), as_int(daily.get("limit"))
+
+
+def check_quota(
+    est: dict,
+    gen: LLMEndpoint,
+    judge_ep: LLMEndpoint,
+    fetch: Callable[[str], dict] = fetch_key_info,
+) -> None:
+    """Abort (SystemExit) before any LLM call if today's remaining free OpenRouter
+    requests are fewer than this run needs. Fails closed: an unreadable answer aborts."""
+    needed = est["free_requests"]
+    ep = next((e for e in (gen, judge_ep) if e.provider == "openrouter"), None)
+    if ep is None or not needed:
+        print("Quota check: no free OpenRouter requests needed; nothing to check.", flush=True)
+        return
+    try:
+        info = fetch(ep.api_key)
+    except Exception as e:  # network, HTTP 401, bad JSON: fail closed
+        raise SystemExit(
+            f"--check-quota: could not read {OPENROUTER_KEY_URL} ({type(e).__name__}); "
+            f"aborting before any LLM call."
+        ) from None
+    remaining, limit = free_requests_remaining(info)
+    if remaining is None:
+        raise SystemExit(
+            f"--check-quota: {OPENROUTER_KEY_URL} returned no "
+            f"free_model_daily_requests.remaining; aborting before any LLM call."
+        )
+    print(
+        f"Quota check: {remaining} free OpenRouter requests left today"
+        + (f" (of {limit})" if limit is not None else "")
+        + f"; this run needs ~{needed} (worst case {est['free_requests_worst']}).",
+        flush=True,
+    )
+    if remaining < needed:
+        raise SystemExit(
+            f"--check-quota: {remaining} free requests left today < ~{needed} needed; "
+            f"aborting before any LLM call. Re-run after the daily reset (00:00 UTC), or run "
+            f"without --check-quota to use what is left and resume tomorrow."
+        )
+
+
+# --- entry point --------------------------------------------------------------------------
+
+
+def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
+    p = argparse.ArgumentParser(prog="python -m app.eval.rag_eval", description=__doc__.split("\n")[0])
+    p.add_argument(
+        "--check-quota",
+        action="store_true",
+        help="read the OpenRouter key's remaining free requests (GET /api/v1/key) and abort "
+        "before any LLM call if they are fewer than needed (also: SSR_RAG_CHECK_QUOTA=1)",
+    )
+    return p.parse_args(list(argv))
+
+
+def main(argv: Sequence[str] = ()) -> None:
+    args = _parse_args(argv)
+    want_quota = args.check_quota or os.environ.get("SSR_RAG_CHECK_QUOTA", "") not in ("", "0")
+    dataset = rag_dataset()
+    n_req = parse_n(os.environ.get("SSR_RAG_N"))
+    limit = int(os.environ.get("SSR_EVAL_LIMIT", "0") or 0)
+    if limit < 0:
+        raise ValueError("SSR_EVAL_LIMIT must be >= 0")
+
     # Resolve both endpoints first: a missing key, a key/URL mismatch or a model the
     # spend policy refuses fails here, before minutes of retrieval.
     gen_ep = resolve_endpoint("generator")
@@ -711,11 +1104,36 @@ def main() -> None:
     free_lo, free_hi = free_requests_per_query(gen_ep, judge_ep)
     ceiling = settings.rag_max_spend_usd
 
-    queries, qrels = load_queries_qrels()
-    qids = sorted(queries)
-    random.Random(SEED).shuffle(qids)  # fixed random sample, not the first N in id order
-    qids = qids[:N]
-    labels = load_claim_labels(query_ids=set(queries))
+    queries, qrels = load_queries_qrels(dataset)
+    qids = sample_claims(queries, n_req)
+    if os.environ.get("SSR_RAG_N") and n_req is not None and n_req > len(qids):
+        print(f"SSR_RAG_N={n_req} exceeds the {len(qids)} claims in {dataset}: using all.")
+    if limit:
+        qids = qids[:limit]
+    labels = load_claim_labels(dataset=dataset, query_ids=set(queries))
+    phash = prompt_hash()
+    out, canonical = output_dir(dataset, limit, len(qids), phash)
+    n_label = "all" if n_req is None else n_req
+    print(
+        f"Sample: {len(qids)} claims from {dataset} (SSR_RAG_N={n_label}, seed={SEED}"
+        + (f", SSR_EVAL_LIMIT={limit}" if limit else "")
+        + f") -> {out}"
+        + ("" if canonical else f" (non-canonical: never writes {OUT})"),
+        flush=True,
+    )
+    replacing = None
+    if canonical and (recorded := committed_sample_size()) is not None and recorded != len(qids):
+        replacing = _replace_notice(recorded, len(qids))
+        print(replacing, flush=True)
+
+    # Resume: rows completed under the same signature are reused, never re-generated.
+    sig_fields = signature_fields(dataset, len(qids), gen_ep, judge_ep)
+    sig = rag_signature(sig_fields)
+    ckpt = checkpoint_path(sig)
+    done, prior = load_checkpoint(ckpt, sig, qids)
+    if done:
+        print(f"  (resuming — {len(done)}/{len(qids)} rows already done, {ckpt})", flush=True)
+    todo_ids = [q for q in qids if q not in done]
 
     if (reranker := reranker_in_effect(MODE)) is not None:
         warn = ""
@@ -724,7 +1142,9 @@ def main() -> None:
         print(f"MODE={MODE}: reranking with {reranker}{warn}", flush=True)
 
     service = SearchService()
-    skipped = parse_failures = judge_calls = 0
+    skipped = parse_failures = 0
+    judge_calls = int(_stat(prior, "judge_calls"))
+    prior_judge_usd = float(_stat(prior, "judge_reported_usd"))
     skip_reasons: dict[str, int] = {}
 
     def skip(n: int, qid: str, e: Exception) -> None:
@@ -739,43 +1159,55 @@ def main() -> None:
     # Pass 1 — retrieval only (local, no LLM budget spent). Knowing the oracle split
     # BEFORE the first LLM call means a sample that can't test abstention (say, no
     # claim lacking evidence) is visible up front, not after 15 minutes of throttling.
+    # Resumed rows already carry their evidence flags; only the rest are retrieved.
+    position = {q: i for i, q in enumerate(qids, start=1)}
     retrieved: dict[str, list[SearchHit]] = {}
-    for n, qid in enumerate(qids, start=1):
+    for qid in todo_ids:
         try:
             retrieved[qid] = service.retrieve(queries[qid], mode=MODE, top_k=TOP_K)
         except Exception as e:  # skip a query rather than lose the whole run
-            skip(n, qid, e)
+            skip(position[qid], qid, e)
     gold = {qid: {d for d, rel in qrels.get(qid, {}).items() if rel > 0} for qid in retrieved}
     flags = {
         qid: evidence_flags([h.doc_id for h in hits], labels[qid], gold[qid])
         for qid, hits in retrieved.items()
     }
-    n_ev = sum(f["evidence"] for f in flags.values())
-    n_evq = sum(f["evidence_qrels"] for f in flags.values())
-    mix = ", ".join(f"{g} {sum(labels[q].label == g for q in retrieved)}" for g in LABELS)
+    scored = [q for q in qids if q in done or q in flags]
+    ev = {q: (done[q] if q in done else flags[q]) for q in scored}
+    n_ev = sum(bool(ev[q]["evidence"]) for q in scored)
+    n_evq = sum(bool(ev[q]["evidence_qrels"]) for q in scored)
+    mix = ", ".join(f"{g} {sum(labels[q].label == g for q in scored)}" for g in LABELS)
     print(
-        f"Oracle check (before any LLM call), {len(retrieved)} claims [{mix}]:\n"
+        f"Oracle check (before any LLM call), {len(scored)} claims [{mix}]:\n"
         f"  rationale oracle: {n_ev} have a rationale doc in top-{TOP_K} -> "
-        f"{len(retrieved) - n_ev} should abstain\n"
+        f"{len(scored) - n_ev} should abstain\n"
         f"  qrels oracle (legacy): {n_evq} have a qrels doc in top-{TOP_K} -> "
-        f"{len(retrieved) - n_evq} should abstain",
+        f"{len(scored) - n_evq} should abstain",
         flush=True,
     )
 
     print(_estimate_line(len(retrieved), gen_ep, judge_ep, throttle), flush=True)
+    observed = observed_retry_rate(list(done.values()))
+    retry_rate = EXPECTED_RETRY_RATE if observed is None else observed
+    retry_src = "committed-run rate" if observed is None else f"observed on {len(done)} rows"
+    est = request_estimate(len(retrieved), gen_ep, judge_ep, throttle, retry_rate)
+    print(_request_line(est, len(qids), len(done), throttle, retry_src), flush=True)
+    if want_quota:
+        check_quota(est, gen_ep, judge_ep, fetch=fetch_key_info)  # SystemExit if short
+
     generator = LLMGenerator(endpoint=gen_ep)
     judge_client = build_client(judge_ep, factory=OpenAI, timeout=60.0)  # Nemotron Ultra: rare 20-27 s calls
 
     # Spend accounting. `reported` is what OpenRouter billed per its usage.cost; `counted`
     # adds the worst-case bound for any paid generation whose cost went unreported, and
-    # is what the ceiling is enforced on — an unknown is never counted as zero.
+    # is what the ceiling is enforced on — an unknown is never counted as zero. Resumed
+    # rows count too: the ceiling is per run, however many sessions it takes.
     worst_q = worst_case_generation_cost(gen_ep)
     reported = counted = 0.0
     unreported_paid = 0
 
-    def account(ans) -> None:
+    def account(cost: float | None) -> None:
         nonlocal reported, counted, unreported_paid
-        cost = getattr(ans, "cost_usd", None)
         if cost is not None:
             reported += cost
             counted += cost
@@ -783,17 +1215,35 @@ def main() -> None:
             unreported_paid += 1
             counted += worst_q
 
+    for r in done.values():
+        account(r.get("generation_cost_usd"))
+
+    def judge_usd() -> float:
+        return prior_judge_usd + getattr(judge_client, "cost_usd", 0.0)
+
     def spent() -> float:
         # The judge is `:free` by policy, but anything OpenRouter does report counts.
-        return counted + getattr(judge_client, "cost_usd", 0.0)
+        return counted + judge_usd()
+
+    def checkpoint() -> None:
+        save_checkpoint(
+            ckpt, sig, sig_fields, done,
+            {"judge_calls": judge_calls, "judge_reported_usd": judge_usd()},
+        )
+
+    def kept() -> str:
+        return (
+            f"{len(done)}/{len(qids)} completed rows are checkpointed in {ckpt}"
+            if done else "no rows completed yet"
+        )
 
     # Pass 2 — generate + judge. The judge is called once per query for faithfulness
     # and context relevance (neither has a gold label); its `answered` field is used
     # only where the reply carries no parseable verdict line.
-    rows: list[dict] = []
-    for n, qid in enumerate(qids, start=1):
+    for qid in todo_ids:
         if qid not in retrieved:
             continue
+        n = position[qid]
         q, hits, label = queries[qid], retrieved[qid], labels[qid]
 
         def with_rate_limit_retries(call, n=n, qid=qid):
@@ -823,7 +1273,7 @@ def main() -> None:
             # Generation and judging retry SEPARATELY: a judge 429 must not re-run (and
             # re-pay for) a generation that already succeeded.
             ans = with_rate_limit_retries(lambda q=q, hits=hits: generator.generate(q, hits))
-            account(ans)
+            account(getattr(ans, "cost_usd", None))
             if spent() > ceiling:
                 raise SpendCeilingReached(
                     f"spent ${spent():.4f}, over SSR_RAG_MAX_SPEND_USD=${ceiling:.2f}"
@@ -837,23 +1287,24 @@ def main() -> None:
                 )
             )
         except DailyTokenBudgetExhausted as e:
+            remaining = len(qids) - len(done)
             raise SystemExit(
                 f"\nStopped at query {n}/{len(qids)}: the provider's daily cap is exhausted "
                 f"(Groq: tokens/day; OpenRouter free tier: "
                 f"{OPENROUTER_FREE_REQUESTS_PER_DAY:,} requests/day).\n  {str(e)[:300]}\n"
-                f"Nothing was written; {OUT / 'rag.json'} is unchanged. Re-run once the daily "
-                f"budget recovers (~{len(retrieved) * EST_GEN_TOKENS_PER_QUERY:,} generator + "
-                f"~{len(retrieved) * EST_JUDGE_TOKENS_PER_QUERY:,} judge tokens, "
-                f"{len(retrieved) * free_lo}-{len(retrieved) * free_hi} free OpenRouter "
-                f"requests needed)."
+                f"Nothing was written to {out}; {kept()}.\n"
+                f"Resume by re-running the same command after the quota resets: only the "
+                f"{remaining} remaining rows run (~{remaining * EST_GEN_TOKENS_PER_QUERY:,} "
+                f"generator + ~{remaining * EST_JUDGE_TOKENS_PER_QUERY:,} judge tokens, "
+                f"{remaining * free_lo}-{remaining * free_hi} free OpenRouter requests)."
             ) from None
         except SpendCeilingReached as e:
             raise SystemExit(
                 f"\nStopped at query {n}/{len(qids)}: spend ceiling reached — {e}.\n"
-                f"Nothing was written; {OUT / 'rag.json'} is unchanged."
+                f"Nothing was written to {out}; {kept()}."
             ) from None
         except JudgeParseError as e:
-            parse_failures += 1
+            parse_failures += 1  # not checkpointed: a re-run retries it
             print(f"  [{n}/{len(qids)}] q{qid:>4} JUDGE-UNPARSEABLE ({str(e)[:50]})", flush=True)
             time.sleep(throttle)
             continue
@@ -861,47 +1312,46 @@ def main() -> None:
             if _is_fatal(e):  # every later query would fail the same way
                 raise SystemExit(
                     f"\nStopped at query {n}/{len(qids)}: {type(e).__name__}: {str(e)[:300]}\n"
-                    f"Nothing was written; {OUT / 'rag.json'} is unchanged."
+                    f"Nothing was written to {out}; {kept()}."
                 ) from None
-            skip(n, qid, e)  # skip a query rather than lose the whole run
+            skip(n, qid, e)  # skipped, not checkpointed: a re-run retries it
             time.sleep(throttle)  # a failure is often the rate limit — back off too
             continue
         answered, answered_source = resolve_answered(ans.verdict, s["answered"])
         f = flags[qid]
-        rows.append(
-            {
-                "query_id": qid,
-                "mode": MODE,
-                "gold_label": label.label,
-                "rationale_doc_ids": sorted(label.rationale_doc_ids),
-                "qrels_doc_ids": sorted(gold[qid]),
-                "verdict": ans.verdict,
-                "predicted_label": predicted_label(ans.verdict, answered),
-                "answered": answered,
-                "answered_source": answered_source,
-                "judge_answered": s["answered"],
-                "faithfulness": s["faithfulness"],
-                "context_relevance": s["context_relevance"],
-                **f,
-                "abstention_class": _abstention_class(answered, f["evidence"]),
-                "abstention_class_qrels": _abstention_class(answered, f["evidence_qrels"]),
-                "answer": ans.text,
-                "cited_doc_ids": ans.citations,
-                "retrieved_doc_ids": [h.doc_id for h in hits],
-                # How the generation call ended (GeneratedAnswer side channel; a plain
-                # Answer from another Generator records None / 1 / False).
-                "finish_reason": getattr(ans, "finish_reason", None),
-                "truncated": bool(getattr(ans, "truncated", False)),
-                "generation_attempts": getattr(ans, "attempts", 1),
-                "completion_tokens": getattr(ans, "completion_tokens", None),
-                "reasoning_tokens": getattr(ans, "reasoning_tokens", None),
-                # OpenRouter-reported cost of this query's generation (all attempts) and
-                # the upstream provider that served it; None where not reported.
-                "generation_cost_usd": getattr(ans, "cost_usd", None),
-                "generation_provider": getattr(ans, "provider", None),
-            }
-        )
-        r = rows[-1]
+        done[qid] = {
+            "query_id": qid,
+            "mode": MODE,
+            "gold_label": label.label,
+            "rationale_doc_ids": sorted(label.rationale_doc_ids),
+            "qrels_doc_ids": sorted(gold[qid]),
+            "verdict": ans.verdict,
+            "predicted_label": predicted_label(ans.verdict, answered),
+            "answered": answered,
+            "answered_source": answered_source,
+            "judge_answered": s["answered"],
+            "faithfulness": s["faithfulness"],
+            "context_relevance": s["context_relevance"],
+            **f,
+            "abstention_class": _abstention_class(answered, f["evidence"]),
+            "abstention_class_qrels": _abstention_class(answered, f["evidence_qrels"]),
+            "answer": ans.text,
+            "cited_doc_ids": ans.citations,
+            "retrieved_doc_ids": [h.doc_id for h in hits],
+            # How the generation call ended (GeneratedAnswer side channel; a plain
+            # Answer from another Generator records None / 1 / False).
+            "finish_reason": getattr(ans, "finish_reason", None),
+            "truncated": bool(getattr(ans, "truncated", False)),
+            "generation_attempts": getattr(ans, "attempts", 1),
+            "completion_tokens": getattr(ans, "completion_tokens", None),
+            "reasoning_tokens": getattr(ans, "reasoning_tokens", None),
+            # OpenRouter-reported cost of this query's generation (all attempts) and
+            # the upstream provider that served it; None where not reported.
+            "generation_cost_usd": getattr(ans, "cost_usd", None),
+            "generation_provider": getattr(ans, "provider", None),
+        }
+        checkpoint()  # persisted at once: a daily-cap stop loses no finished row
+        r = done[qid]
         print(
             f"  [{n}/{len(qids)}] q{qid:>4} {label.label:<10} -> {r['predicted_label']:<10} "
             f"{'answered' if answered else 'abstain '}({answered_source[0]}) "
@@ -912,9 +1362,10 @@ def main() -> None:
         )
         time.sleep(throttle)
 
+    rows = [done[q] for q in qids if q in done]  # sample order, resumed rows included
     agg = aggregate(rows, gen_ep.model, judge_ep.model, gen_ep.provider, judge_ep.provider)
-    OUT.mkdir(parents=True, exist_ok=True)
-    (OUT / "rag.json").write_text(
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "rag.json").write_text(
         json.dumps(
             {
                 **agg,
@@ -930,17 +1381,24 @@ def main() -> None:
                     "unreported_paid_generations": unreported_paid,
                     "ceiling_usd": ceiling,
                     "generator_paid": gen_ep.paid,  # False: a $0 run (both roles free)
-                    "judge_reported_usd": round(getattr(judge_client, "cost_usd", 0.0), 6),
+                    "judge_reported_usd": round(judge_usd(), 6),
                 },
                 # Provenance + per-query detail go after the aggregates, so the headline
                 # fields keep their place at the top of the file.
-                "run": {**run_metadata(gen_ep, judge_ep), "throttle_s": throttle},
+                "run": {
+                    **run_metadata(gen_ep, judge_ep, dataset=dataset, n_requested=n_label),
+                    "n_sample": len(qids),
+                    "eval_limit": limit,
+                    "canonical": canonical,
+                    "checkpoint_signature": sig,
+                    "throttle_s": throttle,
+                },
                 "rows": rows,
             },
             indent=2,
         )
     )
-    (OUT / "rag.md").write_text(_markdown(agg, skipped, parse_failures))
+    (out / "rag.md").write_text(_markdown(agg, skipped, parse_failures, dataset))
     print(
         f"\nn={agg['n']}  verdict_accuracy={agg['verdict_accuracy']}  "
         f"evidence={agg['evidence_rate']}  answered={agg['answered_rate']}  "
@@ -951,8 +1409,15 @@ def main() -> None:
         f"truncated={agg['truncated_answers']} (retried {agg['retried_answers']})  "
         f"cost=${reported:.4f} reported (${counted:.4f} counted)"
     )
-    print(f"Wrote {OUT/'rag.md'} and {OUT/'rag.json'}")
+    if missing := len(qids) - len(rows):
+        print(
+            f"{missing} of {len(qids)} claims have no row (skipped / unparseable); re-running "
+            f"the same command retries only those."
+        )
+    if replacing:
+        print(replacing)
+    print(f"Wrote {out/'rag.md'} and {out/'rag.json'}")
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1:])

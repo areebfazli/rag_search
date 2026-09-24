@@ -1,4 +1,4 @@
-.PHONY: install index api eval eval-rag analysis latency test lint ci
+.PHONY: install index api eval eval-rag rag-compare analysis latency test lint ci
 
 install:  ## create env + install deps
 	uv sync
@@ -20,6 +20,9 @@ latency:  ## per-query retrieval latency for every eval config -> eval/results/l
 
 eval-rag:  ## RAG answer-quality eval (needs SSR_OPENROUTER_API_KEY in .env; ~$0.01-0.02/run)
 	uv run python -m app.eval.rag_eval
+
+rag-compare:  ## paired McNemar of two RAG runs: make rag-compare A=path/rag.json B=path/rag.json
+	uv run --locked python -m app.eval.rag_compare $(A) $(B)
 
 # --locked: run against uv.lock exactly as committed, and fail (rather than silently
 # re-resolve and rewrite it) if pyproject.toml has drifted. `make install` is the step
