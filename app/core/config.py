@@ -98,8 +98,8 @@ class Settings(BaseSettings):
     # (SciFact is biomedical), has no expiration date, and is a different family from the
     # Nemotron judge. It reasons by default with no parameter sent (108-1,847 hidden
     # reasoning tokens per claim on a 2026-09-24 smoke test), and `reasoning.effort=low`
-    # did not shorten it, so llm_reasoning_effort="auto" sends it nothing; the 1024-token
-    # budget + one 2x retry below absorbs the long tail (1 of 3 claims needed the retry).
+    # did not shorten it, so llm_reasoning_effort="auto" sends it nothing; the 2048-token
+    # budget + one 2x retry below absorbs the long tail (see llm_max_completion_tokens).
     # The paid path is still available: SSR_OPENROUTER_LLM_MODEL=openai/gpt-oss-120b (the
     # model the earlier committed numbers were generated with) is allowlisted, and is always
     # sent with the pinned, price-capped, no-fallback PAID_ROUTING (~$0.0003/query).
@@ -132,8 +132,11 @@ class Settings(BaseSettings):
     # reasoning + a 2-4 sentence cited answer + the verdict line — the old 400 let
     # gpt-oss-120b's default (medium) reasoning truncate 7 of 50 eval answers, two to
     # empty strings. A reply that still hits the cap is retried once at 2x (see
-    # generator.LLMGenerator.generate).
-    llm_max_completion_tokens: int = Field(default=1024, ge=16)
+    # generator.LLMGenerator.generate). 2048 (retry 4096) since the free Ling generator:
+    # it reasons far longer than gpt-oss, and at 1024/2048 it needed the retry on 36 of
+    # 50 eval claims and still truncated 7. Free, so the larger budget costs nothing;
+    # for paid gpt-oss it only raises the worst case, which SSR_RAG_MAX_SPEND_USD caps.
+    llm_max_completion_tokens: int = Field(default=2048, ge=16)
     # Reasoning effort, sent only when it resolves to a value — as `reasoning_effort` on
     # the groq provider, and as OpenRouter's unified `reasoning: {"effort": ...}` object
     # on openrouter (docs: openrouter.ai/docs/use-cases/reasoning-tokens):
@@ -147,7 +150,7 @@ class Settings(BaseSettings):
     # "medium" (gpt-oss's own default) rather than "low": on a live spot check, "low"
     # dropped the required Verdict line on a claim that "medium" answered correctly,
     # and verdict compliance is scored. Medium's longer reasoning (~900 tokens seen) is
-    # why llm_max_completion_tokens is 1024 with a one-shot 2x retry, not the old 400.
+    # why the budget grew from the old 400 (now 2048 with a one-shot 2x retry).
     llm_reasoning_effort: str = "auto"
     # RAG-eval judge on the "groq" provider (openrouter_judge_model is the same model's
     # free OpenRouter variant). Deliberately a different model FAMILY from the generator,
