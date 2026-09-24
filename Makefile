@@ -18,7 +18,7 @@ analysis:  ## label-stratified re-score of the cached eval runs -> eval/results/
 latency:  ## per-query retrieval latency for every eval config -> eval/results/latency.{md,json}
 	uv run --locked python -m app.eval.latency
 
-eval-rag:  ## RAG answer-quality eval (needs SSR_LLM_API_KEY in .env)
+eval-rag:  ## RAG answer-quality eval (needs SSR_OPENROUTER_API_KEY in .env; ~$0.01-0.02/run)
 	uv run python -m app.eval.rag_eval
 
 # --locked: run against uv.lock exactly as committed, and fail (rather than silently

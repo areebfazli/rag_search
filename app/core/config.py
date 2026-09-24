@@ -1,8 +1,10 @@
 """Central configuration. All settings are overridable via SSR_-prefixed env vars
-(or a .env file), so the same code runs against a local Ollama or a hosted API
-with no edits — just a different SSR_LLM_BASE_URL.
+(or a .env file), so the same code runs against OpenRouter's free tier, Groq, a local
+Ollama or another hosted API with no edits — just a different provider / base URL.
 """
 from __future__ import annotations
+
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -70,9 +72,42 @@ class Settings(BaseSettings):
     # throughput cost is minor, and it is a large win when the alternative is swapping.
     rerank_batch_size: int = Field(default=8, ge=1)
 
-    # --- LLM generation (OpenAI-compatible endpoint) ---
-    # Default backend: Groq (free tier, OpenAI-compatible). Override via SSR_ env
-    # vars for Ollama/another provider. Supply the key through SSR_LLM_API_KEY.
+    # --- LLM providers (generator and RAG-eval judge) ---
+    # Each role picks a provider; the PROVIDER decides the base URL, the API key and
+    # which model setting applies (app/core/llm_endpoints.py is the single resolver):
+    #   "openrouter" -> base URL is hard-coded to https://openrouter.ai/api/v1 (a
+    #                   leftover SSR_LLM_BASE_URL is ignored), key = SSR_OPENROUTER_API_KEY,
+    #                   model = openrouter_llm_model / openrouter_judge_model. Every request
+    #                   must pass llm_endpoints.enforce_spend_policy: `:free` ids, or an
+    #                   allowlisted paid GENERATOR id with pinned, capped routing.
+    #   "groq"       -> the generic OpenAI-compatible endpoint: SSR_LLM_BASE_URL (Groq
+    #                   by default; Ollama/OpenAI work too), key = SSR_LLM_API_KEY,
+    #                   model = llm_model / judge_model. Refuses an openrouter.ai base URL,
+    #                   so the Groq key can never be sent to OpenRouter.
+    # So each key only ever travels to its own provider, and a Groq model name pinned in
+    # .env (SSR_LLM_MODEL) cannot leak into an OpenRouter run: the harnesses print which
+    # settings were set but ignored for the provider in use.
+    llm_provider: Literal["groq", "openrouter"] = "openrouter"
+    judge_provider: Literal["groq", "openrouter"] = "openrouter"
+    openrouter_api_key: str = ""
+    # Generator: PAID gpt-oss-120b (the model the committed numbers were generated with),
+    # allowed only because it is in the allowlist below, and always sent with the pinned,
+    # price-capped, no-fallback routing in llm_endpoints.PAID_ROUTING (~$0.0003/query).
+    openrouter_llm_model: str = "openai/gpt-oss-120b"
+    # Judge: must be a `:free` id (appended if missing); a paid judge is refused. Free
+    # tier: 20 req/min and, with >= $10 credits ever bought, 1,000 req/day account-wide.
+    openrouter_judge_model: str = "qwen/qwen3.8-27b:free"
+    # The ONLY paid model ids that may ever be sent to OpenRouter (generator role only).
+    # Anything else not ending in `:free` is refused before any network call.
+    openrouter_paid_model_allowlist: tuple[str, ...] = ("openai/gpt-oss-120b",)
+    # Hard per-run spend ceiling for rag_eval (USD, OpenRouter-reported cost; unreported
+    # cost counts at the max_price caps). The run stops, writing nothing, before a query
+    # that could take the total past it.
+    rag_max_spend_usd: float = Field(default=0.10, ge=0.0)
+
+    # --- LLM generation, "groq" provider (generic OpenAI-compatible endpoint) ---
+    # Used only when llm_provider / judge_provider is "groq". Override via SSR_ env vars
+    # for Ollama/another OpenAI-compatible backend. Key via SSR_LLM_API_KEY.
     llm_base_url: str = "https://api.groq.com/openai/v1"
     llm_model: str = "openai/gpt-oss-120b"
     llm_api_key: str = ""
@@ -84,7 +119,9 @@ class Settings(BaseSettings):
     # empty strings. A reply that still hits the cap is retried once at 2x (see
     # generator.LLMGenerator.generate).
     llm_max_completion_tokens: int = Field(default=1024, ge=16)
-    # Reasoning effort, sent as `reasoning_effort` only when it resolves to a value:
+    # Reasoning effort, sent only when it resolves to a value — as `reasoning_effort` on
+    # the groq provider, and as OpenRouter's unified `reasoning: {"effort": ...}` object
+    # on openrouter (docs: openrouter.ai/docs/use-cases/reasoning-tokens):
     #   "auto"     -> "medium" for gpt-oss models (Groq and Ollama both accept it), and NOT
     #                 sent for any other model — a non-reasoning model can reject the
     #                 unknown parameter with a 400, so swapping SSR_LLM_MODEL stays safe.
@@ -96,9 +133,9 @@ class Settings(BaseSettings):
     # and verdict compliance is scored. Medium's longer reasoning (~900 tokens seen) is
     # why llm_max_completion_tokens is 1024 with a one-shot 2x retry, not the old 400.
     llm_reasoning_effort: str = "auto"
-    # RAG-eval judge. Deliberately a different model FAMILY from the generator, not just
-    # a smaller size: same-family judging compounds shared preferences, and a separate
-    # model also draws on a separate provider rate-limit bucket.
+    # RAG-eval judge on the "groq" provider (openrouter_judge_model is the same model's
+    # free OpenRouter variant). Deliberately a different model FAMILY from the generator,
+    # not just a smaller size: same-family judging compounds shared preferences.
     judge_model: str = "qwen/qwen3.8-27b"
 
 

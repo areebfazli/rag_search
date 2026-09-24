@@ -29,6 +29,8 @@ from app.eval.rag_eval import (
 from app.generate.generator import GeneratedAnswer, split_verdict
 from app.ingest.corpus import ClaimLabel
 
+FAKE_OPENROUTER_KEY = "sk-or-v1-FAKE-TEST-KEY-never-real-0000"
+
 
 def row(
     answered: bool,
@@ -285,8 +287,8 @@ class FakeService:
 
 
 class FakeGenerator:
-    def __init__(self, model=None):
-        pass
+    def __init__(self, model=None, endpoint=None):
+        self.endpoint = endpoint
 
     def generate(self, query, hits):
         text, verdict = split_verdict(REPLIES[query])  # the real parser, fake model
@@ -304,7 +306,12 @@ class FakeGenerator:
             reasoning_tokens=10,
             attempts=2 if truncated else 1,
             truncated=truncated,
+            cost_usd=GEN_COST_USD,
+            provider="AkashML",
         )
+
+
+GEN_COST_USD = 0.0003  # what OpenRouter reports for one gpt-oss-120b generation
 
 
 class FakeJudge:
@@ -320,6 +327,11 @@ class FakeJudge:
 
 def _patch_main(tmp_path, monkeypatch, out, mode="hybrid", generator=FakeGenerator, judge=None):
     fake_judge = judge if judge is not None else FakeJudge()
+    # Pin the default provider mix with a fake key, so the run neither depends on the
+    # developer's .env nor needs one (CI has none). Nothing here touches the network.
+    monkeypatch.setattr(settings, "llm_provider", "openrouter")
+    monkeypatch.setattr(settings, "judge_provider", "openrouter")
+    monkeypatch.setattr(settings, "openrouter_api_key", FAKE_OPENROUTER_KEY)
     monkeypatch.setattr(rag_eval, "OUT", out)
     monkeypatch.setattr(rag_eval, "MODE", mode)
     monkeypatch.setattr(rag_eval, "THROTTLE_S", 0.0)
@@ -374,6 +386,8 @@ def test_rag_json_keeps_every_scored_query(rag_run):
         "generation_attempts": 1,
         "completion_tokens": 50,
         "reasoning_tokens": 10,
+        "generation_cost_usd": GEN_COST_USD,
+        "generation_provider": "AkashML",
     }
     assert rows["2"]["abstention_class"] == "answered_without_evidence"
     # NEI + rationale-free qrels doc retrieved: the two oracles disagree on this one.
@@ -600,7 +614,7 @@ def test_daily_cap_stops_the_run_without_retry_or_writing(rate_limited, source):
     with pytest.raises(SystemExit) as exc:
         rag_eval.main()
     msg = str(exc.value.code)
-    assert "daily token cap is exhausted" in msg and "Nothing was written" in msg
+    assert "daily cap is exhausted" in msg and "Nothing was written" in msg
     assert "tokens per day (TPD)" in msg
     # No retry: no rate-limit wait, and the failing query was attempted exactly once.
     assert WAIT_S not in sleeps
@@ -619,13 +633,15 @@ def test_per_minute_rate_limit_retries_the_same_query(rate_limited, source):
     gen, fake_judge = setup(source, "claim two", [rate_limit_error(TPM_MESSAGE)] * fails)
     rag_eval.main()  # completes: no SystemExit
     assert sleeps.count(WAIT_S) == fails
-    # Each retry re-runs generate + judge for the SAME query with the same hits.
+    # Only the rate-limited step retries, for the SAME query with the same hits: a judge
+    # 429 must not re-run (and, on a paid generator, re-pay for) a finished generation.
     tries = [hits for q, hits in gen.calls if q == "claim two"]
-    assert len(tries) == fails + 1 and all(h == tries[0] for h in tries)
+    assert len(tries) == (fails + 1 if source == "generate" else 1)
+    assert all(h == tries[0] for h in tries)
     judge_tries = fake_judge.queries.count("claim two")
     assert judge_tries == (fails + 1 if source == "judge" else 1)
     # Every other query ran once, and the retried one is scored, not skipped.
-    assert len(gen.calls) == len(QUERIES) + fails
+    assert len(gen.calls) == len(QUERIES) + (fails if source == "generate" else 0)
     blob = json.loads((out / "rag.json").read_text())
     assert (out / "rag.md").exists()
     assert blob["skipped"] == 0 and blob["skip_reasons"] == {}
@@ -644,3 +660,113 @@ def test_per_minute_rate_limit_skips_the_query_once_retries_are_exhausted(rate_l
     assert blob["skipped"] == 1 and blob["skip_reasons"] == {"RateLimitError": 1}
     assert {r["query_id"] for r in blob["rows"]} == set(QUERIES) - {"2"}
     assert blob["n"] == len(QUERIES) - 1
+
+
+# --- providers, spend ceiling, fatal errors ------------------------------------------------
+
+# OpenRouter's free-tier daily cap, as the openai client stringifies the 429 body.
+OPENROUTER_DAILY_MESSAGE = (
+    "Error code: 429 - {'error': {'message': 'Rate limit exceeded: free-models-per-day. "
+    "Add 10 credits to unlock 1000 free model requests per day', 'code': 429}}"
+)
+
+
+def test_is_daily_cap_recognises_openrouter_free_tier():
+    assert _is_daily_cap(rate_limit_error(OPENROUTER_DAILY_MESSAGE)) is True
+    assert _is_daily_cap(rate_limit_error("Rate limit exceeded: free-models-per-min.")) is False
+    # Window only in the headers: an exhausted limit above the 20/min one is the daily cap.
+    request = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
+
+    def err(limit):
+        response = httpx.Response(
+            429, request=request, json={"error": {"message": "Rate limit exceeded"}},
+            headers={"X-RateLimit-Limit": str(limit), "X-RateLimit-Remaining": "0"},
+        )
+        return openai.RateLimitError(message="Rate limit exceeded", response=response, body=None)
+
+    assert _is_daily_cap(err(1000)) is True
+    assert _is_daily_cap(err(20)) is False
+
+
+def test_rag_json_records_providers_and_cost_but_never_the_key(rag_run):
+    path, blob, _ = rag_run
+    run = blob["run"]
+    assert run["generator_provider"] == "openrouter" and run["judge_provider"] == "openrouter"
+    assert run["generator_base_url"] == run["judge_base_url"] == "https://openrouter.ai/api/v1"
+    assert run["judge_model"].endswith(":free")
+    assert run["generator_extra_body"]["provider"]["allow_fallbacks"] is False
+    assert run["generator_reasoning_param"] == "reasoning.effort"
+    # q5's generator is a plain Answer (no cost side channel): counted at the worst case.
+    assert blob["cost"]["reported_usd"] == pytest.approx((len(QUERIES) - 1) * GEN_COST_USD)
+    assert blob["cost"]["unreported_paid_generations"] == 1
+    assert blob["cost"]["counted_usd"] > blob["cost"]["reported_usd"]
+    for f in ("rag.json", "rag.md"):
+        assert FAKE_OPENROUTER_KEY not in (path / f).read_text()
+    assert "(openrouter)" in (path / "rag.md").read_text()
+
+
+def test_throttle_is_provider_aware(monkeypatch):
+    from app.core.llm_endpoints import LLMEndpoint
+
+    monkeypatch.setattr(rag_eval, "THROTTLE_S", None)  # no SSR_RAG_THROTTLE_S override
+    url = "https://openrouter.ai/api/v1"
+    paid = LLMEndpoint("generator", "openrouter", url, "openai/gpt-oss-120b")
+    free_gen = LLMEndpoint("generator", "openrouter", url, "z-ai/glm-5.2:free")
+    judge_ep = LLMEndpoint("judge", "openrouter", url, "qwen/qwen3.8-27b:free")
+    groq = LLMEndpoint("generator", "groq", "https://api.groq.com/openai/v1", "openai/gpt-oss-120b")
+    assert rag_eval.default_throttle_s(groq, judge_ep) == 30.0
+    # One free request per query (the judge): the 5 s floor, <= 12 free requests/min.
+    assert rag_eval.default_throttle_s(paid, judge_ep) == 5.0
+    # A free generator adds up to 2 free requests: 3 x 3.5 s keeps it under 20/min.
+    assert rag_eval.default_throttle_s(free_gen, judge_ep) == pytest.approx(10.5)
+    monkeypatch.setattr(rag_eval, "THROTTLE_S", 1.0)
+    assert rag_eval.default_throttle_s(paid, judge_ep) == 1.0
+
+
+def test_spend_ceiling_stops_the_run_before_writing(tmp_path, monkeypatch):
+    out = tmp_path / "results"
+    _patch_main(tmp_path, monkeypatch, out)
+    # Room for exactly two queries at the worst-case bound: the third is refused up front.
+    worst = rag_eval.worst_case_generation_cost(rag_eval.resolve_endpoint("generator"))
+    monkeypatch.setattr(settings, "rag_max_spend_usd", 2 * GEN_COST_USD + worst)
+    with pytest.raises(SystemExit) as exc:
+        rag_eval.main()
+    msg = str(exc.value.code)
+    assert "spend ceiling reached" in msg and "Nothing was written" in msg
+    assert not out.exists()
+
+
+def test_unreported_paid_cost_counts_at_the_worst_case(tmp_path, monkeypatch):
+    class Unreported(FakeGenerator):
+        def generate(self, query, hits):
+            ans = super().generate(query, hits)
+            ans.cost_usd = None
+            return ans
+
+    _patch_main(tmp_path, monkeypatch, tmp_path, generator=Unreported)
+    rag_eval.main()
+    cost = json.loads((tmp_path / "rag.json").read_text())["cost"]
+    worst = rag_eval.worst_case_generation_cost(rag_eval.resolve_endpoint("generator"))
+    assert cost["reported_usd"] == 0.0 and cost["unreported_paid_generations"] == len(QUERIES)
+    assert cost["counted_usd"] == pytest.approx(len(QUERIES) * worst, abs=1e-6)
+
+
+@pytest.mark.parametrize("status", [401, 402])
+def test_auth_or_credit_errors_stop_the_run_instead_of_skipping(rate_limited, status):
+    setup, _, out = rate_limited
+    request = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
+    response = httpx.Response(status, request=request, json={"error": {"message": "nope"}})
+    err = openai.APIStatusError("nope", response=response, body=None)
+    setup("generate", "claim two", [err])
+    with pytest.raises(SystemExit) as exc:
+        rag_eval.main()
+    assert "Nothing was written" in str(exc.value.code)
+    assert not out.exists()
+
+
+def test_missing_openrouter_key_fails_before_any_work(tmp_path, monkeypatch):
+    _patch_main(tmp_path, monkeypatch, tmp_path)
+    monkeypatch.setattr(settings, "openrouter_api_key", "")
+    monkeypatch.setattr(rag_eval, "load_queries_qrels", lambda: pytest.fail("ran retrieval"))
+    with pytest.raises(Exception, match="SSR_OPENROUTER_API_KEY"):
+        rag_eval.main()

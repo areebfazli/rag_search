@@ -5,7 +5,9 @@ import math
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import numpy as np
+import openai
 import pytest
 
 from app.core.config import settings
@@ -276,9 +278,9 @@ def test_config_defaults_and_env():
 
 
 def test_estimate_counts_every_call_with_throttle():
-    calls, secs = ja.estimate(48, Config())
+    calls, secs = ja.estimate(48, Config(), 3.5)
     assert calls == 48 * 3 * 2
-    assert secs == pytest.approx(calls * (ja.THROTTLE_S + ja.EST_LATENCY_S))
+    assert secs == pytest.approx(calls * (3.5 + ja.EST_LATENCY_S))
 
 
 def test_only_unlimited_run_is_canonical():
@@ -323,7 +325,7 @@ def test_run_uses_production_prompt_and_overrides_only_temperature():
     assert requested == ja.PRODUCTION_TEMPERATURE  # what judge() itself asked for
     assert [c["temperature"] for c in client.calls] == [0.0, 0.0, 0.7, 0.7]
     first = client.calls[0]
-    assert first["model"] == settings.judge_model
+    assert first["model"] == ja.model_id("judge")  # the id the settings resolve
     assert first["messages"][0]["content"] == rag_eval.JUDGE_SYSTEM
     user = first["messages"][1]["content"]
     for i, ctx in enumerate(rebuild_contexts(["d1", "d2"], BY_ID), start=1):
@@ -445,3 +447,125 @@ def test_markdown_renders_with_undefined_stats():
     md = ja.to_markdown(result)
     assert "| `answered`: Fleiss' kappa | n/a |" in md
     assert "Skipped (empty answer): 9." in md
+
+
+# --- providers: stale check, throttle, rate limits, comparison mode ----------------------
+
+
+
+def test_check_source_compares_the_model_without_the_free_suffix():
+    # A Groq-judged rag.json (plain id) can be re-judged on OpenRouter's :free variant ...
+    check_source(_blob(judge_model="qwen/qwen3.8-27b"), judge_model="qwen/qwen3.8-27b:free")
+    check_source(_blob(judge_model="qwen/qwen3.8-27b:free"), judge_model="qwen/qwen3.8-27b")
+    # ... but not by a different model.
+    with pytest.raises(StaleResultsError, match="judge_model"):
+        check_source(_blob(judge_model="qwen/qwen3.8-27b"), judge_model="llama-3.1-8b:free")
+
+
+def test_original_judge_provider_is_recorded_or_marked_assumed():
+    assert ja.original_judge({"judge_model": "m"})["provider"] == "groq"
+    assert "assumed" in ja.original_judge({"judge_model": "m"})["provider_source"]
+    rec = ja.original_judge({"judge_model": "m:free", "judge_provider": "openrouter"})
+    assert rec["provider"] == "openrouter" and rec["provider_source"] == "recorded"
+
+
+def test_markdown_states_which_provider_did_what():
+    recs = [_rec("1", [_rep(True, 1.0, 1.0)] * 2, orig=_rep(True, 1.0, 1.0))]
+    run = {
+        "source": {"git_sha": "abc1234def"}, "judge_model": "qwen/qwen3.8-27b:free",
+        "judge_provider": "openrouter", "repeats": 2, "judge_prompt_hash": "0" * 64,
+        "canonical": True, "row_limit": 0,
+        "original_judge": ja.original_judge({"judge_model": "qwen/qwen3.8-27b"}),
+    }
+    md = ja.to_markdown({"n_rows": 1, "skipped_empty_answer": [],
+                         "summary": {"0.0": summarize(recs, 0.0, 2)}, "run": run})
+    assert "**Repeats** judged on **openrouter**" in md
+    assert "original** judgement in rag.json was made on **groq**" in md
+    assert "The providers differ" in md and "assumed" in md
+
+
+def test_throttle_is_provider_aware():
+    assert ja.throttle_s("groq", {}) == 15.0
+    assert ja.throttle_s("openrouter", {}) == 3.5  # 60/3.5 ~ 17 calls/min < 20/min
+    assert ja.throttle_s("openrouter", {"SSR_JUDGE_THROTTLE_S": "5"}) == 5.0
+
+
+def _429(message: str) -> openai.RateLimitError:
+    request = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
+    response = httpx.Response(429, request=request, json={"error": {"message": message}})
+    return openai.RateLimitError(message=message, response=response, body=None)
+
+
+DAILY = "Rate limit exceeded: free-models-per-day. Add 10 credits to unlock 1000 per day"
+
+
+def test_daily_cap_stops_at_once_and_keeps_completed_rows():
+    saved = {}
+    client = _FakeJudgeClient([_FakeJudgeClient.default] * 4 + [_429(DAILY)])
+    with pytest.raises(ja.DailyCapReached):
+        _run([_row("1"), _row("2")], client, save=saved.update)
+    assert set(saved) == {"1"}  # row 2 is redone on resume
+    assert len(client.calls) == 5  # no retry of a daily-cap 429
+
+
+def test_per_minute_429_waits_and_retries_the_same_call():
+    sleeps = []
+    client = _FakeJudgeClient([_429("Rate limit exceeded: free-models-per-min")])
+    questions = {"1": "claim 1"}
+    contexts = {"1": rebuild_contexts(["d1", "d2"], BY_ID)}
+    records, _ = run_repeats(
+        client, [_row("1")], questions, contexts, Config(k=2, temperatures=(0.0,)),
+        sleep=sleeps.append, log=lambda _: None, throttle=3.5,
+    )
+    assert all("error" not in x for x in records["1"]["repeats"]["0.0"])
+    assert sleeps.count(ja.RATE_LIMIT_WAIT_S) == 1 and sleeps.count(3.5) == 2
+    assert len(client.calls) == 3
+
+
+def test_config_parses_the_comparison_mode():
+    assert Config.from_env({}).compare_n == 0  # off by default: it spends Groq budget
+    assert Config.from_env({"SSR_JUDGE_COMPARE_PROVIDERS": "4"}).compare_n == 4
+    assert Config.from_env({"SSR_JUDGE_COMPARE_PROVIDERS": "yes"}).compare_n == ja.DEFAULT_COMPARE_N
+    assert Config.from_env({"SSR_JUDGE_COMPARE_PROVIDERS": "0"}).compare_n == 0
+
+
+def test_comparison_mode_calls_each_provider_once_per_row():
+    rows = [_row(str(i)) for i in range(3)]
+    groq = _FakeJudgeClient([])
+    orouter = _FakeJudgeClient(
+        ['{"answered": false, "faithfulness": 0.5, "context_relevance": 0.8}']
+    )
+    questions = {r["query_id"]: f"claim {r['query_id']}" for r in rows}
+    contexts = {r["query_id"]: rebuild_contexts(r["retrieved_doc_ids"], BY_ID) for r in rows}
+    throttles = {"groq": 15.0, "openrouter": 3.5}
+    sleeps = []
+    records = ja.run_compare(
+        {"groq": (groq, "qwen/qwen3.8-27b"), "openrouter": (orouter, "qwen/qwen3.8-27b:free")},
+        rows, questions, contexts, throttles=throttles, sleep=sleeps.append, log=lambda _: None,
+    )
+    assert len(groq.calls) == len(orouter.calls) == 3  # n calls per provider, no repeats
+    assert {c["model"] for c in groq.calls} == {"qwen/qwen3.8-27b"}
+    assert {c["model"] for c in orouter.calls} == {"qwen/qwen3.8-27b:free"}
+    assert all(c["temperature"] == ja.PRODUCTION_TEMPERATURE for c in groq.calls + orouter.calls)
+    assert sleeps.count(15.0) == 3 and sleeps.count(3.5) == 3
+    calls, _ = ja.estimate_compare(3, throttles)
+    assert calls == {"groq": 3, "openrouter": 3}
+    sm = ja.summarize_compare([records[r["query_id"]] for r in rows], "groq", "openrouter")
+    assert sm["rows_both_valid"] == 3
+    assert sm["answered"]["agreement"] == pytest.approx(round(2 / 3, 4))
+    assert sm["faithfulness"]["mean_abs_diff"] == pytest.approx(round(0.5 / 3, 4))
+    md = ja.compare_markdown({
+        "n_rows": 3, "summary": sm,
+        "run": {"judges": {"groq": {"model": "qwen/qwen3.8-27b"},
+                           "openrouter": {"model": "qwen/qwen3.8-27b:free"}},
+                "source": {"git_sha": "abc1234"}, "judge_prompt_hash": "0" * 64,
+                "original_judge": ja.original_judge({"judge_model": "qwen/qwen3.8-27b"})},
+    })
+    assert md.startswith("# Judge provider comparison — groq vs openrouter")
+
+
+def test_checkpoint_signature_separates_providers_and_modes():
+    a = ja._signature("sha", Config(), ["1"], ["groq:qwen/qwen3.8-27b"])
+    b = ja._signature("sha", Config(), ["1"], ["openrouter:qwen/qwen3.8-27b:free"])
+    c = ja._signature("sha", Config(compare_n=1), ["1"], ["groq:qwen/qwen3.8-27b"])
+    assert len({a, b, c}) == 3

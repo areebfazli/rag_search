@@ -17,6 +17,12 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from app.core.config import settings
+from app.core.llm_endpoints import (
+    EndpointConfigError,
+    MissingApiKey,
+    SpendPolicyError,
+    resolve_endpoint,
+)
 from app.retrieve.service import MODES, SearchService
 from app.schemas.api import AnswerResponse, Hit, SearchResponse
 
@@ -148,8 +154,10 @@ def answer(
 ) -> AnswerResponse:
     if mode not in MODES:
         raise HTTPException(status_code=422, detail=f"mode must be one of {MODES}")
-    if not settings.llm_api_key:
-        raise HTTPException(status_code=503, detail="LLM not configured (set SSR_LLM_API_KEY)")
+    try:  # provider-aware: names the missing env var (never a value)
+        resolve_endpoint("generator")
+    except (MissingApiKey, EndpointConfigError, SpendPolicyError) as e:
+        raise HTTPException(status_code=503, detail=f"LLM not configured ({e})")
     with _retrieval_lock:
         hits = get_service().retrieve(q, mode=mode, top_k=top_k)
     try:

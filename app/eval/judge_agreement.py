@@ -19,7 +19,15 @@ sent to the provider — production doesn't send one, and sending one would chan
 T = 0.0 measures. ``SSR_JUDGE_SEED`` only picks the row subset under a row limit.
 
 Refuses to run if rag.json's judge model or judge-prompt hash doesn't match the current
-code: re-scoring a stale file would measure a different judge than the one in use.
+code: re-scoring a stale file would measure a different judge than the one in use. The
+model is compared WITHOUT OpenRouter's ``:free`` suffix, so a Groq-judged rag.json can be
+re-judged by the same model's free OpenRouter variant; the report then says which
+provider made the original judgement and which made the repeats.
+
+Provider-comparison mode (optional, off by default — it spends Groq budget):
+``SSR_JUDGE_COMPARE_PROVIDERS=n`` re-judges the first n rows (``=1``/``yes`` -> 10) once on
+Groq and once on OpenRouter at the production temperature and reports per-field
+agreement between the two providers. Output goes to data/eval_runs/ only.
 
 Run:
     SSR_JUDGE_DRY_RUN=1 uv run python -m app.eval.judge_agreement   # checks + estimate, no LLM calls
@@ -33,7 +41,13 @@ Env (SSR_ prefix, like the rest of the repo):
                             to data/eval_runs/, never to the committed eval/results/
     SSR_JUDGE_SEED          row-subset seed under a limit (default 13)
     SSR_JUDGE_DRY_RUN=1     validate + print the call/time estimate, then exit
+    SSR_JUDGE_THROTTLE_S    seconds after each call (default: 15 on Groq, 3.5 on OpenRouter)
+    SSR_JUDGE_COMPARE_PROVIDERS  n rows for the Groq-vs-OpenRouter comparison (default off)
     SSR_EVAL_REFRESH=1      ignore the resume checkpoint in data/eval_cache/
+
+The judge provider is SSR_JUDGE_PROVIDER (app.core.llm_endpoints). A provider's daily cap
+(Groq tokens/day, OpenRouter's 1,000 free requests/day) stops the run at once with the
+completed rows checkpointed, so a re-run resumes; per-minute 429s wait and retry.
 """
 from __future__ import annotations
 
@@ -50,15 +64,36 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
+from openai import RateLimitError
+
 from app.core.config import settings
 from app.core.interfaces import SearchHit, hit_passage
+from app.core.llm_endpoints import (
+    base_model,
+    build_client,
+    describe_with_ignored,
+    model_id,
+    resolve_endpoint,
+)
 from app.eval import rag_eval
 from app.eval.rag_eval import JUDGE_SYSTEM, JudgeParseError, judge, resolve_answered
 
-# Judge-only calls (~2k tokens each) against the judge model's 8,000 tokens/minute
-# bucket: one per 15 s stays under it. rag_eval's own throttle is longer because each of
-# its queries also spends generator reasoning tokens.
-THROTTLE_S = float(os.environ.get("SSR_JUDGE_THROTTLE_S", "15"))
+# Seconds slept after every judge call, per provider (SSR_JUDGE_THROTTLE_S overrides):
+# * Groq: judge-only calls (~2k tokens each) against the judge model's 8,000
+#   tokens/minute bucket — one per 15 s stays under it.
+# * OpenRouter free tier: 20 requests/min account-wide — 3.5 s per call (~17/min) is
+#   under it with margin. Its 1,000/day cap is handled as a daily cap (see run_repeats).
+DEFAULT_THROTTLE_S = {"groq": 15.0, "openrouter": 3.5}
+
+
+def throttle_s(provider: str, env: Mapping[str, str] | None = None) -> float:
+    env = os.environ if env is None else env
+    raw = env.get("SSR_JUDGE_THROTTLE_S")
+    return float(raw) if raw else DEFAULT_THROTTLE_S[provider]
+
+
+RATE_LIMIT_RETRIES = rag_eval.RATE_LIMIT_RETRIES
+RATE_LIMIT_WAIT_S = rag_eval.RATE_LIMIT_WAIT_S
 
 SOURCE = Path("eval/results/rag.json")
 OUT = Path("eval/results")  # canonical (no row limit) run only — the committed artifact
@@ -69,6 +104,8 @@ PRODUCTION_TEMPERATURE = 0.0  # what rag_eval.judge() sends
 DEFAULT_K = 3
 DEFAULT_TEMPERATURES = (PRODUCTION_TEMPERATURE, 0.7)
 DEFAULT_SEED = 13
+DEFAULT_COMPARE_N = 10
+COMPARE_PROVIDERS = ("groq", "openrouter")
 EST_LATENCY_S = 2.0  # rough per-call latency on top of the throttle, for the estimate only
 # Three API failures in a row (after the client's own retries) is a spent budget or an
 # outage, not a blip: stop and keep the checkpoint rather than burn the rest of the run.
@@ -95,6 +132,10 @@ class AbortRun(RuntimeError):
     """Too many consecutive API failures; completed rows are in the checkpoint."""
 
 
+class DailyCapReached(AbortRun):
+    """A provider's per-day cap was hit; completed rows are in the checkpoint."""
+
+
 # --- configuration --------------------------------------------------------------------
 
 
@@ -105,6 +146,7 @@ class Config:
     limit: int = 0
     seed: int = DEFAULT_SEED
     dry_run: bool = False
+    compare_n: int = 0  # >0: provider-comparison mode on the first n rows
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> Config:
@@ -122,12 +164,22 @@ class Config:
         limit = int(env.get("SSR_JUDGE_LIMIT", 0))
         if limit < 0:
             raise ValueError("SSR_JUDGE_LIMIT must be >= 0")
+        raw_cmp = env.get("SSR_JUDGE_COMPARE_PROVIDERS", "").strip().lower()
+        if raw_cmp in ("", "0", "no", "false", "off"):
+            compare_n = 0
+        elif raw_cmp in ("yes", "true", "on", "default"):
+            compare_n = DEFAULT_COMPARE_N
+        else:
+            compare_n = int(raw_cmp)
+            if compare_n < 0:
+                raise ValueError("SSR_JUDGE_COMPARE_PROVIDERS must be >= 0")
         return cls(
             k=k,
             temperatures=temps,
             limit=limit,
             seed=int(env.get("SSR_JUDGE_SEED", DEFAULT_SEED)),
             dry_run=env.get("SSR_JUDGE_DRY_RUN", "") not in ("", "0"),
+            compare_n=compare_n,
         )
 
 
@@ -136,30 +188,44 @@ def temp_key(t: float) -> str:
     return repr(float(t))
 
 
-def estimate(n_rows: int, cfg: Config) -> tuple[int, float]:
-    """(judge calls, estimated seconds). Every call is followed by THROTTLE_S."""
+def estimate(n_rows: int, cfg: Config, throttle: float) -> tuple[int, float]:
+    """(judge calls, estimated seconds). Every call is followed by `throttle`."""
     calls = n_rows * cfg.k * len(cfg.temperatures)
-    return calls, calls * (THROTTLE_S + EST_LATENCY_S)
+    return calls, calls * (throttle + EST_LATENCY_S)
+
+
+def estimate_compare(n_rows: int, throttles: Mapping[str, float]) -> tuple[dict[str, int], float]:
+    """({provider: calls}, estimated seconds): one T=0 call per row per provider."""
+    calls = {p: n_rows for p in throttles}
+    return calls, sum(n_rows * (t + EST_LATENCY_S) for t in throttles.values())
 
 
 # --- input validation -----------------------------------------------------------------
 
 
-def check_source(blob: object) -> None:
+def check_source(blob: object, judge_model: str | None = None) -> None:
     """Refuse a rag.json whose judge isn't the one the current code runs.
 
     judge_prompt_hash is computed exactly as rag_eval.run_metadata does, so an edit to
     JUDGE_SYSTEM since the run makes the file stale — the stored "original" scores
     came from a different rubric, and comparing against them would mix two judges.
+    The judge MODEL is compared without the `:free` suffix (`judge_model` defaults to
+    the id the current settings resolve): the same weights on another provider are the
+    same judge, and the provider is reported separately (original_judge_provider).
     """
     run = blob.get("run") if isinstance(blob, dict) else None
     if not isinstance(run, dict):
         raise StaleResultsError("rag.json has no `run` metadata; re-run `make eval-rag`")
+    current = model_id("judge") if judge_model is None else judge_model
+    got = {
+        "judge_prompt_hash": run.get("judge_prompt_hash"),
+        "judge_model": base_model(run.get("judge_model")),
+    }
     expected = {
         "judge_prompt_hash": rag_eval._sha256(JUDGE_SYSTEM),
-        "judge_model": settings.judge_model,
+        "judge_model": base_model(current),
     }
-    bad = {k: (run.get(k), v) for k, v in expected.items() if run.get(k) != v}
+    bad = {k: (got[k], v) for k, v in expected.items() if got[k] != v}
     if bad:
         detail = "; ".join(f"{k}: file={got!r} current={want!r}" for k, (got, want) in bad.items())
         raise StaleResultsError(
@@ -173,6 +239,20 @@ def check_source(blob: object) -> None:
         missing = [k for k in REQUIRED_ROW_KEYS if not isinstance(r, dict) or k not in r]
         if missing:
             raise StaleResultsError(f"rag.json row lacks {missing}; re-run `make eval-rag`")
+
+
+def original_judge(run: Mapping) -> dict:
+    """Who made rag.json's judgement. Files written before provider metadata existed
+    were all judged on Groq (the only judge backend then), and are labelled as assumed."""
+    provider = run.get("judge_provider")
+    return {
+        "provider": provider or "groq",
+        "provider_source": "recorded" if provider else (
+            "assumed: rag.json predates provider metadata, when Groq was the only judge backend"
+        ),
+        "model": run.get("judge_model"),
+        "base_url": run.get("judge_base_url"),
+    }
 
 
 def select_rows(rows: list[dict], limit: int, seed: int) -> tuple[list[dict], list[str]]:
@@ -260,6 +340,24 @@ def _record(row: dict) -> dict:
     }
 
 
+def _judge_once(call: Callable[[], dict], sleep: Callable[[float], None], log: Callable[[str], None]) -> dict:
+    """One judge call with rag_eval's rate-limit policy: a daily-cap 429 raises
+    DailyCapReached at once (retrying can't clear it); a per-minute 429 waits a full
+    window and retries the SAME call, up to RATE_LIMIT_RETRIES, then propagates."""
+    for attempt in range(RATE_LIMIT_RETRIES + 1):
+        try:
+            return call()
+        except RateLimitError as e:
+            if rag_eval._is_daily_cap(e):
+                raise DailyCapReached(f"provider daily cap reached: {str(e)[:200]}") from e
+            if attempt == RATE_LIMIT_RETRIES:
+                raise
+            log(f"    rate-limited; waiting {RATE_LIMIT_WAIT_S:.0f}s "
+                f"(retry {attempt + 1}/{RATE_LIMIT_RETRIES})")
+            sleep(RATE_LIMIT_WAIT_S)
+    raise AssertionError("unreachable")
+
+
 def run_repeats(
     client: object,
     rows: list[dict],
@@ -267,6 +365,8 @@ def run_repeats(
     contexts: Mapping[str, list[str]],
     cfg: Config,
     *,
+    model: str | None = None,
+    throttle: float = 0.0,
     done: Mapping[str, dict] | None = None,
     save: Callable[[dict[str, dict]], None] = lambda _: None,
     sleep: Callable[[float], None] = time.sleep,
@@ -275,8 +375,11 @@ def run_repeats(
     """Re-judge every row K times per temperature. Returns ({qid: record}, the
     temperature judge() itself requested — expected to be PRODUCTION_TEMPERATURE).
 
-    `done` rows (from the checkpoint) are reused; `save` is called after each new row.
+    `model` is the judge id to send (default: what the settings resolve). `done` rows
+    (from the checkpoint) are reused; `save` is called after each new row. A daily-cap
+    429 raises DailyCapReached; the rows completed so far have already been saved.
     """
+    model = model_id("judge") if model is None else model
     out: dict[str, dict] = {q: r for q, r in (done or {}).items() if _complete(r, cfg)}
     requested: float | None = None
     consecutive_api_errors = 0
@@ -290,8 +393,14 @@ def run_repeats(
             reps: list[dict] = []
             for _ in range(cfg.k):
                 try:
-                    s = judge(tc, settings.judge_model, questions[qid], contexts[qid], row["answer"])
+                    s = _judge_once(
+                        lambda tc=tc: judge(tc, model, questions[qid], contexts[qid], row["answer"]),
+                        sleep,
+                        log,
+                    )
                     consecutive_api_errors = 0
+                except DailyCapReached:
+                    raise
                 except JudgeParseError:
                     s = {"error": "JudgeParseError", "error_kind": "parse"}
                     consecutive_api_errors = 0
@@ -300,7 +409,7 @@ def run_repeats(
                     consecutive_api_errors += 1
                 requested = tc.requested_temperature if requested is None else requested
                 reps.append(s)
-                sleep(THROTTLE_S)
+                sleep(throttle)
                 if consecutive_api_errors >= MAX_CONSECUTIVE_API_ERRORS:
                     raise AbortRun(
                         f"{consecutive_api_errors} consecutive API errors (last: {s['error']}); "
@@ -319,6 +428,81 @@ def run_repeats(
             for k, reps in rec["repeats"].items()
         ))
     return out, requested
+
+
+def _compare_complete(rec: object, providers: Sequence[str]) -> bool:
+    if not isinstance(rec, dict) or not isinstance(rec.get("by_provider"), dict):
+        return False
+    return all(
+        isinstance(rec["by_provider"].get(p), dict)
+        and rec["by_provider"][p].get("error_kind") != "api"
+        for p in providers
+    )
+
+
+def run_compare(
+    judges: Mapping[str, tuple[object, str]],
+    rows: list[dict],
+    questions: Mapping[str, str],
+    contexts: Mapping[str, list[str]],
+    *,
+    throttles: Mapping[str, float],
+    done: Mapping[str, dict] | None = None,
+    save: Callable[[dict[str, dict]], None] = lambda _: None,
+    sleep: Callable[[float], None] = time.sleep,
+    log: Callable[[str], None] = print,
+) -> dict[str, dict]:
+    """Judge every row ONCE per provider through the production judge() (T=0.0, the
+    production prompt and budget). `judges` maps provider -> (client, model id).
+
+    Same checkpoint/abort contract as run_repeats: a row is saved once every provider
+    has a non-API-error result; a daily-cap 429 raises DailyCapReached.
+    """
+    providers = list(judges)
+    out: dict[str, dict] = {
+        q: r for q, r in (done or {}).items() if _compare_complete(r, providers)
+    }
+    consecutive_api_errors = 0
+    for n, row in enumerate(rows, start=1):
+        qid = row["query_id"]
+        if qid in out:
+            continue
+        rec = {**_record(row), "by_provider": {}}
+        del rec["repeats"]
+        for p in providers:
+            client, model = judges[p]
+            try:
+                res = _judge_once(
+                    lambda c=client, m=model: judge(c, m, questions[qid], contexts[qid], row["answer"]),
+                    sleep,
+                    log,
+                )
+                consecutive_api_errors = 0
+            except DailyCapReached:
+                raise
+            except JudgeParseError:
+                res = {"error": "JudgeParseError", "error_kind": "parse"}
+                consecutive_api_errors = 0
+            except Exception as e:  # recorded; the row is redone on resume
+                res = {"error": type(e).__name__, "error_kind": "api"}
+                consecutive_api_errors += 1
+            rec["by_provider"][p] = res
+            sleep(throttles[p])
+            if consecutive_api_errors >= MAX_CONSECUTIVE_API_ERRORS:
+                raise AbortRun(
+                    f"{consecutive_api_errors} consecutive API errors (last: {res['error']} "
+                    f"on {p}); {len(out)} completed rows are checkpointed — re-run to resume"
+                )
+        out[qid] = rec
+        if _compare_complete(rec, providers):
+            save(out)
+        log(f"  [{n}/{len(rows)}] q{qid:>4} " + "  ".join(
+            f"{p}: " + ("?" if "error" in x else
+                        f"{'A' if x['answered'] else '-'} faith={x['faithfulness']:.2f} "
+                        f"ctx={x['context_relevance']:.2f}")
+            for p, x in rec["by_provider"].items()
+        ))
+    return out
 
 
 # --- agreement statistics ---------------------------------------------------------------
@@ -480,6 +664,63 @@ def summarize(records: list[dict], t: float, k: int) -> dict:
     }
 
 
+def summarize_compare(records: list[dict], a: str, b: str) -> dict:
+    """Per-field agreement between provider `a` and provider `b` on the same rows."""
+    both = [
+        (rec, rec["by_provider"][a], rec["by_provider"][b])
+        for rec in records
+        if "error" not in rec["by_provider"][a] and "error" not in rec["by_provider"][b]
+    ]
+    errors = {
+        p: Counter(
+            rec["by_provider"][p]["error_kind"] for rec in records if "error" in rec["by_provider"][p]
+        )
+        for p in (a, b)
+    }
+    fields: dict[str, dict] = {
+        "answered": {
+            "agreement": _mean([float(x["answered"] == y["answered"]) for _, x, y in both]),
+            # Two raters: Fleiss' kappa with n=2 (Scott's pi); None when undefined.
+            "kappa": _r(fleiss_kappa([[x["answered"], y["answered"]] for _, x, y in both])),
+            f"agreement_with_original_{a}": _mean(
+                [float(x["answered"] == rec["original"]["answered"]) for rec, x, _ in both]
+            ),
+            f"agreement_with_original_{b}": _mean(
+                [float(y["answered"] == rec["original"]["answered"]) for rec, _, y in both]
+            ),
+            f"answered_rate_{a}": _mean([float(x["answered"]) for _, x, _ in both]),
+            f"answered_rate_{b}": _mean([float(y["answered"]) for _, _, y in both]),
+        }
+    }
+    for f in SCORE_KEYS:
+        fields[f] = {
+            "exact_agreement": _mean([float(x[f] == y[f]) for _, x, y in both]),
+            "mean_abs_diff": _mean([abs(x[f] - y[f]) for _, x, y in both]),
+            f"mean_{a}": _mean([x[f] for _, x, _ in both]),
+            f"mean_{b}": _mean([y[f] for _, _, y in both]),
+            "alpha": _r(krippendorff_alpha_interval([[x[f], y[f]] for _, x, y in both])),
+            f"mean_abs_diff_vs_original_{a}": _mean(
+                [abs(x[f] - rec["original"][f]) for rec, x, _ in both]
+            ),
+            f"mean_abs_diff_vs_original_{b}": _mean(
+                [abs(y[f] - rec["original"][f]) for rec, _, y in both]
+            ),
+        }
+    triple = ("answered", *SCORE_KEYS)
+    return {
+        "providers": [a, b],
+        "rows": len(records),
+        "rows_both_valid": len(both),
+        "calls": {p: len(records) for p in (a, b)},
+        "parse_failures": {p: errors[p].get("parse", 0) for p in (a, b)},
+        "api_errors": {p: errors[p].get("api", 0) for p in (a, b)},
+        "identical_all_fields_rate": _mean(
+            [float(all(x[k] == y[k] for k in triple)) for _, x, y in both]
+        ),
+        **fields,
+    }
+
+
 # --- output -----------------------------------------------------------------------------
 
 
@@ -492,6 +733,76 @@ def output_dir(limit: int) -> tuple[Path, bool]:
 
 def _f(v: float | None) -> str:
     return "n/a" if v is None else f"{v:.3f}"
+
+
+def _provider_statement(run: Mapping) -> str:
+    """Which provider made the repeats vs the original judgement — explicit, because a
+    cross-provider "vs original" number is not the same measurement as a same-provider
+    one."""
+    orig = run.get("original_judge") or {}
+    rp, om = run.get("judge_provider"), orig.get("model")
+    op = orig.get("provider")
+    if not rp or not op:
+        return ""
+    assumed = "" if orig.get("provider_source") == "recorded" else " (assumed: not recorded in rag.json)"
+    line = (
+        f"**Repeats** judged on **{rp}** (`{run['judge_model']}`); the **original** judgement "
+        f"in rag.json was made on **{op}** (`{om}`){assumed}.\n\n"
+    )
+    if rp != op:
+        line += (
+            "The providers differ: every *vs original* row below compares across providers "
+            "(same weights, different serving stack), so it mixes provider differences with "
+            "judge nondeterminism. Rows computed over the repeats alone (all K agree, kappa, "
+            "alpha over repeats) are within one provider.\n\n"
+        )
+    return line
+
+
+def compare_markdown(result: dict) -> str:
+    run, sm = result["run"], result["summary"]
+    a, b = sm["providers"]
+    ja_, jb = run["judges"][a], run["judges"][b]
+
+    def row(label: str, va: object, vb: object | None = None, both: bool = False) -> str:
+        def fmt(v):
+            return _f(v) if v is None or isinstance(v, float) else str(v)
+        return f"| {label} | {fmt(va)} |\n" if both else f"| {label} | {fmt(va)} | {fmt(vb)} |\n"
+
+    per = (
+        f"| Per provider | {a} | {b} |\n|---|---|---|\n"
+        + row("Model id", f"`{ja_['model']}`", f"`{jb['model']}`")
+        + row("Judge calls", sm["calls"][a], sm["calls"][b])
+        + row("Unparseable replies", sm["parse_failures"][a], sm["parse_failures"][b])
+        + row("API errors", sm["api_errors"][a], sm["api_errors"][b])
+        + row("`answered` rate", sm["answered"][f"answered_rate_{a}"], sm["answered"][f"answered_rate_{b}"])
+        + row("`answered` agrees with rag.json original",
+              sm["answered"][f"agreement_with_original_{a}"], sm["answered"][f"agreement_with_original_{b}"])
+    )
+    for f, label in (("faithfulness", "Faithfulness"), ("context_relevance", "Context relevance")):
+        per += row(f"{label}: mean", sm[f][f"mean_{a}"], sm[f][f"mean_{b}"])
+        per += row(f"{label}: mean abs diff vs original",
+                   sm[f][f"mean_abs_diff_vs_original_{a}"], sm[f][f"mean_abs_diff_vs_original_{b}"])
+    agree = (
+        f"| {a} vs {b} (rows where both parsed: {sm['rows_both_valid']}) | Value |\n|---|---|\n"
+        + row("All 3 fields identical", sm["identical_all_fields_rate"], both=True)
+        + row("`answered`: agreement", sm["answered"]["agreement"], both=True)
+        + row("`answered`: kappa (2 raters)", sm["answered"]["kappa"], both=True)
+    )
+    for f, label in (("faithfulness", "Faithfulness"), ("context_relevance", "Context relevance")):
+        agree += row(f"{label}: exact agreement", sm[f]["exact_agreement"], both=True)
+        agree += row(f"{label}: mean abs diff", sm[f]["mean_abs_diff"], both=True)
+        agree += row(f"{label}: Krippendorff alpha", sm[f]["alpha"], both=True)
+    orig = run["original_judge"]
+    return (
+        f"# Judge provider comparison — {a} vs {b}\n\n"
+        f"First {result['n_rows']} non-empty answers from rag.json (source run "
+        f"{str(run['source']['git_sha'])[:7]}), each judged ONCE per provider at "
+        f"T={PRODUCTION_TEMPERATURE} with the production judge prompt "
+        f"({run['judge_prompt_hash'][:12]}) and budget. The rag.json original was judged on "
+        f"{orig['provider']} (`{orig['model']}`). Non-canonical: written to data/eval_runs/ "
+        f"only.\n\n{per}\n{agree}\nKappa / alpha are n/a when undefined.\n"
+    )
 
 
 def to_markdown(result: dict) -> str:
@@ -535,6 +846,7 @@ def to_markdown(result: dict) -> str:
         f"prompt={run['judge_prompt_hash'][:12]}"
         + ("" if run["canonical"] else f" · SSR_JUDGE_LIMIT={run['row_limit']} (non-canonical)")
         + "\n\n"
+        + _provider_statement(run)
         + (f"Skipped (empty answer): {', '.join(skipped)}.\n\n" if skipped else "")
         + "Same claim, context, answer, prompt and model as the original judgement; only the "
         f"temperature differs. T={PRODUCTION_TEMPERATURE} is production, so movement there "
@@ -551,12 +863,15 @@ def to_markdown(result: dict) -> str:
 # --- checkpoint -------------------------------------------------------------------------
 
 
-def _signature(source_sha: str, cfg: Config, qids: list[str]) -> str:
+def _signature(source_sha: str, cfg: Config, qids: list[str], judges: Sequence[str]) -> str:
+    """`judges`: "provider:model" per judge in use, so a checkpoint never mixes the
+    repeats of two providers (or of the comparison mode and the repeats mode)."""
     payload = json.dumps(
         {
             "source_sha256": source_sha,
             "judge_prompt_hash": rag_eval._sha256(JUDGE_SYSTEM),
-            "judge_model": settings.judge_model,
+            "judges": list(judges),
+            "mode": "compare" if cfg.compare_n else "repeats",
             "k": cfg.k,
             "temperatures": [temp_key(t) for t in cfg.temperatures],
             "qids": qids,
@@ -582,16 +897,54 @@ def _load_checkpoint(path: Path, sig: str) -> dict[str, dict]:
 # --- entry point ------------------------------------------------------------------------
 
 
+def _checkpoint_saver(ckpt: Path, sig: str) -> Callable[[dict[str, dict]], None]:
+    def save(recs: dict[str, dict]) -> None:
+        CACHE.mkdir(parents=True, exist_ok=True)
+        tmp = ckpt.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"signature": sig, "rows": recs}))
+        tmp.replace(ckpt)
+
+    return save
+
+
+def _stop(e: AbortRun) -> SystemExit:
+    if isinstance(e, DailyCapReached):
+        return SystemExit(
+            f"Stopped: {e}.\nCompleted rows are checkpointed in {CACHE}/; re-run the same "
+            "command once the provider's daily budget recovers to resume."
+        )
+    return SystemExit(f"Aborted: {e}")
+
+
 def main() -> None:
     from openai import OpenAI
 
     from app.ingest.corpus import load_documents, load_queries_qrels
 
     cfg = Config.from_env()
+    compare = cfg.compare_n > 0
+    # Keys are only required once LLM calls will actually be made (not for a dry run).
+    need_key = not cfg.dry_run
+    if compare:
+        endpoints = {
+            p: resolve_endpoint("judge", provider=p, require_key=need_key)
+            for p in COMPARE_PROVIDERS
+        }
+    else:
+        ep = resolve_endpoint("judge", require_key=need_key)
+        endpoints = {ep.provider: ep}
+    judge_ep = next(iter(endpoints.values()))
+    throttles = {p: throttle_s(p) for p in endpoints}
+
     raw = SOURCE.read_bytes()
     blob = json.loads(raw)
-    check_source(blob)
-    rows, skipped = select_rows(blob["rows"], cfg.limit, cfg.seed)
+    for e in endpoints.values():
+        check_source(blob, judge_model=e.model)
+    if compare:
+        rows, skipped = select_rows(blob["rows"], 0, cfg.seed)
+        rows = rows[: cfg.compare_n]
+    else:
+        rows, skipped = select_rows(blob["rows"], cfg.limit, cfg.seed)
 
     queries, _ = load_queries_qrels()
     missing = [r["query_id"] for r in rows if r["query_id"] not in queries]
@@ -603,54 +956,117 @@ def main() -> None:
 
     source_sha = hashlib.sha256(raw).hexdigest()
     qids = [r["query_id"] for r in rows]
-    sig = _signature(source_sha, cfg, qids)
+    sig = _signature(source_sha, cfg, qids, [f"{p}:{e.model}" for p, e in endpoints.items()])
     ckpt = CACHE / f"judge_agreement-{sig}.json"
     done = {q: r for q, r in _load_checkpoint(ckpt, sig).items() if q in set(qids)}
-    done = {q: r for q, r in done.items() if _complete(r, cfg)}
-    out, canonical = output_dir(cfg.limit)
+    src_run = blob["run"]
+    orig = original_judge(src_run)
+    for e in endpoints.values():
+        print(describe_with_ignored(e), flush=True)
 
-    calls, secs = estimate(len(rows) - len(done), cfg)
-    print(
-        f"Judge consistency: {len(rows)} rows ({len(skipped)} skipped for an empty answer"
-        + (f", {len(done)} resumed from checkpoint" if done else "")
-        + f") x K={cfg.k} x temperatures {list(cfg.temperatures)}\n"
-        f"  judge={settings.judge_model}  -> {calls} judge calls, est. {secs / 60:.0f} min "
-        f"({THROTTLE_S:.0f}s throttle + ~{EST_LATENCY_S:.0f}s latency per call)\n"
-        f"  output -> {out}{'' if canonical else ' (non-canonical: row limit set)'}",
-        flush=True,
-    )
+    if compare:
+        done = {q: r for q, r in done.items() if _compare_complete(r, list(endpoints))}
+        out = RUNS / f"judge_provider_compare_n{cfg.compare_n}"
+        calls, secs = estimate_compare(len(rows) - len(done), throttles)
+        print(
+            f"Provider comparison: first {len(rows)} rows ({len(skipped)} skipped for an empty "
+            f"answer" + (f", {len(done)} resumed from checkpoint" if done else "") + ") x "
+            f"{len(endpoints)} providers, once each at T={PRODUCTION_TEMPERATURE}\n"
+            f"  -> {sum(calls.values())} judge calls: "
+            + ", ".join(f"{calls[p]} on {p} ({e.model}, {throttles[p]:.1f}s throttle)"
+                        for p, e in endpoints.items())
+            + f"; est. {secs / 60:.0f} min\n  original judgement: {orig['provider']} "
+            f"({orig['model']})\n  output -> {out} (non-canonical)",
+            flush=True,
+        )
+    else:
+        done = {q: r for q, r in done.items() if _complete(r, cfg)}
+        out, canonical = output_dir(cfg.limit)
+        calls_n, secs = estimate(len(rows) - len(done), cfg, throttles[judge_ep.provider])
+        print(
+            f"Judge consistency: {len(rows)} rows ({len(skipped)} skipped for an empty answer"
+            + (f", {len(done)} resumed from checkpoint" if done else "")
+            + f") x K={cfg.k} x temperatures {list(cfg.temperatures)}\n"
+            f"  judge={judge_ep.provider} {judge_ep.model}  -> {calls_n} judge calls, est. "
+            f"{secs / 60:.0f} min ({throttles[judge_ep.provider]:.1f}s throttle + "
+            f"~{EST_LATENCY_S:.0f}s latency per call)\n"
+            f"  original judgement: {orig['provider']} ({orig['model']})"
+            + ("" if orig["provider"] == judge_ep.provider else "  <- different provider")
+            + f"\n  output -> {out}{'' if canonical else ' (non-canonical: row limit set)'}",
+            flush=True,
+        )
     if cfg.dry_run:
         print("SSR_JUDGE_DRY_RUN set: metadata and contexts check out; no LLM calls made.")
         return
-    if not settings.llm_api_key:
-        raise SystemExit("SSR_LLM_API_KEY is not set; the judge needs it.")
 
-    client = OpenAI(
-        base_url=settings.llm_base_url, api_key=settings.llm_api_key, max_retries=5, timeout=30.0
-    )
-
-    def save(recs: dict[str, dict]) -> None:
-        CACHE.mkdir(parents=True, exist_ok=True)
-        tmp = ckpt.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"signature": sig, "rows": recs}))
-        tmp.replace(ckpt)
+    clients = {p: build_client(e, factory=OpenAI) for p, e in endpoints.items()}
+    save = _checkpoint_saver(ckpt, sig)
+    source_meta = {
+        "path": str(SOURCE),
+        "sha256": source_sha,
+        "git_sha": src_run.get("git_sha"),
+        "sample_seed": src_run.get("sample_seed"),
+        "generator_model": src_run.get("generator_model"),
+    }
+    common_run = {
+        "git_sha": rag_eval._git_sha(),
+        "judge_prompt_hash": rag_eval._sha256(JUDGE_SYSTEM),
+        "original_judge": orig,
+        "source": source_meta,
+    }
 
     t0 = time.time()
+    if compare:
+        try:
+            records = run_compare(
+                {p: (clients[p], e.model) for p, e in endpoints.items()},
+                rows, questions, contexts, throttles=throttles, done=done, save=save,
+            )
+        except AbortRun as e:
+            raise _stop(e) from e
+        ordered = [records[q] for q in qids]
+        a, b = COMPARE_PROVIDERS
+        result = {
+            "n_rows": len(ordered),
+            "skipped_empty_answer": skipped,
+            "summary": summarize_compare(ordered, a, b),
+            "run": {
+                **common_run,
+                "mode": "provider_comparison",
+                # Per provider: provider, base URL, model id, provider fields sent. No keys.
+                "judges": {p: e.metadata() for p, e in endpoints.items()},
+                "temperature": PRODUCTION_TEMPERATURE,
+                "throttle_s": throttles,
+                "wall_time_s": round(time.time() - t0, 1),
+            },
+            "rows": ordered,
+        }
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "judge_provider_compare.json").write_text(json.dumps(result, indent=2))
+        (out / "judge_provider_compare.md").write_text(compare_markdown(result))
+        print(f"Wrote {out / 'judge_provider_compare.md'} and {out / 'judge_provider_compare.json'}")
+        return
+
+    client = clients[judge_ep.provider]
     try:
-        records, requested = run_repeats(client, rows, questions, contexts, cfg, done=done, save=save)
+        records, requested = run_repeats(
+            client, rows, questions, contexts, cfg,
+            model=judge_ep.model, throttle=throttles[judge_ep.provider], done=done, save=save,
+        )
     except AbortRun as e:
-        raise SystemExit(f"Aborted: {e}") from e
+        raise _stop(e) from e
 
     ordered = [records[q] for q in qids]
-    src_run = blob["run"]
     result = {
         "n_rows": len(ordered),
         "skipped_empty_answer": skipped,
         "summary": {temp_key(t): summarize(ordered, t, cfg.k) for t in cfg.temperatures},
         "run": {
-            "git_sha": rag_eval._git_sha(),
-            "judge_model": settings.judge_model,
-            "judge_prompt_hash": rag_eval._sha256(JUDGE_SYSTEM),
+            **common_run,
+            "judge_model": judge_ep.model,
+            "judge_provider": judge_ep.provider,
+            "judge_base_url": judge_ep.base_url,
+            "judge_extra_body": judge_ep.extra_body(),
             "repeats": cfg.k,
             "temperatures": list(cfg.temperatures),
             "production_temperature": PRODUCTION_TEMPERATURE,
@@ -661,15 +1077,8 @@ def main() -> None:
             "seed_use": "row subset under SSR_JUDGE_LIMIT only; no seed is sent to the provider",
             "row_limit": cfg.limit,
             "canonical": canonical,
-            "throttle_s": THROTTLE_S,
+            "throttle_s": throttles[judge_ep.provider],
             "wall_time_s": round(time.time() - t0, 1),
-            "source": {
-                "path": str(SOURCE),
-                "sha256": source_sha,
-                "git_sha": src_run.get("git_sha"),
-                "sample_seed": src_run.get("sample_seed"),
-                "generator_model": src_run.get("generator_model"),
-            },
         },
         "rows": ordered,
     }

@@ -1,7 +1,8 @@
 """LLM answer generation over the OpenAI-compatible interface.
 
-Points at whatever SSR_LLM_BASE_URL is configured (Groq by default; swap to Ollama
-or another provider with no code change). Maps the model's [n] citations back to
+Points at the endpoint app.core.llm_endpoints resolves for the generator role
+(OpenRouter by default, under its spend policy; Groq, Ollama or another OpenAI-compatible
+backend via SSR_LLM_PROVIDER=groq + SSR_LLM_BASE_URL, with no code change). Maps the model's [n] citations back to
 document ids so answers are traceable to sources, and parses the optional final
 verdict line (claims only) into Answer.verdict.
 
@@ -18,6 +19,14 @@ from dataclasses import dataclass
 from openai import OpenAI
 
 from app.core.config import settings
+from app.core.llm_endpoints import (
+    LLMEndpoint,
+    build_client,
+    endpoint_for_url,
+    resolve_endpoint,
+    response_cost,
+    response_provider,
+)
 from app.core.interfaces import Answer, SearchHit
 from app.generate.prompts import SYSTEM, VERDICTS, build_user_prompt
 
@@ -97,6 +106,11 @@ class GeneratedAnswer(Answer):
     reasoning_tokens: int | None = None
     attempts: int = 1
     truncated: bool = False
+    # OpenRouter's reported cost (USD), summed over ALL attempts (a truncation retry is
+    # billed too) — None if any attempt went unreported — and the upstream provider that
+    # served the final attempt (None when the backend doesn't say).
+    cost_usd: float | None = None
+    provider: str | None = None
 
 
 def resolve_reasoning_effort(model: str, setting: str) -> str | None:
@@ -122,6 +136,18 @@ def _usage_counts(resp) -> tuple[int | None, int | None]:
     return getattr(usage, "completion_tokens", None), getattr(details, "reasoning_tokens", None)
 
 
+def reasoning_params(provider: str, effort: str | None) -> dict:
+    """The request field that carries `effort`, in the provider's own form: OpenRouter's
+    unified ``reasoning: {"effort": ...}`` object (docs: openrouter.ai/docs/use-cases/
+    reasoning-tokens), or the top-level ``reasoning_effort`` Groq and Ollama accept.
+    Empty when there is nothing to send."""
+    if not effort:
+        return {}
+    if provider == "openrouter":
+        return {"reasoning": {"effort": effort}}
+    return {"reasoning_effort": effort}
+
+
 class LLMGenerator:
     def __init__(
         self,
@@ -130,23 +156,51 @@ class LLMGenerator:
         api_key: str | None = None,
         max_completion_tokens: int | None = None,
         reasoning_effort: str | None = None,
+        endpoint: LLMEndpoint | None = None,
     ):
-        self.model = model or settings.llm_model
+        # Where requests go. An explicit endpoint wins; an explicit base_url builds one
+        # whose provider (and default key) follows that URL; otherwise the settings
+        # decide (llm_endpoints.resolve_endpoint). `model` overrides the model id only.
+        if endpoint is None:
+            if base_url is not None:
+                endpoint = endpoint_for_url(
+                    "generator", base_url, model or settings.llm_model, api_key
+                )
+            else:
+                endpoint = resolve_endpoint("generator", require_key=False)
+        if model is not None or api_key is not None:
+            endpoint = LLMEndpoint(
+                "generator",
+                endpoint.provider,
+                endpoint.base_url,
+                model or endpoint.model,
+                endpoint.api_key if api_key is None else api_key,
+                endpoint.allowlist,
+            )
+        endpoint.check()  # spend policy: refuse a disallowed model before any request
+        self.endpoint = endpoint
+        self.model = endpoint.model
         self.max_completion_tokens = max_completion_tokens or settings.llm_max_completion_tokens
         self.reasoning_effort = resolve_reasoning_effort(
             self.model, settings.llm_reasoning_effort if reasoning_effort is None else reasoning_effort
         )
-        self.client = OpenAI(
-            base_url=base_url or settings.llm_base_url,
-            api_key=api_key or settings.llm_api_key,
-            max_retries=5,  # backoff through transient Groq free-tier 429s
+        self.client = build_client(
+            endpoint,
+            factory=OpenAI,
+            max_retries=5,  # backoff through transient free-tier 429s
             timeout=30.0,  # don't let a hung request tie up a worker for minutes
         )
 
     def _complete(self, messages: list[dict], max_tokens: int):
-        # reasoning_effort rides in extra_body and only when resolved: it is a provider
-        # passthrough, and a backend that doesn't know it must never see it at all.
-        extra = {"extra_body": {"reasoning_effort": self.reasoning_effort}} if self.reasoning_effort else {}
+        # Reasoning rides in extra_body and only when resolved, in the provider's own
+        # form: it is a passthrough, and a backend that doesn't know it must never see
+        # it. OpenRouter requests also carry the endpoint's pinned provider routing, and
+        # the spend policy is checked here as well as in the client wrapper, so it holds
+        # even if self.client is swapped out.
+        body = {**reasoning_params(self.endpoint.provider, self.reasoning_effort),
+                **self.endpoint.extra_body()}
+        self.endpoint.check(model=self.model, body=body)
+        extra = {"extra_body": body} if body else {}
         return self.client.chat.completions.create(
             model=self.model,
             messages=messages,
@@ -169,9 +223,11 @@ class LLMGenerator:
         budget = self.max_completion_tokens
         resp = self._complete(messages, budget)
         attempts = 1
+        costs = [response_cost(resp)]
         if resp.choices[0].finish_reason == "length":
             resp = self._complete(messages, budget * TRUNCATION_RETRY_FACTOR)
             attempts = 2
+            costs.append(response_cost(resp))
         choice = resp.choices[0]
         truncated = choice.finish_reason == "length"
         raw = normalize_citations((choice.message.content or "").strip())
@@ -193,4 +249,8 @@ class LLMGenerator:
             reasoning_tokens=reasoning_tokens,
             attempts=attempts,
             truncated=truncated,
+            # All-or-nothing: a partly reported cost would undercount, and callers that
+            # enforce a spend ceiling treat None as "unknown, assume the worst".
+            cost_usd=None if any(c is None for c in costs) else sum(costs),
+            provider=response_provider(resp),
         )
