@@ -741,7 +741,7 @@ def main() -> None:
 
     print(_estimate_line(len(retrieved), gen_ep, judge_ep, throttle), flush=True)
     generator = LLMGenerator(endpoint=gen_ep)
-    judge_client = build_client(judge_ep, factory=OpenAI)
+    judge_client = build_client(judge_ep, factory=OpenAI, timeout=60.0)  # Nemotron Ultra: rare 20-27 s calls
 
     # Spend accounting. `reported` is what OpenRouter billed per its usage.cost; `counted`
     # adds the worst-case bound for any paid generation whose cost went unreported, and

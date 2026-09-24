@@ -66,7 +66,9 @@ def test_defaults_are_openrouter_paid_generator_and_free_judge():
         "openrouter", OPENROUTER_BASE_URL, "openai/gpt-oss-120b"
     )
     assert gen.paid and gen.api_key == OR_KEY
-    assert (judge.provider, judge.model, judge.paid) == ("openrouter", "qwen/qwen3.8-27b:free", False)
+    assert (judge.provider, judge.model, judge.paid) == (
+        "openrouter", "nvidia/nemotron-3-ultra-550b-a55b:free", False
+    )
     assert gen.extra_body() == {"provider": PAID_ROUTING}
     assert judge.extra_body() == {"provider": FREE_ROUTING, "reasoning": {"effort": "none"}}
 

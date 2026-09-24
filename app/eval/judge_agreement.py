@@ -999,7 +999,7 @@ def main() -> None:
         print("SSR_JUDGE_DRY_RUN set: metadata and contexts check out; no LLM calls made.")
         return
 
-    clients = {p: build_client(e, factory=OpenAI) for p, e in endpoints.items()}
+    clients = {p: build_client(e, factory=OpenAI, timeout=60.0) for p, e in endpoints.items()}
     save = _checkpoint_saver(ckpt, sig)
     source_meta = {
         "path": str(SOURCE),

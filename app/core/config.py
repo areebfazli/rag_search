@@ -96,7 +96,11 @@ class Settings(BaseSettings):
     openrouter_llm_model: str = "openai/gpt-oss-120b"
     # Judge: must be a `:free` id (appended if missing); a paid judge is refused. Free
     # tier: 20 req/min and, with >= $10 credits ever bought, 1,000 req/day account-wide.
-    openrouter_judge_model: str = "qwen/qwen3.8-27b:free"
+    # Nemotron 3 Ultra: on a 2026-09-24 bench of 10 free models it was the only one with
+    # 22/22 calls served (no 429s), 100% parseable verdicts, and exact agreement with the
+    # previous qwen3.8-27b judge on answered rows; qwen3.8-27b:free was 0/4 (upstream 429s).
+    # Backup: inclusionai/ling-3.0-flash-sante:free (also 22/22, different family).
+    openrouter_judge_model: str = "nvidia/nemotron-3-ultra-550b-a55b:free"
     # The ONLY paid model ids that may ever be sent to OpenRouter (generator role only).
     # Anything else not ending in `:free` is refused before any network call.
     openrouter_paid_model_allowlist: tuple[str, ...] = ("openai/gpt-oss-120b",)

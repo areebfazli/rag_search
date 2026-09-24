@@ -10,6 +10,8 @@ import numpy as np
 import openai
 import pytest
 
+from app.core.llm_endpoints import base_model, resolve_endpoint
+
 from app.core.config import settings
 from app.core.interfaces import SearchHit, hit_passage
 from app.eval import judge_agreement as ja
@@ -213,7 +215,9 @@ def _row(qid: str, answer: str = "An answer [1].", **kw) -> dict:
 def _blob(**run_overrides) -> dict:
     run = {
         "judge_prompt_hash": rag_eval._sha256(rag_eval.JUDGE_SYSTEM),
-        "judge_model": settings.judge_model,
+        # The judge the current code would use (provider-resolved, `:free` stripped), so the
+        # fixture follows config defaults instead of pinning a model name.
+        "judge_model": base_model(resolve_endpoint("judge", require_key=False).model),
         **run_overrides,
     }
     return {"run": run, "rows": [_row("1")]}
