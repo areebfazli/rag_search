@@ -1,0 +1,2527 @@
+{
+  "n_rows": 50,
+  "skipped_empty_answer": [],
+  "summary": {
+    "0.0": {
+      "temperature": 0.0,
+      "rows": 50,
+      "calls": 150,
+      "parse_failures": 0,
+      "api_errors": 0,
+      "identical_to_original_rate": 0.8867,
+      "answered": {
+        "rows_all_repeats_valid": 50,
+        "unanimous_rate": 1.0,
+        "fleiss_kappa": 1.0,
+        "agreement_with_original": 1.0,
+        "agreement_with_original_per_repeat": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "disagrees_with_published_answered": 0.0,
+        "judge_decided_rows": 3,
+        "would_flip_published_answered": 0.0,
+        "rows_with_any_flip": 0
+      },
+      "faithfulness": {
+        "mean_row_std": 0.026,
+        "max_row_std": 0.5774,
+        "mean_abs_diff_vs_original": 0.022,
+        "alpha_repeats": 0.8863,
+        "alpha_with_original": 0.8976
+      },
+      "context_relevance": {
+        "mean_row_std": 0.0117,
+        "max_row_std": 0.1528,
+        "mean_abs_diff_vs_original": 0.014,
+        "alpha_repeats": 0.9931,
+        "alpha_with_original": 0.9931
+      }
+    },
+    "0.7": {
+      "temperature": 0.7,
+      "rows": 50,
+      "calls": 150,
+      "parse_failures": 0,
+      "api_errors": 0,
+      "identical_to_original_rate": 0.5933,
+      "answered": {
+        "rows_all_repeats_valid": 50,
+        "unanimous_rate": 0.9,
+        "fleiss_kappa": 0.8413,
+        "agreement_with_original": 0.96,
+        "agreement_with_original_per_repeat": [
+          0.96,
+          0.98,
+          0.94
+        ],
+        "disagrees_with_published_answered": 0.04,
+        "judge_decided_rows": 3,
+        "would_flip_published_answered": 0.0,
+        "rows_with_any_flip": 0
+      },
+      "faithfulness": {
+        "mean_row_std": 0.1182,
+        "max_row_std": 0.5774,
+        "mean_abs_diff_vs_original": 0.1107,
+        "alpha_repeats": 0.5062,
+        "alpha_with_original": 0.531
+      },
+      "context_relevance": {
+        "mean_row_std": 0.063,
+        "max_row_std": 0.4509,
+        "mean_abs_diff_vs_original": 0.057,
+        "alpha_repeats": 0.929,
+        "alpha_with_original": 0.9408
+      }
+    }
+  },
+  "run": {
+    "git_sha": "9e6b2ea782b7683f39a6bac9d78c8ccc911fc310",
+    "judge_prompt_hash": "62bb62544847d70bb5839669e2974f9e79aca5311745d5660a6746261448d86f",
+    "original_judge": {
+      "provider": "openrouter",
+      "provider_source": "recorded",
+      "model": "nvidia/nemotron-3-ultra-550b-a55b:free",
+      "base_url": "https://openrouter.ai/api/v1"
+    },
+    "source": {
+      "path": "eval/results/rag.json",
+      "sha256": "a936dad7c03140166e923c0986dfe6abb0ebf93aae3eefd8dc5a914ba934a340",
+      "git_sha": "133e9c7a998d8435ed4a413fc2976148b7d96596",
+      "sample_seed": 13,
+      "generator_model": "openai/gpt-oss-120b"
+    },
+    "judge_model": "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "judge_provider": "openrouter",
+    "judge_base_url": "https://openrouter.ai/api/v1",
+    "judge_extra_body": {
+      "provider": {
+        "allow_fallbacks": false,
+        "max_price": {
+          "prompt": 0,
+          "completion": 0
+        }
+      },
+      "reasoning": {
+        "effort": "none"
+      }
+    },
+    "repeats": 3,
+    "temperatures": [
+      0.0,
+      0.7
+    ],
+    "production_temperature": 0.0,
+    "judge_requested_temperature": 0.0,
+    "seed": 13,
+    "seed_use": "row subset under SSR_JUDGE_LIMIT only; no seed is sent to the provider",
+    "row_limit": 0,
+    "canonical": true,
+    "throttle_s": 3.5,
+    "wall_time_s": 1848.5
+  },
+  "rows": [
+    {
+      "query_id": "1352",
+      "gold_label": "SUPPORT",
+      "verdict": "SUPPORTED",
+      "answered": true,
+      "answered_source": "verdict",
+      "original": {
+        "answered": true,
+        "faithfulness": 1.0,
+        "context_relevance": 1.0
+      },
+      "repeats": {
+        "0.0": [
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          }
+        ],
+        "0.7": [
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          }
+        ]
+      }
+    },
+    {
+      "query_id": "598",
+      "gold_label": "CONTRADICT",
+      "verdict": "REFUTED",
+      "answered": true,
+      "answered_source": "verdict",
+      "original": {
+        "answered": true,
+        "faithfulness": 1.0,
+        "context_relevance": 1.0
+      },
+      "repeats": {
+        "0.0": [
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          }
+        ],
+        "0.7": [
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 0.95
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          }
+        ]
+      }
+    },
+    {
+      "query_id": "1180",
+      "gold_label": "SUPPORT",
+      "verdict": "SUPPORTED",
+      "answered": true,
+      "answered_source": "verdict",
+      "original": {
+        "answered": true,
+        "faithfulness": 1.0,
+        "context_relevance": 1.0
+      },
+      "repeats": {
+        "0.0": [
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          }
+        ],
+        "0.7": [
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          }
+        ]
+      }
+    },
+    {
+      "query_id": "1221",
+      "gold_label": "CONTRADICT",
+      "verdict": "NOT ENOUGH EVIDENCE",
+      "answered": false,
+      "answered_source": "verdict",
+      "original": {
+        "answered": false,
+        "faithfulness": 1.0,
+        "context_relevance": 0.0
+      },
+      "repeats": {
+        "0.0": [
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.0
+          },
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.0
+          },
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.0
+          }
+        ],
+        "0.7": [
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 0.0
+          },
+          {
+            "answered": false,
+            "faithfulness": 0.0,
+            "context_relevance": 0.0
+          },
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.0
+          }
+        ]
+      }
+    },
+    {
+      "query_id": "386",
+      "gold_label": "SUPPORT",
+      "verdict": "SUPPORTED",
+      "answered": true,
+      "answered_source": "verdict",
+      "original": {
+        "answered": true,
+        "faithfulness": 1.0,
+        "context_relevance": 1.0
+      },
+      "repeats": {
+        "0.0": [
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          }
+        ],
+        "0.7": [
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          }
+        ]
+      }
+    },
+    {
+      "query_id": "775",
+      "gold_label": "NEI",
+      "verdict": "NOT ENOUGH EVIDENCE",
+      "answered": false,
+      "answered_source": "verdict",
+      "original": {
+        "answered": false,
+        "faithfulness": 1.0,
+        "context_relevance": 0.0
+      },
+      "repeats": {
+        "0.0": [
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.0
+          },
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.0
+          },
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.0
+          }
+        ],
+        "0.7": [
+          {
+            "answered": false,
+            "faithfulness": 0.0,
+            "context_relevance": 0.0
+          },
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.0
+          },
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.0
+          }
+        ]
+      }
+    },
+    {
+      "query_id": "1279",
+      "gold_label": "NEI",
+      "verdict": "SUPPORTED",
+      "answered": true,
+      "answered_source": "verdict",
+      "original": {
+        "answered": true,
+        "faithfulness": 0.0,
+        "context_relevance": 0.5
+      },
+      "repeats": {
+        "0.0": [
+          {
+            "answered": true,
+            "faithfulness": 0.0,
+            "context_relevance": 0.5
+          },
+          {
+            "answered": true,
+            "faithfulness": 0.0,
+            "context_relevance": 0.5
+          },
+          {
+            "answered": true,
+            "faithfulness": 0.0,
+            "context_relevance": 0.5
+          }
+        ],
+        "0.7": [
+          {
+            "answered": true,
+            "faithfulness": 0.0,
+            "context_relevance": 0.2
+          },
+          {
+            "answered": true,
+            "faithfulness": 0.0,
+            "context_relevance": 0.5
+          },
+          {
+            "answered": true,
+            "faithfulness": 0.0,
+            "context_relevance": 0.3
+          }
+        ]
+      }
+    },
+    {
+      "query_id": "859",
+      "gold_label": "CONTRADICT",
+      "verdict": "REFUTED",
+      "answered": true,
+      "answered_source": "verdict",
+      "original": {
+        "answered": true,
+        "faithfulness": 1.0,
+        "context_relevance": 0.4
+      },
+      "repeats": {
+        "0.0": [
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 0.4
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 0.4
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 0.4
+          }
+        ],
+        "0.7": [
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 0.6
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 0.4
+          }
+        ]
+      }
+    },
+    {
+      "query_id": "1339",
+      "gold_label": "CONTRADICT",
+      "verdict": "REFUTED",
+      "answered": true,
+      "answered_source": "verdict",
+      "original": {
+        "answered": true,
+        "faithfulness": 1.0,
+        "context_relevance": 1.0
+      },
+      "repeats": {
+        "0.0": [
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          }
+        ],
+        "0.7": [
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          }
+        ]
+      }
+    },
+    {
+      "query_id": "1150",
+      "gold_label": "SUPPORT",
+      "verdict": "SUPPORTED",
+      "answered": true,
+      "answered_source": "verdict",
+      "original": {
+        "answered": true,
+        "faithfulness": 1.0,
+        "context_relevance": 1.0
+      },
+      "repeats": {
+        "0.0": [
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          }
+        ],
+        "0.7": [
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          }
+        ]
+      }
+    },
+    {
+      "query_id": "350",
+      "gold_label": "NEI",
+      "verdict": "SUPPORTED",
+      "answered": true,
+      "answered_source": "verdict",
+      "original": {
+        "answered": true,
+        "faithfulness": 0.0,
+        "context_relevance": 0.3
+      },
+      "repeats": {
+        "0.0": [
+          {
+            "answered": true,
+            "faithfulness": 0.0,
+            "context_relevance": 0.3
+          },
+          {
+            "answered": true,
+            "faithfulness": 0.0,
+            "context_relevance": 0.3
+          },
+          {
+            "answered": true,
+            "faithfulness": 0.0,
+            "context_relevance": 0.3
+          }
+        ],
+        "0.7": [
+          {
+            "answered": true,
+            "faithfulness": 0.0,
+            "context_relevance": 0.5
+          },
+          {
+            "answered": true,
+            "faithfulness": 0.0,
+            "context_relevance": 0.2
+          },
+          {
+            "answered": true,
+            "faithfulness": 0.0,
+            "context_relevance": 0.5
+          }
+        ]
+      }
+    },
+    {
+      "query_id": "820",
+      "gold_label": "NEI",
+      "verdict": "NOT ENOUGH EVIDENCE",
+      "answered": false,
+      "answered_source": "verdict",
+      "original": {
+        "answered": false,
+        "faithfulness": 1.0,
+        "context_relevance": 0.0
+      },
+      "repeats": {
+        "0.0": [
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.0
+          },
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.0
+          },
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.0
+          }
+        ],
+        "0.7": [
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.2
+          },
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.0
+          },
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.0
+          }
+        ]
+      }
+    },
+    {
+      "query_id": "637",
+      "gold_label": "NEI",
+      "verdict": "NOT ENOUGH EVIDENCE",
+      "answered": false,
+      "answered_source": "verdict",
+      "original": {
+        "answered": false,
+        "faithfulness": 1.0,
+        "context_relevance": 0.3
+      },
+      "repeats": {
+        "0.0": [
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.3
+          },
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.3
+          },
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.3
+          }
+        ],
+        "0.7": [
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.2
+          },
+          {
+            "answered": false,
+            "faithfulness": 0.0,
+            "context_relevance": 0.2
+          },
+          {
+            "answered": false,
+            "faithfulness": 0.0,
+            "context_relevance": 0.3
+          }
+        ]
+      }
+    },
+    {
+      "query_id": "1298",
+      "gold_label": "SUPPORT",
+      "verdict": "SUPPORTED",
+      "answered": true,
+      "answered_source": "verdict",
+      "original": {
+        "answered": true,
+        "faithfulness": 1.0,
+        "context_relevance": 1.0
+      },
+      "repeats": {
+        "0.0": [
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          }
+        ],
+        "0.7": [
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          }
+        ]
+      }
+    },
+    {
+      "query_id": "956",
+      "gold_label": "NEI",
+      "verdict": "SUPPORTED",
+      "answered": true,
+      "answered_source": "verdict",
+      "original": {
+        "answered": true,
+        "faithfulness": 0.9,
+        "context_relevance": 0.95
+      },
+      "repeats": {
+        "0.0": [
+          {
+            "answered": true,
+            "faithfulness": 0.85,
+            "context_relevance": 0.9
+          },
+          {
+            "answered": true,
+            "faithfulness": 0.85,
+            "context_relevance": 0.9
+          },
+          {
+            "answered": true,
+            "faithfulness": 0.9,
+            "context_relevance": 0.85
+          }
+        ],
+        "0.7": [
+          {
+            "answered": true,
+            "faithfulness": 0.9,
+            "context_relevance": 0.95
+          },
+          {
+            "answered": true,
+            "faithfulness": 0.9,
+            "context_relevance": 0.95
+          },
+          {
+            "answered": true,
+            "faithfulness": 0.9,
+            "context_relevance": 0.95
+          }
+        ]
+      }
+    },
+    {
+      "query_id": "539",
+      "gold_label": "SUPPORT",
+      "verdict": "SUPPORTED",
+      "answered": true,
+      "answered_source": "verdict",
+      "original": {
+        "answered": true,
+        "faithfulness": 1.0,
+        "context_relevance": 1.0
+      },
+      "repeats": {
+        "0.0": [
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          }
+        ],
+        "0.7": [
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          }
+        ]
+      }
+    },
+    {
+      "query_id": "236",
+      "gold_label": "SUPPORT",
+      "verdict": "NOT ENOUGH EVIDENCE",
+      "answered": false,
+      "answered_source": "verdict",
+      "original": {
+        "answered": false,
+        "faithfulness": 1.0,
+        "context_relevance": 0.5
+      },
+      "repeats": {
+        "0.0": [
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.5
+          },
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.5
+          },
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.5
+          }
+        ],
+        "0.7": [
+          {
+            "answered": false,
+            "faithfulness": 0.0,
+            "context_relevance": 0.3
+          },
+          {
+            "answered": false,
+            "faithfulness": 0.0,
+            "context_relevance": 0.5
+          },
+          {
+            "answered": false,
+            "faithfulness": 0.0,
+            "context_relevance": 0.4
+          }
+        ]
+      }
+    },
+    {
+      "query_id": "702",
+      "gold_label": "NEI",
+      "verdict": "NOT ENOUGH EVIDENCE",
+      "answered": false,
+      "answered_source": "verdict",
+      "original": {
+        "answered": false,
+        "faithfulness": 1.0,
+        "context_relevance": 0.0
+      },
+      "repeats": {
+        "0.0": [
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.0
+          },
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.0
+          },
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.0
+          }
+        ],
+        "0.7": [
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.1
+          },
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.0
+          },
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.2
+          }
+        ]
+      }
+    },
+    {
+      "query_id": "759",
+      "gold_label": "CONTRADICT",
+      "verdict": null,
+      "answered": true,
+      "answered_source": "judge",
+      "original": {
+        "answered": true,
+        "faithfulness": 0.9,
+        "context_relevance": 0.95
+      },
+      "repeats": {
+        "0.0": [
+          {
+            "answered": true,
+            "faithfulness": 0.9,
+            "context_relevance": 0.85
+          },
+          {
+            "answered": true,
+            "faithfulness": 0.9,
+            "context_relevance": 0.85
+          },
+          {
+            "answered": true,
+            "faithfulness": 0.9,
+            "context_relevance": 0.95
+          }
+        ],
+        "0.7": [
+          {
+            "answered": true,
+            "faithfulness": 0.9,
+            "context_relevance": 0.9
+          },
+          {
+            "answered": true,
+            "faithfulness": 0.95,
+            "context_relevance": 0.9
+          },
+          {
+            "answered": true,
+            "faithfulness": 0.9,
+            "context_relevance": 0.95
+          }
+        ]
+      }
+    },
+    {
+      "query_id": "1336",
+      "gold_label": "CONTRADICT",
+      "verdict": "REFUTED",
+      "answered": true,
+      "answered_source": "verdict",
+      "original": {
+        "answered": true,
+        "faithfulness": 0.0,
+        "context_relevance": 0.8
+      },
+      "repeats": {
+        "0.0": [
+          {
+            "answered": true,
+            "faithfulness": 0.0,
+            "context_relevance": 0.8
+          },
+          {
+            "answered": true,
+            "faithfulness": 0.0,
+            "context_relevance": 0.8
+          },
+          {
+            "answered": true,
+            "faithfulness": 0.0,
+            "context_relevance": 0.8
+          }
+        ],
+        "0.7": [
+          {
+            "answered": true,
+            "faithfulness": 0.0,
+            "context_relevance": 0.8
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 0.85,
+            "context_relevance": 0.9
+          }
+        ]
+      }
+    },
+    {
+      "query_id": "452",
+      "gold_label": "CONTRADICT",
+      "verdict": "REFUTED",
+      "answered": true,
+      "answered_source": "verdict",
+      "original": {
+        "answered": true,
+        "faithfulness": 1.0,
+        "context_relevance": 1.0
+      },
+      "repeats": {
+        "0.0": [
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          }
+        ],
+        "0.7": [
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 0.9
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          }
+        ]
+      }
+    },
+    {
+      "query_id": "971",
+      "gold_label": "SUPPORT",
+      "verdict": null,
+      "answered": true,
+      "answered_source": "judge",
+      "original": {
+        "answered": true,
+        "faithfulness": 0.9,
+        "context_relevance": 0.95
+      },
+      "repeats": {
+        "0.0": [
+          {
+            "answered": true,
+            "faithfulness": 0.9,
+            "context_relevance": 0.95
+          },
+          {
+            "answered": true,
+            "faithfulness": 0.9,
+            "context_relevance": 0.95
+          },
+          {
+            "answered": true,
+            "faithfulness": 0.9,
+            "context_relevance": 0.95
+          }
+        ],
+        "0.7": [
+          {
+            "answered": true,
+            "faithfulness": 0.85,
+            "context_relevance": 0.95
+          },
+          {
+            "answered": true,
+            "faithfulness": 0.85,
+            "context_relevance": 0.95
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          }
+        ]
+      }
+    },
+    {
+      "query_id": "811",
+      "gold_label": "CONTRADICT",
+      "verdict": "REFUTED",
+      "answered": true,
+      "answered_source": "verdict",
+      "original": {
+        "answered": true,
+        "faithfulness": 1.0,
+        "context_relevance": 1.0
+      },
+      "repeats": {
+        "0.0": [
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          }
+        ],
+        "0.7": [
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          }
+        ]
+      }
+    },
+    {
+      "query_id": "536",
+      "gold_label": "SUPPORT",
+      "verdict": "SUPPORTED",
+      "answered": true,
+      "answered_source": "verdict",
+      "original": {
+        "answered": true,
+        "faithfulness": 1.0,
+        "context_relevance": 1.0
+      },
+      "repeats": {
+        "0.0": [
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          }
+        ],
+        "0.7": [
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          }
+        ]
+      }
+    },
+    {
+      "query_id": "718",
+      "gold_label": "CONTRADICT",
+      "verdict": "REFUTED",
+      "answered": true,
+      "answered_source": "verdict",
+      "original": {
+        "answered": true,
+        "faithfulness": 0.0,
+        "context_relevance": 0.2
+      },
+      "repeats": {
+        "0.0": [
+          {
+            "answered": true,
+            "faithfulness": 0.0,
+            "context_relevance": 0.2
+          },
+          {
+            "answered": true,
+            "faithfulness": 0.0,
+            "context_relevance": 0.5
+          },
+          {
+            "answered": true,
+            "faithfulness": 0.0,
+            "context_relevance": 0.3
+          }
+        ],
+        "0.7": [
+          {
+            "answered": true,
+            "faithfulness": 0.0,
+            "context_relevance": 0.1
+          },
+          {
+            "answered": true,
+            "faithfulness": 0.0,
+            "context_relevance": 0.5
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          }
+        ]
+      }
+    },
+    {
+      "query_id": "1012",
+      "gold_label": "SUPPORT",
+      "verdict": "SUPPORTED",
+      "answered": true,
+      "answered_source": "verdict",
+      "original": {
+        "answered": true,
+        "faithfulness": 1.0,
+        "context_relevance": 1.0
+      },
+      "repeats": {
+        "0.0": [
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          }
+        ],
+        "0.7": [
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          }
+        ]
+      }
+    },
+    {
+      "query_id": "237",
+      "gold_label": "NEI",
+      "verdict": "NOT ENOUGH EVIDENCE",
+      "answered": false,
+      "answered_source": "verdict",
+      "original": {
+        "answered": false,
+        "faithfulness": 1.0,
+        "context_relevance": 0.0
+      },
+      "repeats": {
+        "0.0": [
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.0
+          },
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.0
+          },
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.0
+          }
+        ],
+        "0.7": [
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.0
+          },
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 0.2
+          }
+        ]
+      }
+    },
+    {
+      "query_id": "300",
+      "gold_label": "NEI",
+      "verdict": "NOT ENOUGH EVIDENCE",
+      "answered": false,
+      "answered_source": "verdict",
+      "original": {
+        "answered": false,
+        "faithfulness": 1.0,
+        "context_relevance": 0.0
+      },
+      "repeats": {
+        "0.0": [
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.0
+          },
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.0
+          },
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.0
+          }
+        ],
+        "0.7": [
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.0
+          },
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 0.0
+          }
+        ]
+      }
+    },
+    {
+      "query_id": "613",
+      "gold_label": "SUPPORT",
+      "verdict": "SUPPORTED",
+      "answered": true,
+      "answered_source": "verdict",
+      "original": {
+        "answered": true,
+        "faithfulness": 1.0,
+        "context_relevance": 1.0
+      },
+      "repeats": {
+        "0.0": [
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          }
+        ],
+        "0.7": [
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          }
+        ]
+      }
+    },
+    {
+      "query_id": "587",
+      "gold_label": "NEI",
+      "verdict": "NOT ENOUGH EVIDENCE",
+      "answered": false,
+      "answered_source": "verdict",
+      "original": {
+        "answered": false,
+        "faithfulness": 1.0,
+        "context_relevance": 0.3
+      },
+      "repeats": {
+        "0.0": [
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.3
+          },
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.3
+          },
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.3
+          }
+        ],
+        "0.7": [
+          {
+            "answered": false,
+            "faithfulness": 0.0,
+            "context_relevance": 0.2
+          },
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.3
+          },
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.4
+          }
+        ]
+      }
+    },
+    {
+      "query_id": "551",
+      "gold_label": "NEI",
+      "verdict": "NOT ENOUGH EVIDENCE",
+      "answered": false,
+      "answered_source": "verdict",
+      "original": {
+        "answered": false,
+        "faithfulness": 1.0,
+        "context_relevance": 0.5
+      },
+      "repeats": {
+        "0.0": [
+          {
+            "answered": false,
+            "faithfulness": 0.0,
+            "context_relevance": 0.3
+          },
+          {
+            "answered": false,
+            "faithfulness": 0.0,
+            "context_relevance": 0.5
+          },
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.3
+          }
+        ],
+        "0.7": [
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.6
+          },
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.7
+          },
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.3
+          }
+        ]
+      }
+    },
+    {
+      "query_id": "597",
+      "gold_label": "SUPPORT",
+      "verdict": "SUPPORTED",
+      "answered": true,
+      "answered_source": "verdict",
+      "original": {
+        "answered": true,
+        "faithfulness": 1.0,
+        "context_relevance": 1.0
+      },
+      "repeats": {
+        "0.0": [
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          }
+        ],
+        "0.7": [
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 0.95
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          }
+        ]
+      }
+    },
+    {
+      "query_id": "124",
+      "gold_label": "SUPPORT",
+      "verdict": "SUPPORTED",
+      "answered": true,
+      "answered_source": "verdict",
+      "original": {
+        "answered": true,
+        "faithfulness": 1.0,
+        "context_relevance": 1.0
+      },
+      "repeats": {
+        "0.0": [
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          }
+        ],
+        "0.7": [
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          }
+        ]
+      }
+    },
+    {
+      "query_id": "5",
+      "gold_label": "SUPPORT",
+      "verdict": "SUPPORTED",
+      "answered": true,
+      "answered_source": "verdict",
+      "original": {
+        "answered": true,
+        "faithfulness": 1.0,
+        "context_relevance": 1.0
+      },
+      "repeats": {
+        "0.0": [
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          }
+        ],
+        "0.7": [
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          }
+        ]
+      }
+    },
+    {
+      "query_id": "593",
+      "gold_label": "SUPPORT",
+      "verdict": "REFUTED",
+      "answered": true,
+      "answered_source": "verdict",
+      "original": {
+        "answered": true,
+        "faithfulness": 1.0,
+        "context_relevance": 1.0
+      },
+      "repeats": {
+        "0.0": [
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          }
+        ],
+        "0.7": [
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          }
+        ]
+      }
+    },
+    {
+      "query_id": "830",
+      "gold_label": "NEI",
+      "verdict": "NOT ENOUGH EVIDENCE",
+      "answered": false,
+      "answered_source": "verdict",
+      "original": {
+        "answered": false,
+        "faithfulness": 1.0,
+        "context_relevance": 0.0
+      },
+      "repeats": {
+        "0.0": [
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.0
+          },
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.0
+          },
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.0
+          }
+        ],
+        "0.7": [
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.0
+          },
+          {
+            "answered": false,
+            "faithfulness": 0.0,
+            "context_relevance": 0.0
+          },
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.0
+          }
+        ]
+      }
+    },
+    {
+      "query_id": "56",
+      "gold_label": "SUPPORT",
+      "verdict": "SUPPORTED",
+      "answered": true,
+      "answered_source": "verdict",
+      "original": {
+        "answered": true,
+        "faithfulness": 1.0,
+        "context_relevance": 1.0
+      },
+      "repeats": {
+        "0.0": [
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          }
+        ],
+        "0.7": [
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          }
+        ]
+      }
+    },
+    {
+      "query_id": "716",
+      "gold_label": "NEI",
+      "verdict": "NOT ENOUGH EVIDENCE",
+      "answered": false,
+      "answered_source": "verdict",
+      "original": {
+        "answered": false,
+        "faithfulness": 1.0,
+        "context_relevance": 0.0
+      },
+      "repeats": {
+        "0.0": [
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.0
+          },
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.0
+          },
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.0
+          }
+        ],
+        "0.7": [
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.0
+          },
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.1
+          },
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.0
+          }
+        ]
+      }
+    },
+    {
+      "query_id": "1140",
+      "gold_label": "CONTRADICT",
+      "verdict": "REFUTED",
+      "answered": true,
+      "answered_source": "verdict",
+      "original": {
+        "answered": true,
+        "faithfulness": 1.0,
+        "context_relevance": 1.0
+      },
+      "repeats": {
+        "0.0": [
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          }
+        ],
+        "0.7": [
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          }
+        ]
+      }
+    },
+    {
+      "query_id": "552",
+      "gold_label": "NEI",
+      "verdict": "NOT ENOUGH EVIDENCE",
+      "answered": false,
+      "answered_source": "verdict",
+      "original": {
+        "answered": false,
+        "faithfulness": 1.0,
+        "context_relevance": 0.0
+      },
+      "repeats": {
+        "0.0": [
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.0
+          },
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.1
+          },
+          {
+            "answered": false,
+            "faithfulness": 0.0,
+            "context_relevance": 0.0
+          }
+        ],
+        "0.7": [
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 0.0
+          },
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.2
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 0.0
+          }
+        ]
+      }
+    },
+    {
+      "query_id": "171",
+      "gold_label": "CONTRADICT",
+      "verdict": "REFUTED",
+      "answered": true,
+      "answered_source": "verdict",
+      "original": {
+        "answered": true,
+        "faithfulness": 1.0,
+        "context_relevance": 1.0
+      },
+      "repeats": {
+        "0.0": [
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          }
+        ],
+        "0.7": [
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          }
+        ]
+      }
+    },
+    {
+      "query_id": "834",
+      "gold_label": "NEI",
+      "verdict": "SUPPORTED",
+      "answered": true,
+      "answered_source": "verdict",
+      "original": {
+        "answered": true,
+        "faithfulness": 0.8,
+        "context_relevance": 0.6
+      },
+      "repeats": {
+        "0.0": [
+          {
+            "answered": true,
+            "faithfulness": 0.8,
+            "context_relevance": 0.7
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 0.8
+          },
+          {
+            "answered": true,
+            "faithfulness": 0.8,
+            "context_relevance": 0.7
+          }
+        ],
+        "0.7": [
+          {
+            "answered": true,
+            "faithfulness": 0.9,
+            "context_relevance": 0.7
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 0.6
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          }
+        ]
+      }
+    },
+    {
+      "query_id": "721",
+      "gold_label": "SUPPORT",
+      "verdict": "SUPPORTED",
+      "answered": true,
+      "answered_source": "verdict",
+      "original": {
+        "answered": true,
+        "faithfulness": 1.0,
+        "context_relevance": 1.0
+      },
+      "repeats": {
+        "0.0": [
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          }
+        ],
+        "0.7": [
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          }
+        ]
+      }
+    },
+    {
+      "query_id": "75",
+      "gold_label": "NEI",
+      "verdict": "NOT ENOUGH EVIDENCE",
+      "answered": false,
+      "answered_source": "verdict",
+      "original": {
+        "answered": false,
+        "faithfulness": 0.0,
+        "context_relevance": 0.0
+      },
+      "repeats": {
+        "0.0": [
+          {
+            "answered": false,
+            "faithfulness": 0.0,
+            "context_relevance": 0.0
+          },
+          {
+            "answered": false,
+            "faithfulness": 0.0,
+            "context_relevance": 0.0
+          },
+          {
+            "answered": false,
+            "faithfulness": 0.0,
+            "context_relevance": 0.0
+          }
+        ],
+        "0.7": [
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.0
+          },
+          {
+            "answered": false,
+            "faithfulness": 0.0,
+            "context_relevance": 0.3
+          },
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.0
+          }
+        ]
+      }
+    },
+    {
+      "query_id": "295",
+      "gold_label": "SUPPORT",
+      "verdict": null,
+      "answered": true,
+      "answered_source": "judge",
+      "original": {
+        "answered": true,
+        "faithfulness": 1.0,
+        "context_relevance": 0.8
+      },
+      "repeats": {
+        "0.0": [
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 0.8
+          }
+        ],
+        "0.7": [
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 0.9
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 0.9
+          }
+        ]
+      }
+    },
+    {
+      "query_id": "1270",
+      "gold_label": "CONTRADICT",
+      "verdict": "REFUTED",
+      "answered": true,
+      "answered_source": "verdict",
+      "original": {
+        "answered": true,
+        "faithfulness": 1.0,
+        "context_relevance": 1.0
+      },
+      "repeats": {
+        "0.0": [
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          }
+        ],
+        "0.7": [
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 1.0
+          }
+        ]
+      }
+    },
+    {
+      "query_id": "238",
+      "gold_label": "NEI",
+      "verdict": "NOT ENOUGH EVIDENCE",
+      "answered": false,
+      "answered_source": "verdict",
+      "original": {
+        "answered": false,
+        "faithfulness": 1.0,
+        "context_relevance": 0.2
+      },
+      "repeats": {
+        "0.0": [
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.2
+          },
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.2
+          },
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.2
+          }
+        ],
+        "0.7": [
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.1
+          },
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.2
+          },
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.1
+          }
+        ]
+      }
+    },
+    {
+      "query_id": "1014",
+      "gold_label": "NEI",
+      "verdict": "NOT ENOUGH EVIDENCE",
+      "answered": false,
+      "answered_source": "verdict",
+      "original": {
+        "answered": false,
+        "faithfulness": 1.0,
+        "context_relevance": 0.2
+      },
+      "repeats": {
+        "0.0": [
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.2
+          },
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.2
+          },
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.2
+          }
+        ],
+        "0.7": [
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.2
+          },
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.2
+          },
+          {
+            "answered": false,
+            "faithfulness": 0.0,
+            "context_relevance": 0.1
+          }
+        ]
+      }
+    },
+    {
+      "query_id": "1088",
+      "gold_label": "CONTRADICT",
+      "verdict": "REFUTED",
+      "answered": true,
+      "answered_source": "verdict",
+      "original": {
+        "answered": true,
+        "faithfulness": 0.0,
+        "context_relevance": 0.0
+      },
+      "repeats": {
+        "0.0": [
+          {
+            "answered": true,
+            "faithfulness": 0.0,
+            "context_relevance": 0.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 0.0,
+            "context_relevance": 0.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 0.0,
+            "context_relevance": 0.0
+          }
+        ],
+        "0.7": [
+          {
+            "answered": true,
+            "faithfulness": 0.0,
+            "context_relevance": 0.2
+          },
+          {
+            "answered": true,
+            "faithfulness": 0.0,
+            "context_relevance": 0.0
+          },
+          {
+            "answered": true,
+            "faithfulness": 0.0,
+            "context_relevance": 0.2
+          }
+        ]
+      }
+    },
+    {
+      "query_id": "1274",
+      "gold_label": "SUPPORT",
+      "verdict": "NOT ENOUGH EVIDENCE",
+      "answered": false,
+      "answered_source": "verdict",
+      "original": {
+        "answered": false,
+        "faithfulness": 1.0,
+        "context_relevance": 0.3
+      },
+      "repeats": {
+        "0.0": [
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.3
+          },
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.3
+          },
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.3
+          }
+        ],
+        "0.7": [
+          {
+            "answered": false,
+            "faithfulness": 1.0,
+            "context_relevance": 0.7
+          },
+          {
+            "answered": true,
+            "faithfulness": 1.0,
+            "context_relevance": 0.6
+          },
+          {
+            "answered": false,
+            "faithfulness": 0.0,
+            "context_relevance": 0.4
+          }
+        ]
+      }
+    }
+  ]
+}

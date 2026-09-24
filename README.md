@@ -48,8 +48,8 @@ Measured below, and on this corpus it does not improve ranking, so it is off by 
 | Reranker | `cross-encoder/ms-marco-MiniLM-L-6-v2` and `BAAI/bge-reranker-base` (both evaluated; swappable via `SSR_RERANKER_MODEL`) |
 | API | FastAPI + slowapi rate limiting |
 | Retrieval eval | `ranx` on BEIR/SciFact gold qrels, with paired significance tests |
-| RAG eval | Verdicts + abstention scored against SciFact rationale labels; LLM judge for faithfulness (`app/eval/rag_eval.py`) |
-| LLM | Groq `openai/gpt-oss-120b` generator, `qwen/qwen3.8-27b` judge (any OpenAI-compatible endpoint via `SSR_LLM_BASE_URL`) |
+| RAG eval | Verdicts + abstention scored against SciFact rationale labels; free Nemotron 3 Ultra judge for faithfulness, with a judge-consistency harness (`app/eval/rag_eval.py`, `app/eval/judge_agreement.py`) |
+| LLM | OpenRouter: `openai/gpt-oss-120b` generator (pinned to a bf16 provider, no fallbacks, price-capped; [`app/core/llm_endpoints.py`](app/core/llm_endpoints.py)) and `nvidia/nemotron-3-ultra-550b-a55b:free` (Nemotron 3 Ultra) judge. Groq, Ollama or any OpenAI-compatible endpoint via `SSR_LLM_PROVIDER=groq` + `SSR_LLM_BASE_URL` |
 
 ## Evaluation (headline artifact)
 
@@ -123,7 +123,7 @@ with `SSR_RERANK_CANDIDATES=100 uv run python -m app.eval.retrieval_eval`.
 
 ## Grounded answers (RAG)
 
-`GET /answer?q=...` runs the hybrid retrieval, then generates a grounded answer with an OpenAI-compatible LLM (Groq `openai/gpt-oss-120b` by default; switch providers via `SSR_LLM_BASE_URL`). Answers cite sources as `[n]` mapped back to document ids, and the model is instructed to **abstain when the retrieved context lacks the evidence** rather than hallucinate.
+`GET /answer?q=...` runs the hybrid retrieval, then generates a grounded answer with an OpenAI-compatible LLM (`openai/gpt-oss-120b` on OpenRouter by default; switch to Groq, Ollama or another endpoint via `SSR_LLM_PROVIDER=groq` and `SSR_LLM_BASE_URL`). Answers cite sources as `[n]` mapped back to document ids, and the model is instructed to **abstain when the retrieved context lacks the evidence** rather than hallucinate.
 
 For example, `/answer?q=Can aspirin reduce the risk of colorectal cancer?`:
 > "Aspirin has been shown to reduce the risk of colorectal cancer [1][2][3] … a pooled analysis of four randomized trials showed a 34% reduction in 20-year colorectal cancer mortality [3]."
@@ -131,10 +131,16 @@ For example, `/answer?q=Can aspirin reduce the risk of colorectal cancer?`:
 **Answer-quality eval** (`app/eval/rag_eval.py`) scores each answer's final `Verdict:` line
 (supported / refuted / not enough evidence) and its answer/abstain decision **against SciFact's
 labels rather than assuming them correct**; an LLM judge scores only faithfulness and context
-relevance. Generator = Groq `openai/gpt-oss-120b`, judge = `qwen/qwen3.8-27b`, a different model
-family, so it isn't grading its own output. Random 50-claim sample (seed 13), all 50 scored,
-top-5 context; full tables in [`eval/results/rag.md`](eval/results/rag.md). Groq retired the
-Llama models the previous run used, so these numbers are not directly comparable to that run's.
+relevance. Generator = `openai/gpt-oss-120b` on OpenRouter, pinned to one bf16 provider (AkashML)
+with fallbacks off and a $0.03 / $0.17 per-1M-token price cap
+([`app/core/llm_endpoints.py`](app/core/llm_endpoints.py)). Judge = Nemotron 3 Ultra
+(`nvidia/nemotron-3-ultra-550b-a55b:free`), a different model family, so the generator isn't
+grading its own output. It was picked from a bench of 10 free OpenRouter models because the
+previous judge's free variant (`qwen/qwen3.8-27b:free`) served 0 of 4 calls (upstream 429s),
+while Nemotron served 22 of 22 and matched the previous judge on answered rows. Random 50-claim
+sample (seed 13), all 50 scored, top-5 context; full tables in
+[`eval/results/rag.md`](eval/results/rag.md). The whole 50-claim run cost **$0.0049** in
+OpenRouter-reported spend (about half a cent; the judge is free).
 
 Abstention is scored against a **rationale oracle**: the context has evidence when a document the
 annotators cited *with rationale sentences* is in the top-5. NEI claims have no rationale
@@ -142,37 +148,93 @@ document, so abstaining on them is the correct action.
 
 | Metric | Score |
 |---|---|
-| Faithfulness (over answered) | 0.98 |
-| Context relevance (all) | 0.70 |
-| **3-class verdict accuracy** (vs gold label, no judge) | **0.70** |
-| Verdict line parsed | 0.86 |
+| Faithfulness (over answered, LLM judge) | 0.83 |
+| Context relevance (all, LLM judge) | 0.61 |
+| **3-class verdict accuracy** (vs gold label, no judge) | **0.78** |
+| Verdict line parsed | 0.94 |
+| Truncated answers (hit the token budget after 1 retry) | 0 of 50 |
 | Evidence retrieved (rationale doc in top-5) | 0.58 |
-| Answered (model attempted an answer) | 0.60 |
-| **Abstention precision** (abstained & no evidence) | **0.80** |
-| Abstention recall (no evidence & abstained) | 0.76 |
-| False abstention (had evidence, abstained anyway) | 0.14 |
-| Answered without evidence, as a share of answers given (hallucination risk) | 0.17 |
+| Answered (model attempted an answer) | 0.66 |
+| **Abstention precision** (abstained & no evidence) | **0.88** |
+| Abstention recall (no evidence & abstained) | 0.71 |
+| False abstention (had evidence, abstained anyway) | 0.07 |
+| Answered without evidence, as a share of answers given (hallucination risk) | 0.18 |
 
 |  | evidence retrieved (29) | no evidence (21) |
 |---|---|---|
-| **answered** (30) | 25 answered with evidence | 5 answered with nothing to go on |
-| **abstained** (20) | 4 declined despite having the evidence | 16 correct |
+| **answered** (33) | 27 answered with evidence | 6 answered with nothing to go on |
+| **abstained** (17) | 2 declined despite having the evidence | 15 correct |
 
 Verdicts against the gold label (`NONE` = answered with no parseable verdict line, always wrong):
 
 | Gold \ predicted | SUPPORT | CONTRADICT | NEI | NONE |
 |---|---|---|---|---|
-| **SUPPORT** (19) | 12 | 1 | 2 | 4 |
-| **CONTRADICT** (13) | 0 | 9 | 4 | 0 |
+| **SUPPORT** (19) | 14 | 1 | 2 | 2 |
+| **CONTRADICT** (13) | 0 | 11 | 1 | 1 |
 | **NEI** (18) | 4 | 0 | 14 | 0 |
+
+**What 0.78 measures, and what it doesn't.** Verdict accuracy scores whether the final
+`Verdict:` line matches the gold label, and nothing else. It does not check that the answer is the
+grounded, cited 2-4 sentence explanation the product promises, and here that gap is the **main
+remaining failure mode: 28 of 50 replies (56%) are a bare verdict line** (`Verdict: REFUTED`, with
+no explanation and no `[n]` citation). 22 of those 28 verdicts are correct, so accuracy counts
+them as right. 16 of the 28 are abstentions (`NOT ENOUGH EVIDENCE`) and 12 are answers
+(5 SUPPORTED, 7 REFUTED). This is not new: the previous committed run had 24 of 50.
+
+The judge averages include those rows. Over the 12 bare answers faithfulness averages 0.575,
+against 0.98 over the 21 answers that carry an explanation, and 5 of the 12 score 0.00, among them
+three *correct* REFUTED verdicts (q718, q1336, q1088) that simply give the judge nothing to check.
+Context relevance is 0.36 on the 28 bare rows and 0.94 on the rest. So the 0.83 faithfulness and
+0.61 context relevance partly measure "nothing to check", not only unfaithfulness.
 
 **Finding: the oracle decides whether abstention looks broken.** Scored the legacy way, against
 BEIR qrels (which mark a cited abstract relevant for NEI claims too), the *same answers* give
-abstention precision 0.35 and 13 "false" abstentions (false-abstention rate 0.32). Under the
-rationale oracle, 9 of those 13 are NEI claims where refusing was the right call, and precision
-is 0.80. What remains is smaller and real: 4 SUPPORT claims answered without a parseable verdict
-line (scored `NONE`), 4 CONTRADICT claims abstained on, and 4 NEI claims answered SUPPORT, which
-are 4 of the 5 answers given without evidence. Faithfulness over the answers it does give is 0.98.
+abstention precision 0.35 and 11 "false" abstentions (false-abstention rate 0.27). Under the
+rationale oracle, 9 of those 11 are NEI claims where refusing was the right call, and precision
+is 0.88. The verdict errors that remain, from the confusion matrix: 4 NEI claims answered
+SUPPORTED (4 of the 6 answers given without evidence; the other 2 are correct REFUTED verdicts on
+CONTRADICT claims whose rationale doc wasn't retrieved), 3 answers with no parseable verdict line
+(2 SUPPORT, 1 CONTRADICT; each ends in cited prose, not a verdict, and none was truncated),
+2 SUPPORT claims abstained on despite the evidence being in the context, 1 SUPPORT claim answered
+REFUTED, and 1 CONTRADICT claim abstained on with no rationale doc retrieved (a correct abstention
+but a wrong verdict).
+
+**What changed since the previous run.** The previous committed run (Groq-hosted
+`openai/gpt-oss-120b`, `qwen/qwen3.8-27b` judge) scored verdict accuracy 0.70 with 0.86 of verdict
+lines parsed. Two fixes account for the move to **0.78 / 0.94**:
+
+1. **Truncation.** gpt-oss spends hidden reasoning tokens from the same `max_tokens` budget, and
+   the old cap of 400 cut 7 of 50 answers off before their verdict line (two to empty strings).
+   The generator now has a 1024-token budget with one retry at 2x on `finish_reason=length`;
+   0 of 50 answers were truncated, and none needed the retry.
+2. **Parser.** gpt-oss often ends with `Verdict: REFUTED[1]`, and the parser rejected any trailing
+   text, scoring clear, correct verdicts as `NONE`. Trailing `[n]` markers are now accepted;
+   prose after the verdict still is not.
+
+Verdict accuracy and abstention are scored deterministically against SciFact's labels without the
+judge (it settles `answered` only for the 3 of 50 replies with no parsed verdict), so those numbers
+**are comparable** across the two runs; the generator model is the same, served by a different
+host. Faithfulness and context relevance are **not comparable**: the judge changed from Qwen3.8
+to Nemotron 3 Ultra, so their fall from 0.98 / 0.70 says nothing about answer quality on its own.
+
+### Judge reliability
+
+[`eval/results/judge_agreement.md`](eval/results/judge_agreement.md) re-judges the 50 stored
+answers 3 times at each of two temperatures, with the same claim, context, answer, prompt and
+model as the published judgement.
+
+| Agreement across 3 repeats | T = 0.0 (production) | T = 0.7 |
+|---|---|---|
+| `answered`: Fleiss' kappa | 1.00 | 0.84 |
+| Faithfulness: Krippendorff's alpha | 0.89 | 0.51 |
+| Context relevance: Krippendorff's alpha | 0.99 | 0.93 |
+| Repeat identical to the original (all 3 fields) | 0.89 | 0.59 |
+| Published `answered` values flipped | 0 | 0 |
+
+At the production temperature of 0.0 the judge is close to deterministic: its `answered` call
+never changed (kappa 1.00), and faithfulness (alpha 0.89) and context relevance (alpha 0.99)
+barely moved. At T = 0.7 the `answered` call holds up (kappa 0.84) but faithfulness drops to
+alpha 0.51, so faithfulness is the least stable score the judge produces.
 
 (An earlier version of this eval reported "answered 0.50" from the first 10 query ids in dataset
 order: a head slice, not a sample. The harness now takes a seeded random sample and re-runs at any size via `make eval-rag`.)
@@ -189,21 +251,32 @@ order: a head slice, not a sample. The harness now takes a seeded random sample 
   though annotators found no rationale in it, and the whole hybrid-vs-dense recall gain sits on
   that stratum (Finding 1).
 - **The RAG eval is small.** N = 50 claims, so every rate in that table rests on a few dozen
-  answers, and 10 of the 12 confusion-matrix cells are single digits.
-- **The LLM judge is single-sample.** Each answer is judged once, so judge variance on
-  faithfulness and context relevance is unmeasured. Verdict accuracy and abstention need no judge,
-  except for the 7 of 50 answer/abstain calls it settles when no verdict line parsed.
-- **No before/after on the RAG eval.** The model change (retired Groq Llama models →
-  `openai/gpt-oss-120b` / `qwen/qwen3.8-27b`) breaks comparability with the earlier published run,
-  so no RAG-quality change can be attributed across it.
+  answers, and 9 of the 12 confusion-matrix cells are single digits.
+- **Verdict accuracy doesn't check the explanation.** 28 of 50 replies are a bare verdict line with
+  no explanation or citation, and no metric in the harness yet flags that; verdict accuracy counts
+  22 of them as correct, and they drag the judge averages down.
+- **One judge model.** Faithfulness and context relevance come from a single judge (Nemotron 3
+  Ultra), with no second model or human labels to check it against. Its repeat consistency is
+  measured ([above](#judge-reliability)), not its correctness.
+- **The judge change breaks comparability.** Faithfulness and context relevance from the Qwen3.8
+  judge (previous run) and Nemotron 3 Ultra (this run) can't be compared, so no change in either
+  can be attributed across the two runs. Verdict accuracy and abstention don't depend on the judge.
+- **The free judge can disappear.** OpenRouter's free models are served by whichever upstream
+  providers carry them; the previous judge's free variant was unavailable (0 of 4 calls), and
+  Nemotron's availability can change the same way, which would force another judge change.
 
 ## What I'd do next
 
-- **Fix verdict-line compliance**: 14% of answers end without a parseable `Verdict:` line, which
-  alone costs 4 SUPPORT claims (scored `NONE`). Enforce the format (structured output or a
-  retry) so verdict accuracy measures judgment, not formatting.
-- **Measure judge agreement by re-sampling**: re-run the judge several times per answer to put a
-  variance on faithfulness and context relevance, which currently rest on one call each.
+- **Always give the cited explanation before the verdict line**: a prompt fix, developed on
+  SciFact *train* claims so the test sample stays clean, plus an eval metric that counts replies
+  with no explanation or no `[n]` citation, so the 56% bare-verdict rate is measured rather than
+  hidden inside verdict accuracy.
+- **A stricter NEI prompt**, developed on SciFact train claims: 4 of 18 NEI claims are answered
+  SUPPORTED, and they are 4 of the 6 answers given without evidence.
+- **Fix the 6% of answers with no verdict line** (3 of 50, each ending in cited prose): enforce the
+  format with structured output or a format-only retry.
+- **Human spot-check of faithfulness** on the rows where judge repeats disagree, since faithfulness
+  is the judge's least stable score (alpha 0.51 at T = 0.7).
 - **Stratified reporting as the default**: report every retrieval comparison by claim label, not
   only as a follow-up analysis.
 
@@ -218,7 +291,7 @@ uv run python -m app.eval.analysis        # label-stratified re-score       (mak
 uv run python -m app.eval.latency         # per-query retrieval latency     (make latency)
 uv run pytest                             # tests                           (make test)
 
-cp .env.example .env                      # only for /answer + `make eval-rag`: add a Groq key
+cp .env.example .env                      # only for /answer + `make eval-rag`: add an OpenRouter key
 ```
 
 First run downloads the SciFact corpus (~9 MB via `ir_datasets`) and the embedding model
