@@ -18,6 +18,7 @@ from slowapi.util import get_remote_address
 
 from app.core.config import settings
 from app.core.llm_endpoints import (
+    EmptyCompletionError,
     EndpointConfigError,
     MissingApiKey,
     SpendPolicyError,
@@ -164,6 +165,8 @@ def answer(
         ans = get_generator().generate(q, hits)  # network call — safe outside the lock
     except OpenAIError as e:  # bad key, model gone, provider down — not a server bug
         raise HTTPException(status_code=502, detail=f"LLM backend error: {type(e).__name__}")
+    except EmptyCompletionError:  # HTTP 200 with no choices: an upstream failure too
+        raise HTTPException(status_code=502, detail="LLM backend returned no completion")
     return AnswerResponse(
         query=q, answer=ans.text, citations=ans.citations, hits=_to_hits(hits), verdict=ans.verdict
     )

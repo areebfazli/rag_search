@@ -20,8 +20,10 @@ from openai import OpenAI
 
 from app.core.config import settings
 from app.core.llm_endpoints import (
+    EmptyCompletionError,
     LLMEndpoint,
     build_client,
+    completion_choice,
     endpoint_for_url,
     resolve_endpoint,
     response_cost,
@@ -152,6 +154,17 @@ def reasoning_params(provider: str, effort: str | None) -> dict:
     return {"reasoning_effort": effort}
 
 
+def _choice_or_raise(resp, costs: list[float | None]):
+    """completion_choice(resp), with any EmptyCompletionError carrying what this
+    generation's calls so far reported costing (None if any is unknown), so a spend
+    ceiling can count a failed paid attempt instead of treating it as free."""
+    try:
+        return completion_choice(resp)
+    except EmptyCompletionError as e:
+        e.cost_usd = None if any(c is None for c in costs) else sum(costs)
+        raise
+
+
 class LLMGenerator:
     def __init__(
         self,
@@ -228,11 +241,12 @@ class LLMGenerator:
         resp = self._complete(messages, budget)
         attempts = 1
         costs = [response_cost(resp)]
-        if resp.choices[0].finish_reason == "length":
+        choice = _choice_or_raise(resp, costs)
+        if choice.finish_reason == "length":
             resp = self._complete(messages, budget * TRUNCATION_RETRY_FACTOR)
             attempts = 2
             costs.append(response_cost(resp))
-        choice = resp.choices[0]
+            choice = _choice_or_raise(resp, costs)
         truncated = choice.finish_reason == "length"
         raw = normalize_citations((choice.message.content or "").strip())
         # A cut-off reply can't have been cut inside a valid verdict line (the whole line

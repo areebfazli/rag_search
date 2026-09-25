@@ -43,6 +43,7 @@ from ``metadata()``; error messages name the env var, never its value.
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Literal
@@ -372,6 +373,75 @@ def response_provider(resp: object) -> str | None:
     """The upstream provider OpenRouter actually routed to (top-level `provider`)."""
     p = getattr(resp, "provider", None)
     return p if isinstance(p, str) else None
+
+
+class EmptyCompletionError(RuntimeError):
+    """An HTTP 200 chat completion that carries no usable choice: ``choices`` null or
+    empty, a choice without a message, or ``finish_reason: "error"``. OpenRouter reports
+    upstream failures that happen after it has accepted a request inside the body, not
+    in the status (docs: openrouter.ai/docs/api-reference/errors), and the openai SDK
+    builds the response without validation, so an unguarded ``resp.choices[0]`` would
+    raise a bare TypeError. Transient: callers retry it like a per-minute 429.
+
+    The message carries the provider's error code/message from the body (truncated,
+    anything key-shaped redacted), so a daily-cap error stays recognisable.
+    ``cost_usd`` is what the failed call(s) reported, None if unknown."""
+
+    def __init__(self, message: str, *, code: object = None, cost_usd: float | None = None):
+        super().__init__(message)
+        self.code = code
+        self.cost_usd = cost_usd
+
+
+_KEY_SHAPED = re.compile(r"\b(?:sk|gsk|key)[-_][A-Za-z0-9_-]{8,}", re.IGNORECASE)
+
+
+def _field(obj: object, name: str) -> object:
+    if isinstance(obj, Mapping):
+        return obj.get(name)
+    return getattr(obj, name, None)
+
+
+def _body_error(resp: object) -> tuple[object, str]:
+    """(code, one-line description) of the `error` object in a completion body, if any."""
+    err = getattr(resp, "error", None)
+    if err is None:
+        err = (getattr(resp, "model_extra", None) or {}).get("error")
+    if err is None:
+        return None, ""
+    if isinstance(err, str):
+        return None, err
+    code, msg = _field(err, "code"), _field(err, "message")
+    meta = _field(err, "metadata")
+    etype = _field(meta, "error_type") if meta is not None else None
+    parts = [f"code {code}" if code is not None else "", str(msg) if msg else "",
+             f"({etype})" if etype else ""]
+    return code, " ".join(p for p in parts if p)
+
+
+def completion_choice(resp: object):
+    """The first choice of a chat completion, or EmptyCompletionError if there is none
+    usable. Never reads or echoes a credential: only the response body is inspected."""
+    choices = getattr(resp, "choices", None)
+    first = choices[0] if choices else None
+    message = getattr(first, "message", None) if first is not None else None
+    finish = getattr(first, "finish_reason", None) if first is not None else None
+    if first is not None and message is not None and finish != "error":
+        return first
+    code, detail = _body_error(resp)
+    if choices is None:
+        what = "choices: null"
+    elif not choices:
+        what = "choices: []"
+    elif message is None:
+        what = "choice without a message"
+    else:
+        what = 'finish_reason "error"'
+    detail = _KEY_SHAPED.sub("[redacted]", detail)[:300]
+    raise EmptyCompletionError(
+        f"LLM backend returned no completion ({what})" + (f": {detail}" if detail else ""),
+        code=code,
+    )
 
 
 def cost_upper_bound(prompt_tokens: int | None, completion_tokens: int | None) -> float:

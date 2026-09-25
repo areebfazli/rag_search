@@ -67,6 +67,7 @@ from types import SimpleNamespace
 from openai import RateLimitError
 
 from app.core.config import settings
+from app.core.llm_endpoints import EmptyCompletionError
 from app.core.interfaces import SearchHit, hit_passage
 from app.core.llm_endpoints import (
     base_model,
@@ -343,16 +344,19 @@ def _record(row: dict) -> dict:
 def _judge_once(call: Callable[[], dict], sleep: Callable[[float], None], log: Callable[[str], None]) -> dict:
     """One judge call with rag_eval's rate-limit policy: a daily-cap 429 raises
     DailyCapReached at once (retrying can't clear it); a per-minute 429 waits a full
-    window and retries the SAME call, up to RATE_LIMIT_RETRIES, then propagates."""
+    window and retries the SAME call, up to RATE_LIMIT_RETRIES, then propagates. An
+    HTTP 200 with no completion (EmptyCompletionError) is treated like a per-minute 429,
+    or as the daily cap if its body names it."""
     for attempt in range(RATE_LIMIT_RETRIES + 1):
         try:
             return call()
-        except RateLimitError as e:
+        except (RateLimitError, EmptyCompletionError) as e:
             if rag_eval._is_daily_cap(e):
                 raise DailyCapReached(f"provider daily cap reached: {str(e)[:200]}") from e
             if attempt == RATE_LIMIT_RETRIES:
                 raise
-            log(f"    rate-limited; waiting {RATE_LIMIT_WAIT_S:.0f}s "
+            why = "rate-limited" if isinstance(e, RateLimitError) else "empty completion"
+            log(f"    {why}; waiting {RATE_LIMIT_WAIT_S:.0f}s "
                 f"(retry {attempt + 1}/{RATE_LIMIT_RETRIES})")
             sleep(RATE_LIMIT_WAIT_S)
     raise AssertionError("unreachable")

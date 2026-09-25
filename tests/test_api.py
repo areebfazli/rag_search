@@ -96,3 +96,26 @@ def test_trust_proxy_too_few_entries_falls_back_to_peer(monkeypatch):
 def test_trust_proxy_without_header_falls_back_to_peer(monkeypatch):
     monkeypatch.setattr(settings, "trust_proxy", True)
     assert _client_ip(make_request("10.0.0.1")) == "10.0.0.1"
+
+
+def test_answer_returns_502_when_the_llm_returns_no_completion(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from app.api import main
+    from app.core.llm_endpoints import EmptyCompletionError
+    from app.core.interfaces import SearchHit
+
+    class _Service:
+        def retrieve(self, q, mode, top_k):
+            return [SearchHit("d1", 1.0, "text")]
+
+    class _Generator:
+        def generate(self, q, hits):
+            raise EmptyCompletionError("LLM backend returned no completion (choices: null)")
+
+    monkeypatch.setattr(main, "resolve_endpoint", lambda role: None)
+    monkeypatch.setattr(main, "get_service", lambda: _Service())
+    monkeypatch.setattr(main, "get_generator", lambda: _Generator())
+    r = TestClient(main.app).get("/answer", params={"q": "does it?"})
+    assert r.status_code == 502
+    assert r.json()["detail"] == "LLM backend returned no completion"

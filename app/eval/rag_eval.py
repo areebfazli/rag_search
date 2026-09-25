@@ -103,9 +103,11 @@ from app.core.config import Settings, settings
 from app.core.llm_endpoints import (
     OPENROUTER_BASE_URL,
     PAID_MAX_PRICE_USD_PER_M,
+    EmptyCompletionError,
     LLMEndpoint,
     SpendPolicyError,
     build_client,
+    completion_choice,
     cost_upper_bound,
     describe_with_ignored,
     model_id,
@@ -379,7 +381,7 @@ def judge(client: OpenAI, model: str, q: str, contexts: list[str], answer: str) 
         temperature=0.0,
         max_tokens=120,
     )
-    d = _parse(resp.choices[0].message.content or "")
+    d = _parse(completion_choice(resp).message.content or "")
     return {
         "answered": _as_bool(d.get("answered", False)),
         "faithfulness": _as_score(d.get("faithfulness", 0.0)),
@@ -1247,32 +1249,45 @@ def main(argv: Sequence[str] = ()) -> None:
         q, hits, label = queries[qid], retrieved[qid], labels[qid]
 
         def with_rate_limit_retries(call, n=n, qid=qid):
+            # An HTTP 200 with no completion (EmptyCompletionError: OpenRouter's upstream
+            # failed after accepting the request) is as transient as a per-minute 429,
+            # and takes the same path — unless its body names the daily cap.
             for attempt in range(RATE_LIMIT_RETRIES + 1):
                 try:
                     return call()
-                except RateLimitError as e:
+                except (RateLimitError, EmptyCompletionError) as e:
                     if _is_daily_cap(e):
                         raise DailyTokenBudgetExhausted(str(e)) from e
                     if attempt == RATE_LIMIT_RETRIES:
                         raise
+                    why = "rate-limited" if isinstance(e, RateLimitError) else "empty completion"
                     print(
-                        f"  [{n}/{len(qids)}] q{qid:>4} rate-limited; waiting "
+                        f"  [{n}/{len(qids)}] q{qid:>4} {why}; waiting "
                         f"{RATE_LIMIT_WAIT_S:.0f}s (retry {attempt + 1}/{RATE_LIMIT_RETRIES})",
                         flush=True,
                     )
                     time.sleep(RATE_LIMIT_WAIT_S)
 
-        try:
-            # Checked BEFORE the call: the next query's worst case must fit under the
-            # ceiling, so the ceiling holds even if this query is the expensive one.
+        def generate_once(q=q, hits=hits):
+            # Checked BEFORE every attempt, retries included: the next attempt's worst
+            # case must fit under the ceiling, so the ceiling holds even if this query
+            # is the expensive one. A failed attempt's cost is counted (unknown = the
+            # worst case on a paid generator) — it may have been billed.
             if spent() + worst_q > ceiling:
                 raise SpendCeilingReached(
                     f"spent ${spent():.4f} so far and the next query could cost up to "
                     f"${worst_q:.4f}, over SSR_RAG_MAX_SPEND_USD=${ceiling:.2f}"
                 )
-            # Generation and judging retry SEPARATELY: a judge 429 must not re-run (and
-            # re-pay for) a generation that already succeeded.
-            ans = with_rate_limit_retries(lambda q=q, hits=hits: generator.generate(q, hits))
+            try:
+                return generator.generate(q, hits)
+            except EmptyCompletionError as e:
+                account(e.cost_usd)
+                raise
+
+        try:
+            # Generation and judging retry SEPARATELY: a judge 429 or empty completion
+            # must not re-run (and re-pay for) a generation that already succeeded.
+            ans = with_rate_limit_retries(generate_once)
             account(getattr(ans, "cost_usd", None))
             if spent() > ceiling:
                 raise SpendCeilingReached(

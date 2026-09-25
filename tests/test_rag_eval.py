@@ -6,13 +6,19 @@ raising. That is precisely what happened with ``bool("false")``.
 """
 import json
 import subprocess
+from types import SimpleNamespace
 
 import httpx
 import openai
 import pytest
 
 from app.core.config import Settings, settings
-from app.core.llm_endpoints import FREE_ROUTING, PAID_ROUTING, LLMEndpoint
+from app.core.llm_endpoints import (
+    FREE_ROUTING,
+    PAID_ROUTING,
+    EmptyCompletionError,
+    LLMEndpoint,
+)
 from app.core.interfaces import Answer, SearchHit
 from app.eval import rag_eval
 from app.eval.rag_eval import (
@@ -1191,3 +1197,68 @@ def test_quota_check_is_off_by_default(rate_limited, monkeypatch):
     setup("generate", None, [])
     monkeypatch.setattr(rag_eval, "fetch_key_info", lambda key: pytest.fail("called /key"))
     rag_eval.main()
+
+
+# --- HTTP 200 with no completion: transient, retried like a per-minute 429 -----------------
+
+
+def _empty(detail="code 502 Provider returned error"):
+    return EmptyCompletionError(f"LLM backend returned no completion (choices: null): {detail}")
+
+
+@pytest.mark.parametrize("choices", [None, []])
+def test_judge_raises_empty_completion_on_null_or_empty_choices(choices):
+    resp = SimpleNamespace(choices=choices, error={"message": "upstream", "code": 502})
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(
+        create=lambda **kw: resp)))
+    with pytest.raises(EmptyCompletionError, match="upstream"):
+        rag_eval.judge(client, "m", "q", ["ctx"], "answer")
+
+
+@pytest.mark.parametrize("source", ["generate", "judge"])
+def test_empty_completion_retries_the_same_query(rate_limited, source):
+    setup, sleeps, out = rate_limited
+    fails = rag_eval.RATE_LIMIT_RETRIES - 1
+    gen, fake_judge = setup(source, "claim two", [_empty()] * fails)
+    rag_eval.main()
+    assert sleeps.count(WAIT_S) == fails
+    # A judge-side empty completion retries only the judge: the finished generation
+    # is not re-run (or re-paid for).
+    gen_tries = [q for q, _ in gen.calls].count("claim two")
+    assert gen_tries == (fails + 1 if source == "generate" else 1)
+    assert fake_judge.queries.count("claim two") == (fails + 1 if source == "judge" else 1)
+    blob = json.loads((out / "rag.json").read_text())
+    assert blob["skipped"] == 0 and blob["n"] == len(QUERIES)
+
+
+@pytest.mark.parametrize("source", ["generate", "judge"])
+def test_empty_completion_skips_uncheckpointed_once_retries_are_exhausted(
+    rate_limited, tmp_path, source
+):
+    setup, sleeps, out = rate_limited
+    attempts = rag_eval.RATE_LIMIT_RETRIES + 1
+    gen, fake_judge = setup(source, "claim two", [_empty()] * (attempts + 1))
+    rag_eval.main()  # survives: the row is skipped
+    assert sleeps.count(WAIT_S) == rag_eval.RATE_LIMIT_RETRIES
+    if source == "judge":
+        assert [q for q, _ in gen.calls].count("claim two") == 1
+        assert fake_judge.queries.count("claim two") == attempts
+    else:
+        assert [q for q, _ in gen.calls].count("claim two") == attempts
+    blob = json.loads((out / "rag.json").read_text())
+    assert blob["skipped"] == 1 and blob["skip_reasons"] == {"EmptyCompletionError": 1}
+    (ckpt,) = _checkpoint_files(tmp_path)
+    assert "2" not in json.loads(ckpt.read_text())["rows"]  # a re-run retries it
+    gen2, _ = setup("generate", None, [])
+    rag_eval.main()
+    assert [q for q, _ in gen2.calls] == ["claim two"]
+
+
+def test_empty_completion_naming_the_daily_cap_stops_the_run(rate_limited):
+    setup, sleeps, out = rate_limited
+    gen, _ = setup("judge", "claim three",
+                   [_empty("code 429 Rate limit exceeded: free-models-per-day")])
+    with pytest.raises(SystemExit) as exc:
+        rag_eval.main()
+    assert "daily cap is exhausted" in str(exc.value.code)
+    assert WAIT_S not in sleeps and not out.exists()

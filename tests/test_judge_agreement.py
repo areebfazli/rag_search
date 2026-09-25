@@ -10,7 +10,7 @@ import numpy as np
 import openai
 import pytest
 
-from app.core.llm_endpoints import base_model, resolve_endpoint
+from app.core.llm_endpoints import EmptyCompletionError, base_model, resolve_endpoint
 
 from app.core.config import settings
 from app.core.interfaces import SearchHit, hit_passage
@@ -573,3 +573,41 @@ def test_checkpoint_signature_separates_providers_and_modes():
     b = ja._signature("sha", Config(), ["1"], ["openrouter:qwen/qwen3.8-27b:free"])
     c = ja._signature("sha", Config(compare_n=1), ["1"], ["groq:qwen/qwen3.8-27b"])
     assert len({a, b, c}) == 3
+
+
+def _empty_completion():
+    return EmptyCompletionError("LLM backend returned no completion (choices: null)")
+
+
+class _NullChoicesClient(_FakeJudgeClient):
+    """Returns a body with choices=None for the first `n` calls, then the default."""
+
+    def __init__(self, n):
+        super().__init__([])
+        self.n = n
+
+    def _create(self, **kw):
+        self.calls.append(kw)
+        if len(self.calls) <= self.n:
+            return SimpleNamespace(choices=None, error={"message": "upstream", "code": 502})
+        return SimpleNamespace(choices=[SimpleNamespace(
+            message=SimpleNamespace(content=self.default))])
+
+
+def test_empty_completion_waits_and_retries_the_same_call():
+    sleeps = []
+    client = _NullChoicesClient(1)
+    records, _ = run_repeats(
+        client, [_row("1")], {"1": "claim 1"}, {"1": rebuild_contexts(["d1", "d2"], BY_ID)},
+        Config(k=1, temperatures=(0.0,)), sleep=sleeps.append, log=lambda _: None,
+    )
+    assert all("error" not in x for x in records["1"]["repeats"]["0.0"])
+    assert sleeps.count(ja.RATE_LIMIT_WAIT_S) == 1 and len(client.calls) == 2
+
+
+def test_empty_completion_counts_as_an_api_error_once_retries_are_exhausted():
+    client = _FakeJudgeClient([_empty_completion()] * (ja.RATE_LIMIT_RETRIES + 1))
+    records, _ = _run([_row("1")], client, cfg=Config(k=1, temperatures=(0.0,)))
+    (rep,) = records["1"]["repeats"]["0.0"]
+    assert rep == {"error": "EmptyCompletionError", "error_kind": "api"}
+    assert len(client.calls) == ja.RATE_LIMIT_RETRIES + 1

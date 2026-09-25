@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.core.interfaces import SearchHit, hit_passage
+from app.core.llm_endpoints import EmptyCompletionError, completion_choice
 from app.generate.generator import (
     TRUNCATION_NOTE,
     LLMGenerator,
@@ -306,3 +307,84 @@ def test_generate_normalizes_fullwidth_citations_and_still_parses_verdict():
 def test_split_verdict_tolerates_trailing_citations(tail, verdict):
     body, v = split_verdict(f"The context refutes it [1].\n{tail}")
     assert v == verdict and body == "The context refutes it [1]."
+
+
+# --- HTTP 200 with no completion (OpenRouter reports upstream failures in the body) --------
+
+UPSTREAM_ERROR = {"message": "Provider returned error", "code": 502,
+                  "metadata": {"error_type": "provider_unavailable"}}
+
+
+class _EmptyCompletions:
+    """Returns the scripted response objects in order."""
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = 0
+
+    def create(self, **kw):
+        r = self.responses[min(self.calls, len(self.responses) - 1)]
+        self.calls += 1
+        return r
+
+
+def _gen_with(responses):
+    gen = _generator("unused")
+    gen.client = SimpleNamespace(chat=SimpleNamespace(completions=_EmptyCompletions(responses)))
+    return gen
+
+
+@pytest.mark.parametrize("choices", [None, []])
+def test_generate_raises_empty_completion_on_null_or_empty_choices(choices):
+    gen = _gen_with([SimpleNamespace(choices=choices, error=UPSTREAM_ERROR, usage=None)])
+    with pytest.raises(EmptyCompletionError) as exc:
+        gen.generate("claim", _hits(2))
+    assert not isinstance(exc.value, TypeError)
+    msg = str(exc.value)
+    assert "no completion" in msg and "Provider returned error" in msg and "502" in msg
+    assert exc.value.code == 502
+    assert gen.client.chat.completions.calls == 1  # no hidden retry inside the generator
+
+
+def test_generate_raises_when_the_truncation_retry_comes_back_empty():
+    first = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content=""), finish_reason="length")],
+        usage=SimpleNamespace(cost=0.001),
+    )
+    empty = SimpleNamespace(choices=None, usage=SimpleNamespace(cost=0.0))
+    with pytest.raises(EmptyCompletionError) as exc:
+        _gen_with([first, empty]).generate("claim", _hits(2))
+    assert exc.value.cost_usd == pytest.approx(0.001)  # the billed first attempt is reported
+
+
+def test_completion_choice_reads_the_error_from_model_extra_and_redacts_keys():
+    resp = SimpleNamespace(choices=None, model_extra={"error": {
+        "message": "bad key sk-or-v1-abcdef0123456789 rejected", "code": 401}})
+    with pytest.raises(EmptyCompletionError) as exc:
+        completion_choice(resp)
+    assert "abcdef0123456789" not in str(exc.value) and "[redacted]" in str(exc.value)
+
+
+def test_completion_choice_rejects_error_finish_and_missing_message():
+    err = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=""),
+                                                   finish_reason="error")])
+    with pytest.raises(EmptyCompletionError, match="finish_reason"):
+        completion_choice(err)
+    with pytest.raises(EmptyCompletionError, match="without a message"):
+        completion_choice(SimpleNamespace(choices=[SimpleNamespace(message=None)]))
+    ok = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="x"))])
+    assert completion_choice(ok) is ok.choices[0]
+
+
+def test_completion_choice_on_a_real_sdk_object_with_null_choices():
+    # The openai SDK builds responses WITHOUT validation (construct), so choices=None
+    # reaches us intact — the TypeError seen on q1204.
+    from openai._models import construct_type
+    from openai.types.chat import ChatCompletion
+
+    resp = construct_type(type_=ChatCompletion, value={
+        "id": "x", "object": "chat.completion", "created": 0, "model": "m",
+        "choices": None, "error": UPSTREAM_ERROR,
+    })
+    with pytest.raises(EmptyCompletionError, match="Provider returned error"):
+        completion_choice(resp)
