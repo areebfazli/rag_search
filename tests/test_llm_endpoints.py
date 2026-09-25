@@ -9,7 +9,7 @@ from app.core.config import Settings
 from app.core.llm_endpoints import (
     FREE_ROUTING,
     OPENROUTER_BASE_URL,
-    PAID_ROUTING,
+    PAID_ROUTES,
     EndpointConfigError,
     GuardedClient,
     LLMEndpoint,
@@ -19,6 +19,7 @@ from app.core.llm_endpoints import (
     build_client,
     enforce_spend_policy,
     ignored_settings,
+    paid_routing,
     resolve_endpoint,
 )
 from app.core.interfaces import SearchHit
@@ -29,7 +30,22 @@ GROQ_KEY = "gsk_FAKE-groq-1111"
 ALLOW = ("openai/gpt-oss-120b",)
 PAID = "openai/gpt-oss-120b"
 FREE_GEN = "inclusionai/ling-3.0-flash-sante:free"
-PAID_ONLY_FIELDS = {"order", "quantizations"}  # routing fields only PAID_ROUTING carries
+LUNA = "openai/gpt-6-luna"
+PAID_ONLY_FIELDS = {"order", "quantizations"}  # routing fields only paid routing carries
+# gpt-oss-120b's routing exactly as the single hard-coded PAID_ROUTING had it before the
+# per-model table (same keys, same order, same values), so its runs stay comparable.
+GPT_OSS_ROUTING = {
+    "order": ["akashml/bf16", "deepinfra/bf16"],
+    "allow_fallbacks": False,
+    "quantizations": ["bf16"],
+    "max_price": {"prompt": 0.03, "completion": 0.17},
+}
+LUNA_ROUTING = {
+    "order": ["openai"],
+    "allow_fallbacks": False,
+    "max_price": {"prompt": 0.10, "completion": 0.50},
+}
+PAID_ROUTING = paid_routing(PAID)
 
 
 def _settings(**kw) -> Settings:
@@ -102,7 +118,7 @@ def test_generator_id_gets_free_suffix_unless_allowlisted():
 
 def test_paid_gpt_oss_still_resolves_with_pinned_routing_when_configured():
     gen = resolve_endpoint("generator", _settings(openrouter_llm_model=PAID))
-    assert (gen.model, gen.paid, gen.allowlist) == (PAID, True, ALLOW)
+    assert (gen.model, gen.paid, gen.allowlist) == (PAID, True, (PAID, LUNA))
     assert gen.extra_body() == {"provider": PAID_ROUTING}
     assert "(paid)" in gen.describe()
     gen.check()  # passes the spend policy only because of the allowlist + PAID_ROUTING
@@ -279,7 +295,12 @@ def test_response_accounting_helpers():
     resp = _FakeOpenAI(cost=0.00012).chat.completions.create(model="m", messages=[])
     assert le.response_cost(resp) == pytest.approx(0.00012) and le.response_provider(resp) == "AkashML"
     assert le.response_cost(SimpleNamespace(usage=None)) is None
-    assert le.cost_upper_bound(1_000_000, 1_000_000) == pytest.approx(0.03 + 0.17)
+    assert le.cost_upper_bound(1_000_000, 1_000_000, PAID) == pytest.approx(0.03 + 0.17)
+    # Luna bills its prompt up to the $0.125/M cache-write rate (above the $0.10 filter).
+    assert le.cost_upper_bound(1_000_000, 1_000_000, LUNA) == pytest.approx(0.125 + 0.50)
+    assert le.paid_bill_rate(PAID) == le.paid_max_price(PAID)  # gpt-oss: bound == caps
+    with pytest.raises(PaidModelRefused, match="routing table"):
+        le.cost_upper_bound(1, 1, "openai/gpt-4o")
 
 
 # --- the generator on OpenRouter ------------------------------------------------------------
@@ -290,7 +311,7 @@ def _hits(n):
 
 
 def _or_generator(monkeypatch, model=PAID, **fake_kw):
-    monkeypatch.setattr(le.settings, "openrouter_paid_model_allowlist", ALLOW)
+    monkeypatch.setattr(le.settings, "openrouter_paid_model_allowlist", (PAID, LUNA))
     ep = resolve_endpoint("generator", _settings(openrouter_llm_model=model))
     gen = LLMGenerator(endpoint=ep, reasoning_effort="auto")
     fake = _FakeOpenAI(**fake_kw)
@@ -361,3 +382,109 @@ def test_generator_refuses_a_disallowed_paid_model_before_any_request():
     with pytest.raises(PaidModelRefused):
         ok.generate("claim", _hits(1))
     assert fake.requests == []
+
+
+# --- the per-model paid routing table ---------------------------------------------------------
+
+
+def test_gpt_oss_routing_is_unchanged_by_the_per_model_table():
+    assert paid_routing(PAID) == GPT_OSS_ROUTING
+    assert list(paid_routing(PAID)) == list(GPT_OSS_ROUTING)  # key order too (JSON bodies)
+    gen = resolve_endpoint("generator", _settings(openrouter_llm_model=PAID))
+    assert gen.extra_body() == {"provider": GPT_OSS_ROUTING}
+    # A fresh copy each time: mutating one request's routing can't loosen the table.
+    paid_routing(PAID)["max_price"]["prompt"] = 9.0
+    assert paid_routing(PAID) == GPT_OSS_ROUTING
+
+
+def test_default_allowlist_is_exactly_gpt_oss_and_luna_and_all_have_routes():
+    allow = Settings.model_fields["openrouter_paid_model_allowlist"].default
+    assert allow == (PAID, LUNA)
+    assert set(allow) <= set(PAID_ROUTES)
+
+
+def test_luna_resolves_as_paid_with_its_own_pinned_routing():
+    gen = resolve_endpoint("generator", _settings(openrouter_llm_model=LUNA))
+    assert (gen.model, gen.paid) == (LUNA, True) and LUNA in gen.allowlist
+    assert gen.extra_body() == {"provider": LUNA_ROUTING}
+    assert "quantizations" not in gen.extra_body()["provider"]  # OpenAI publishes none
+    gen.check()
+    # The Luna id is allowlisted only as a paid generator: never with gpt-oss's routing,
+    # never free routing, never as the judge.
+    for body in ({"provider": GPT_OSS_ROUTING}, {"provider": FREE_ROUTING}):
+        with pytest.raises(SpendPolicyError):
+            gen.check(body=body)
+    with pytest.raises(PaidModelRefused, match="judge must be"):
+        enforce_spend_policy("judge", OPENROUTER_BASE_URL, LUNA, {"provider": LUNA_ROUTING},
+                             (PAID, LUNA))
+    # Not allowlisted -> normalised to a `:free` id like any other, never sent paid.
+    off = resolve_endpoint("generator", _settings(openrouter_llm_model=LUNA,
+                                                  openrouter_paid_model_allowlist=(PAID,)))
+    assert off.model == LUNA + ":free" and not off.paid
+
+
+def test_luna_request_must_carry_exactly_its_routing():
+    allow = (PAID, LUNA)
+    enforce_spend_policy("generator", OPENROUTER_BASE_URL, LUNA, {"provider": LUNA_ROUTING}, allow)
+
+    def body(**kw):
+        return {"provider": {**LUNA_ROUTING, **kw}}
+
+    bad = {
+        "fast tier": body(order=["openai/fast"]),
+        "flex tier": body(order=["openai/flex"]),
+        "azure fallback": body(order=["openai", "azure"]),
+        "fallbacks on": body(allow_fallbacks=True),
+        "prompt over cap": body(max_price={"prompt": 0.11, "completion": 0.50}),
+        "completion over cap": body(max_price={"prompt": 0.10, "completion": 1.0}),
+        "extra price key": body(max_price={"prompt": 0.1, "completion": 0.5, "request": 1}),
+        "quantization filter": body(quantizations=["bf16"]),
+        "sort": body(sort="throughput"),
+        "models fallback": {**body(), "models": [PAID]},
+        "route": {**body(), "route": "fallback"},
+        "plugins": {**body(), "plugins": [{"id": "web"}]},
+    }
+    for label, b in bad.items():
+        with pytest.raises(SpendPolicyError):
+            enforce_spend_policy("generator", OPENROUTER_BASE_URL, LUNA, b, allow)
+            pytest.fail(label)
+
+
+def test_allowlisted_paid_id_without_a_routing_table_entry_is_refused():
+    # Allowlisting alone is not enough: the model also needs its own pinned routing.
+    allow = (PAID, "openai/gpt-6-luna-pro")
+    with pytest.raises(PaidModelRefused, match="routing table"):
+        enforce_spend_policy("generator", OPENROUTER_BASE_URL, "openai/gpt-6-luna-pro",
+                             {"provider": LUNA_ROUTING}, allow)
+    with pytest.raises(PaidModelRefused, match="routing table"):
+        resolve_endpoint("generator", _settings(openrouter_llm_model="openai/gpt-6-luna-pro",
+                                                openrouter_paid_model_allowlist=allow))
+
+
+def test_luna_generator_sends_no_temperature_and_medium_reasoning(monkeypatch):
+    gen, fake = _or_generator(monkeypatch, model=LUNA, cost=0.0004, provider="OpenAI",
+                              content="Refuted [1].\nVerdict: REFUTED")
+    ans = gen.generate("claim", _hits(2))
+    req = fake.requests[0]
+    assert "temperature" not in req
+    assert req["extra_body"] == {"reasoning": {"effort": "medium"}, "provider": LUNA_ROUTING}
+    assert req["max_tokens"] == le.settings.llm_max_completion_tokens
+    assert ans.verdict == "REFUTED" and ans.provider == "OpenAI"
+    assert ans.cost_usd == pytest.approx(0.0004)
+
+
+def test_luna_truncation_retry_keeps_its_params(monkeypatch):
+    gen, fake = _or_generator(monkeypatch, model=LUNA, cost=0.001, finish="length")
+    ans = gen.generate("claim", _hits(2))
+    budget = le.settings.llm_max_completion_tokens
+    assert [r["max_tokens"] for r in fake.requests] == [budget, 2 * budget]
+    assert all("temperature" not in r for r in fake.requests)
+    assert all(r["extra_body"]["provider"] == LUNA_ROUTING for r in fake.requests)
+    assert ans.attempts == 2 and ans.cost_usd == pytest.approx(0.002)
+
+
+@pytest.mark.parametrize("model", [PAID, FREE_GEN])
+def test_gpt_oss_and_ling_still_get_temperature(monkeypatch, model):
+    gen, fake = _or_generator(monkeypatch, model=model, cost=0)
+    gen.generate("claim", _hits(1))
+    assert fake.requests[0]["temperature"] == 0.1

@@ -100,9 +100,11 @@ class Settings(BaseSettings):
     # reasoning tokens per claim on a 2026-09-24 smoke test), and `reasoning.effort=low`
     # did not shorten it, so llm_reasoning_effort="auto" sends it nothing; the 2048-token
     # budget + one 2x retry below absorbs the long tail (see llm_max_completion_tokens).
-    # The paid path is still available: SSR_OPENROUTER_LLM_MODEL=openai/gpt-oss-120b (the
-    # model the earlier committed numbers were generated with) is allowlisted, and is always
-    # sent with the pinned, price-capped, no-fallback PAID_ROUTING (~$0.0003/query).
+    # Paid paths are still available (opt-in, generator only): SSR_OPENROUTER_LLM_MODEL=
+    # openai/gpt-oss-120b (the model the earlier committed numbers were generated with,
+    # ~$0.0003/query) or openai/gpt-6-luna are allowlisted, and each is always sent with
+    # its own pinned, price-capped, no-fallback entry in llm_endpoints.PAID_ROUTES. A run
+    # with a non-default generator or judge is never canonical (rag_eval.output_dir).
     openrouter_llm_model: str = "inclusionai/ling-3.0-flash-sante:free"
     # Judge: must be a `:free` id (appended if missing); a paid judge is refused. Free
     # tier: 20 req/min and, with >= $10 credits ever bought, 1,000 req/day account-wide.
@@ -111,13 +113,15 @@ class Settings(BaseSettings):
     # previous qwen3.8-27b judge on answered rows; qwen3.8-27b:free was 0/4 (upstream 429s).
     # Backup: inclusionai/ling-3.0-flash-sante:free (also 22/22, different family).
     openrouter_judge_model: str = "nvidia/nemotron-3-ultra-550b-a55b:free"
-    # The ONLY paid model ids that may ever be sent to OpenRouter (generator role only).
-    # A configured generator id outside it is normalised to its `:free` variant; any other
-    # non-`:free` id reaching a request is refused before any network call.
-    openrouter_paid_model_allowlist: tuple[str, ...] = ("openai/gpt-oss-120b",)
+    # The ONLY paid model ids that may ever be sent to OpenRouter (generator role only),
+    # and each must also have a routing entry in llm_endpoints.PAID_ROUTES (an id with
+    # none is refused). A configured generator id outside it is normalised to its `:free`
+    # variant; any other non-`:free` id reaching a request is refused before any network
+    # call.
+    openrouter_paid_model_allowlist: tuple[str, ...] = ("openai/gpt-oss-120b", "openai/gpt-6-luna")
     # Hard per-run spend ceiling for rag_eval (USD, OpenRouter-reported cost; unreported
-    # cost counts at the max_price caps). The run stops, writing nothing, before a query
-    # that could take the total past it.
+    # cost counts at the generator's own max_price caps). The run stops, writing nothing,
+    # before a query that could take the total past it.
     rag_max_spend_usd: float = Field(default=0.10, ge=0.0)
 
     # --- LLM generation, "groq" provider (generic OpenAI-compatible endpoint) ---
@@ -140,7 +144,8 @@ class Settings(BaseSettings):
     # Reasoning effort, sent only when it resolves to a value — as `reasoning_effort` on
     # the groq provider, and as OpenRouter's unified `reasoning: {"effort": ...}` object
     # on openrouter (docs: openrouter.ai/docs/use-cases/reasoning-tokens):
-    #   "auto"     -> "medium" for gpt-oss models (Groq and Ollama both accept it), and NOT
+    #   "auto"     -> "medium" for gpt-oss models (Groq and Ollama both accept it) and for
+    #                 openai/gpt-6-luna (a reasoning model; OpenRouter lists `reasoning`), NOT
     #                 sent for any other model — a non-reasoning model can reject the
     #                 unknown parameter with a 400, so swapping SSR_LLM_MODEL stays safe.
     #                 The default free Ling generator gets nothing: it reasons on its own.

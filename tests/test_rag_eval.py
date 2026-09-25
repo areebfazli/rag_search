@@ -15,9 +15,9 @@ import pytest
 from app.core.config import Settings, settings
 from app.core.llm_endpoints import (
     FREE_ROUTING,
-    PAID_ROUTING,
     EmptyCompletionError,
     LLMEndpoint,
+    paid_routing,
 )
 from app.core.interfaces import Answer, SearchHit
 from app.eval import rag_eval
@@ -333,11 +333,13 @@ class FakeJudge:
 
 
 DEFAULT_GEN_MODEL = Settings.model_fields["openrouter_llm_model"].default
+DEFAULT_JUDGE_MODEL = Settings.model_fields["openrouter_judge_model"].default
 # Env the harness reads; cleared in every main() test so a developer's shell can't leak in.
 RAG_ENV = (
     "SSR_RAG_N", "SSR_RAG_DATASET", "SSR_EVAL_LIMIT", "SSR_EVAL_REFRESH", "SSR_RAG_CHECK_QUOTA",
 )
 PAID_GEN_MODEL = "openai/gpt-oss-120b"
+LUNA = "openai/gpt-6-luna"
 
 
 def _patch_main(
@@ -351,7 +353,8 @@ def _patch_main(
     monkeypatch.setattr(settings, "llm_provider", "openrouter")
     monkeypatch.setattr(settings, "judge_provider", "openrouter")
     monkeypatch.setattr(settings, "openrouter_llm_model", gen_model)
-    monkeypatch.setattr(settings, "openrouter_paid_model_allowlist", (PAID_GEN_MODEL,))
+    monkeypatch.setattr(settings, "openrouter_judge_model", DEFAULT_JUDGE_MODEL)
+    monkeypatch.setattr(settings, "openrouter_paid_model_allowlist", (PAID_GEN_MODEL, LUNA))
     monkeypatch.setattr(settings, "openrouter_api_key", FAKE_OPENROUTER_KEY)
     monkeypatch.setattr(rag_eval, "OUT", out)
     # Checkpoints and non-canonical runs stay under tmp_path, never the real data/.
@@ -375,10 +378,20 @@ def _patch_main(
     return fake_judge
 
 
+def _written_dir(tmp_path, gen_model=DEFAULT_GEN_MODEL):
+    """Where main() wrote: OUT (= tmp_path) for the default models, else the single
+    non-canonical run dir — a non-default generator must never write OUT."""
+    if gen_model == DEFAULT_GEN_MODEL:
+        return tmp_path
+    assert not (tmp_path / "rag.json").exists()
+    (run_dir,) = (tmp_path / "runs").iterdir()
+    return run_dir
+
+
 def _run_main(tmp_path, monkeypatch, mode="hybrid", gen_model=DEFAULT_GEN_MODEL):
     fake_judge = _patch_main(tmp_path, monkeypatch, tmp_path, mode=mode, gen_model=gen_model)
     rag_eval.main()
-    return json.loads((tmp_path / "rag.json").read_text()), fake_judge
+    return json.loads((_written_dir(tmp_path, gen_model) / "rag.json").read_text()), fake_judge
 
 
 @pytest.fixture()
@@ -390,7 +403,7 @@ def rag_run(tmp_path, monkeypatch):
 @pytest.fixture()
 def paid_rag_run(tmp_path, monkeypatch):
     blob, fake_judge = _run_main(tmp_path, monkeypatch, gen_model=PAID_GEN_MODEL)
-    return tmp_path, blob, fake_judge
+    return _written_dir(tmp_path, PAID_GEN_MODEL), blob, fake_judge
 
 
 def test_rag_json_keeps_every_scored_query(rag_run):
@@ -765,7 +778,7 @@ def test_rag_json_records_providers_and_cost_but_never_the_key(paid_rag_run):
     assert run["generator_provider"] == "openrouter" and run["judge_provider"] == "openrouter"
     assert run["generator_base_url"] == run["judge_base_url"] == "https://openrouter.ai/api/v1"
     assert run["generator_model"] == PAID_GEN_MODEL and run["judge_model"].endswith(":free")
-    assert run["generator_extra_body"] == {"provider": PAID_ROUTING}
+    assert run["generator_extra_body"] == {"provider": paid_routing(PAID_GEN_MODEL)}
     assert run["generator_reasoning_param"] == "reasoning.effort"
     assert blob["cost"]["generator_paid"] is True
     # q5's generator is a plain Answer (no cost side channel): counted at the worst case.
@@ -822,7 +835,7 @@ def test_unreported_paid_cost_counts_at_the_worst_case(tmp_path, monkeypatch):
 
     _patch_main(tmp_path, monkeypatch, tmp_path, generator=Unreported, gen_model=PAID_GEN_MODEL)
     rag_eval.main()
-    cost = json.loads((tmp_path / "rag.json").read_text())["cost"]
+    cost = json.loads((_written_dir(tmp_path, PAID_GEN_MODEL) / "rag.json").read_text())["cost"]
     worst = rag_eval.worst_case_generation_cost(rag_eval.resolve_endpoint("generator"))
     assert cost["reported_usd"] == 0.0 and cost["unreported_paid_generations"] == len(QUERIES)
     assert cost["counted_usd"] == pytest.approx(len(QUERIES) * worst, abs=1e-6)
@@ -1262,3 +1275,113 @@ def test_empty_completion_naming_the_daily_cap_stops_the_run(rate_limited):
         rag_eval.main()
     assert "daily cap is exhausted" in str(exc.value.code)
     assert WAIT_S not in sleeps and not out.exists()
+
+
+# --- non-default models are never canonical; per-model paid caps ----------------------------
+
+
+def _ep(role, model, provider="openrouter"):
+    url = "https://openrouter.ai/api/v1" if provider == "openrouter" else "https://api.groq.com/openai/v1"
+    return LLMEndpoint(role, provider, url, model)
+
+
+DEFAULT_GEN_EP = _ep("generator", DEFAULT_GEN_MODEL)
+DEFAULT_JUDGE_EP = _ep("judge", DEFAULT_JUDGE_MODEL)
+
+
+def test_default_endpoints_are_the_code_defaults_not_the_environment(monkeypatch):
+    monkeypatch.setenv("SSR_OPENROUTER_LLM_MODEL", LUNA)  # e.g. a leftover in the shell
+    monkeypatch.setattr(settings, "openrouter_llm_model", LUNA)
+    assert rag_eval.default_endpoints() == (
+        ("openrouter", DEFAULT_GEN_MODEL), ("openrouter", DEFAULT_JUDGE_MODEL),
+    )
+    assert rag_eval.non_default_roles(DEFAULT_GEN_EP, DEFAULT_JUDGE_EP) == []
+    assert rag_eval.non_default_roles(_ep("generator", LUNA), DEFAULT_JUDGE_EP) == ["generator"]
+    assert rag_eval.non_default_roles(
+        _ep("generator", "openai/gpt-oss-120b", "groq"), _ep("judge", "qwen/qwen3.8-27b", "groq")
+    ) == ["generator", "judge"]
+
+
+def test_output_dir_non_default_models_are_never_canonical(monkeypatch, tmp_path):
+    monkeypatch.setattr(rag_eval, "OUT", tmp_path / "results")
+    monkeypatch.setattr(rag_eval, "RUNS", tmp_path / "runs")
+    ph, test = "abcdef0123456789", rag_eval.CANONICAL_DATASET
+    assert rag_eval.output_dir(test, 0, 300, ph, DEFAULT_GEN_EP, DEFAULT_JUDGE_EP) == (
+        tmp_path / "results", True
+    )
+    luna, canonical = rag_eval.output_dir(test, 0, 300, ph, _ep("generator", LUNA), DEFAULT_JUDGE_EP)
+    assert not canonical
+    assert luna == tmp_path / "runs" / "rag_beir-scifact-test_300_abcdef01_openai-gpt-6-luna"
+    oss, _ = rag_eval.output_dir(test, 0, 300, ph, _ep("generator", PAID_GEN_MODEL), DEFAULT_JUDGE_EP)
+    assert oss.name == "rag_beir-scifact-test_300_abcdef01_openai-gpt-oss-120b"
+    # Another judge alone is non-canonical too, and names itself.
+    judged, canonical = rag_eval.output_dir(
+        test, 0, 300, ph, DEFAULT_GEN_EP, _ep("judge", "qwen/qwen3.8-27b:free")
+    )
+    assert not canonical and judged.parent == tmp_path / "runs"
+    assert judged.name.endswith("_judge-qwen-qwen3-8-27b-free")
+
+
+def test_non_default_generator_on_full_test_split_writes_eval_runs(tmp_path, monkeypatch, capsys):
+    out = tmp_path / "results"
+    _patch_main(tmp_path, monkeypatch, out, gen_model=LUNA)
+    # A committed artifact with a different N: a canonical run would print REPLACES.
+    out.mkdir()
+    (out / "rag.json").write_text(json.dumps({"n": 50, "run": {"n_requested": 50}}))
+    before = (out / "rag.json").read_text()
+    monkeypatch.setenv("SSR_RAG_N", "all")
+    rag_eval.main()
+    assert (out / "rag.json").read_text() == before and sorted(out.iterdir()) == [out / "rag.json"]
+    (run_dir,) = (tmp_path / "runs").iterdir()
+    assert run_dir.name == f"rag_beir-scifact-test_5_{rag_eval.prompt_hash()[:8]}_openai-gpt-6-luna"
+    blob = json.loads((run_dir / "rag.json").read_text())
+    run = blob["run"]
+    assert run["canonical"] is False and run["default_models"] is False
+    assert run["dataset"] == rag_eval.CANONICAL_DATASET and run["n_requested"] == "all"
+    assert run["generator_model"] == LUNA and run["generator_temperature"] is None
+    assert run["generator_reasoning_effort"] == "medium"
+    assert run["generator_extra_body"] == {"provider": paid_routing(LUNA)}
+    printed = capsys.readouterr().out
+    upfront = printed.split("[1/5]")[0]
+    assert "NON-CANONICAL: generator differs from the code defaults" in upfront
+    assert f"generator: openrouter {LUNA} (code default: openrouter {DEFAULT_GEN_MODEL})" in upfront
+    assert "REPLACES" not in printed and "(non-canonical: never writes" in upfront
+
+
+def test_default_models_run_records_temperature_and_stays_canonical(rag_run):
+    path, blob, _ = rag_run
+    assert blob["run"]["canonical"] is True and blob["run"]["default_models"] is True
+    assert blob["run"]["generator_temperature"] == 0.1
+    assert not (path / "runs").exists()
+
+
+def test_estimate_and_worst_case_use_the_generators_own_caps():
+    luna, oss = _ep("generator", LUNA), _ep("generator", PAID_GEN_MODEL)
+    budget = settings.llm_max_completion_tokens
+    p = rag_eval.MAX_GEN_PROMPT_TOKENS
+
+    def worst(pin, pout):
+        return (2 * p * pin + 3 * budget * pout) / 1e6  # both attempts, the retry at 2x
+
+    # Luna's prompt is bounded at its $0.125/M cache-write rate, above the $0.10 filter cap.
+    assert rag_eval.worst_case_generation_cost(luna) == pytest.approx(worst(0.125, 0.50))
+    assert rag_eval.worst_case_generation_cost(oss) == pytest.approx(worst(0.03, 0.17))
+    typical = (rag_eval.EST_GEN_PROMPT_TOKENS * 0.125 + rag_eval.EST_GEN_COMPLETION_TOKENS * 0.50) / 1e6
+    assert rag_eval.typical_generation_cost(luna) == pytest.approx(typical)
+    line = rag_eval._estimate_line(300, luna, DEFAULT_JUDGE_EP, 5.0)
+    assert f"est. ${300 * typical:.4f}" in line
+    assert f"worst case ${300 * worst(0.125, 0.50):.4f}" in line
+    assert f"{LUNA}'s billing bound {{'prompt': 0.125, 'completion': 0.5}}" in line
+    assert "(max_price caps {'prompt': 0.1, 'completion': 0.5})" in line
+    assert "0.03" not in line and "0.17" not in line  # never gpt-oss's caps for Luna
+
+
+def test_luna_checkpoint_signature_differs_from_the_default_generator(monkeypatch):
+    monkeypatch.setattr(rag_eval, "_index_fingerprint", lambda: None)
+    monkeypatch.setattr(settings, "llm_reasoning_effort", "auto")
+    ds = rag_eval.CANONICAL_DATASET
+    ling = rag_eval.signature_fields(ds, 300, DEFAULT_GEN_EP, DEFAULT_JUDGE_EP)
+    luna = rag_eval.signature_fields(ds, 300, _ep("generator", LUNA), DEFAULT_JUDGE_EP)
+    assert ling["generator"]["model"] == DEFAULT_GEN_MODEL and luna["generator"]["model"] == LUNA
+    assert luna["reasoning_effort"] == "medium" and ling["reasoning_effort"] is None
+    assert rag_eval.rag_signature(ling) != rag_eval.rag_signature(luna)

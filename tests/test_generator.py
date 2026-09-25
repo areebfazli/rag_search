@@ -7,6 +7,7 @@ from app.core.llm_endpoints import EmptyCompletionError, completion_choice
 from app.generate.generator import (
     TRUNCATION_NOTE,
     LLMGenerator,
+    generation_temperature,
     map_citations,
     normalize_citations,
     resolve_reasoning_effort,
@@ -257,6 +258,8 @@ def test_empty_truncated_reply_is_never_served_as_an_empty_answer():
         ("openai/gpt-oss-120b", "off", None),
         ("openai/gpt-oss-120b", "High", "high"),  # explicit: sent as-is
         ("some-reasoning-model", "medium", "medium"),
+        ("openai/gpt-6-luna", "auto", "medium"),  # reasoning model: same gating as gpt-oss
+        ("openai/gpt-6-luna", "off", None),
     ],
 )
 def test_resolve_reasoning_effort(model, setting, expected):
@@ -388,3 +391,23 @@ def test_completion_choice_on_a_real_sdk_object_with_null_choices():
     })
     with pytest.raises(EmptyCompletionError, match="Provider returned error"):
         completion_choice(resp)
+
+
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        ("openai/gpt-oss-120b", 0.1),
+        ("inclusionai/ling-3.0-flash-sante:free", 0.1),
+        ("llama-3.3-70b-versatile", 0.1),
+        ("openai/gpt-6-luna", None),  # no `temperature` in its supported_parameters
+    ],
+)
+def test_temperature_is_model_aware(model, expected):
+    assert generation_temperature(model) == expected
+    gen = _generator("Yes [1].", model=model)
+    gen.generate("q", _hits(1))
+    req = gen.client.chat.completions.requests[0]
+    if expected is None:
+        assert "temperature" not in req  # omitted outright, not sent as null
+    else:
+        assert req["temperature"] == expected

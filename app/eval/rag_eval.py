@@ -51,10 +51,13 @@ Sample, dataset and output (env, SSR_ prefix like the rest of the repo):
 * ``SSR_EVAL_LIMIT`` — smoke subset: keep only the first n sampled claims.
 
 Canonical-output rule: eval/results/rag.{md,json} (the committed artifact) is written
-ONLY by a run on the canonical test split with no SSR_EVAL_LIMIT. Every other run — any
-train-split run, any limited run — writes to
-``data/eval_runs/rag_<dataset-slug>_<n>_<prompt-hash8>/`` (gitignored) and can never touch
-eval/results/. A canonical run whose sample size differs from the one recorded in the
+ONLY by a run on the canonical test split, with no SSR_EVAL_LIMIT, whose generator AND
+judge are the code defaults (Settings field defaults for the providers and OpenRouter
+model ids — not .env). Every other run — any train-split run, any limited run, any run
+with another generator or judge (e.g. a paid openai/gpt-6-luna comparison on all 300
+test claims) — writes to ``data/eval_runs/rag_<dataset-slug>_<n>_<prompt-hash8>/``, with
+``_<generator-slug>`` (and ``_judge-<judge-slug>``) appended when the models differ
+(gitignored), says so up front, and can never touch eval/results/. A canonical run whose sample size differs from the one recorded in the
 committed rag.json (e.g. SSR_RAG_N=all replacing the 50-claim artifact) prints a loud
 notice up front and again when it writes: it is replacing the headline with a different N.
 
@@ -102,7 +105,6 @@ from openai import APIStatusError, OpenAI, RateLimitError
 from app.core.config import Settings, settings
 from app.core.llm_endpoints import (
     OPENROUTER_BASE_URL,
-    PAID_MAX_PRICE_USD_PER_M,
     EmptyCompletionError,
     LLMEndpoint,
     SpendPolicyError,
@@ -111,10 +113,16 @@ from app.core.llm_endpoints import (
     cost_upper_bound,
     describe_with_ignored,
     model_id,
+    paid_bill_rate,
+    paid_max_price,
     resolve_endpoint,
 )
 from app.core.interfaces import SearchHit, hit_passage
-from app.generate.generator import LLMGenerator, resolve_reasoning_effort
+from app.generate.generator import (
+    LLMGenerator,
+    generation_temperature,
+    resolve_reasoning_effort,
+)
 from app.generate.prompts import SYSTEM, VERDICTS, build_user_prompt
 from app.ingest.corpus import (
     ClaimLabel,
@@ -233,19 +241,22 @@ def default_throttle_s(gen: LLMEndpoint | None = None, judge: LLMEndpoint | None
 
 def worst_case_generation_cost(gen: LLMEndpoint) -> float:
     """Most one query's generation can cost: both attempts (the truncation retry runs
-    at 2x the budget) at the max_price caps, with a generous prompt. 0 unless paid."""
+    at 2x the budget) at THIS generator's billing bound (llm_endpoints.paid_bill_rate),
+    with a generous prompt. 0 unless paid."""
     if not gen.paid:
         return 0.0
     budget = settings.llm_max_completion_tokens
-    return cost_upper_bound(MAX_GEN_PROMPT_TOKENS, budget) + cost_upper_bound(
-        MAX_GEN_PROMPT_TOKENS, budget * 2
+    return cost_upper_bound(MAX_GEN_PROMPT_TOKENS, budget, gen.model) + cost_upper_bound(
+        MAX_GEN_PROMPT_TOKENS, budget * 2, gen.model
     )
 
 
 def typical_generation_cost(gen: LLMEndpoint) -> float:
+    """A typical query's generation at this generator's billing bound (an upper-bound
+    estimate: the endpoint actually served may bill less)."""
     if not gen.paid:
         return 0.0
-    return cost_upper_bound(EST_GEN_PROMPT_TOKENS, EST_GEN_COMPLETION_TOKENS)
+    return cost_upper_bound(EST_GEN_PROMPT_TOKENS, EST_GEN_COMPLETION_TOKENS, gen.model)
 
 
 OUT = Path("eval/results")  # canonical run only — the committed artifact
@@ -514,6 +525,10 @@ def run_metadata(
             None if effort is None
             else "reasoning.effort" if gen.provider == "openrouter" else "reasoning_effort"
         ),
+        # None when the model is sent no temperature at all (e.g. openai/gpt-6-luna).
+        "generator_temperature": generation_temperature(gen.model),
+        # Both roles are the code defaults: the only runs that may be canonical.
+        "default_models": not non_default_roles(gen, judge_ep),
         "judge_model": judge_ep.model,
         "judge_provider": judge_ep.provider,
         "judge_base_url": judge_ep.base_url,
@@ -751,8 +766,9 @@ def _estimate_line(n: int, gen: LLMEndpoint, judge_ep: LLMEndpoint, throttle: fl
             parts.append(
                 f"  {role}: {n}-{2 * n} paid requests to {ep.model} (1 + the truncation retry "
                 f"when needed); est. ${n * typical_generation_cost(gen):.4f}, worst case "
-                f"${n * worst_case_generation_cost(gen):.4f} at the max_price caps "
-                f"{PAID_MAX_PRICE_USD_PER_M} USD/1M tokens"
+                f"${n * worst_case_generation_cost(gen):.4f} at {ep.model}'s billing bound "
+                f"{paid_bill_rate(ep.model)} USD/1M tokens (max_price caps "
+                f"{paid_max_price(ep.model)})"
             )
         else:
             count = f"{n}" if role == "judge" else f"{n}-{2 * n}"  # generator may retry once
@@ -811,17 +827,74 @@ def _slug(dataset: str) -> str:
     return "".join(c if c.isalnum() else "-" for c in dataset).strip("-")
 
 
-def output_dir(dataset: str, limit: int, n_sample: int, phash: str) -> tuple[Path, bool]:
+def default_endpoints() -> tuple[tuple[str, str], tuple[str, str]]:
+    """((provider, model id), (provider, model id)) for generator and judge under the
+    CODE defaults — Settings field defaults, not the environment or .env (model_construct
+    skips every settings source), resolved exactly as a run would resolve them."""
+    d = Settings.model_construct()
+    return (
+        (d.llm_provider, model_id("generator", d)),
+        (d.judge_provider, model_id("judge", d)),
+    )
+
+
+def non_default_roles(gen: LLMEndpoint, judge_ep: LLMEndpoint) -> list[str]:
+    """The roles whose provider or model differs from the code defaults ([] = defaults).
+    Compared on the RESOLVED ids, so an equivalent spelling (the free id without its
+    `:free` suffix) still counts as the default."""
+    dgen, djudge = default_endpoints()
+    return [
+        role
+        for role, ep, want in (("generator", gen, dgen), ("judge", judge_ep, djudge))
+        if (ep.provider, ep.model) != want
+    ]
+
+
+def output_dir(
+    dataset: str,
+    limit: int,
+    n_sample: int,
+    phash: str,
+    gen: LLMEndpoint | None = None,
+    judge_ep: LLMEndpoint | None = None,
+) -> tuple[Path, bool]:
     """Where this run's rag.{md,json} go, and whether it is the canonical run.
 
-    Only the canonical test split with no SSR_EVAL_LIMIT may write to eval/results/.
-    Anything else — every train-split run, every smoke subset — goes to
-    data/eval_runs/rag_<dataset-slug>_<n>_<prompt-hash8>/, so prompt experiments under
-    different prompts don't collide and can never overwrite the committed artifact.
+    Only the canonical test split, with no SSR_EVAL_LIMIT, AND both roles on the code
+    defaults (default_endpoints) may write to eval/results/. Anything else — every
+    train-split run, every smoke subset, every run with another generator or judge (a
+    paid-model comparison, even on the full test split) — goes to
+    data/eval_runs/rag_<dataset-slug>_<n>_<prompt-hash8>[_<generator-slug>]
+    [_judge-<judge-slug>]/, so experiments under different prompts or models don't
+    collide and can never overwrite the committed free-model artifact. (gen/judge_ep
+    None = the defaults, for callers that only vary the sample.)
     """
-    if not limit and dataset == CANONICAL_DATASET:
+    changed = non_default_roles(gen, judge_ep) if gen and judge_ep else []
+    if not limit and dataset == CANONICAL_DATASET and not changed:
         return OUT, True
-    return RUNS / f"rag_{_slug(dataset)}_{n_sample}_{phash[:8]}", False
+    name = f"rag_{_slug(dataset)}_{n_sample}_{phash[:8]}"
+    if changed:
+        name += f"_{_slug(gen.model)}"
+        if "judge" in changed:
+            name += f"_judge-{_slug(judge_ep.model)}"
+    return RUNS / name, False
+
+
+def _non_default_notice(changed: Sequence[str], gen: LLMEndpoint, judge_ep: LLMEndpoint) -> str:
+    dgen, djudge = default_endpoints()
+    lines = [
+        f"        {role}: {ep.provider} {ep.model} (code default: {want[0]} {want[1]})"
+        for role, ep, want in (("generator", gen, dgen), ("judge", judge_ep, djudge))
+        if role in changed
+    ]
+    bar = "=" * 88
+    return (
+        f"\n{bar}\n"
+        f"NON-CANONICAL: {' and '.join(changed)} differ{'s' if len(changed) == 1 else ''} "
+        f"from the code defaults, so this run NEVER writes {OUT}\n"
+        + "\n".join(lines)
+        + f"\n        (the committed rag.{{md,json}} describe the default models only)\n{bar}\n"
+    )
 
 
 def committed_sample_size(path: Path | None = None) -> int | None:
@@ -1114,7 +1187,9 @@ def main(argv: Sequence[str] = ()) -> None:
         qids = qids[:limit]
     labels = load_claim_labels(dataset=dataset, query_ids=set(queries))
     phash = prompt_hash()
-    out, canonical = output_dir(dataset, limit, len(qids), phash)
+    out, canonical = output_dir(dataset, limit, len(qids), phash, gen_ep, judge_ep)
+    if changed := non_default_roles(gen_ep, judge_ep):
+        print(_non_default_notice(changed, gen_ep, judge_ep), flush=True)
     n_label = "all" if n_req is None else n_req
     print(
         f"Sample: {len(qids)} claims from {dataset} (SSR_RAG_N={n_label}, seed={SEED}"

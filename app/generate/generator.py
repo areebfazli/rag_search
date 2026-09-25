@@ -117,20 +117,43 @@ class GeneratedAnswer(Answer):
     provider: str | None = None
 
 
+# Model families "auto" sends reasoning effort "medium" to (substring match on the id, so
+# Groq's openai/gpt-oss-120b and Ollama's gpt-oss:20b both count). gpt-6-luna is a
+# reasoning model whose OpenRouter endpoints all list `reasoning` / `reasoning_effort`.
+AUTO_MEDIUM_REASONING = ("gpt-oss", "gpt-6-luna")
+# Models that must NOT be sent `temperature`: OpenRouter's endpoints for gpt-6-luna do not
+# list it in supported_parameters (GET /api/v1/models/openai/gpt-6-luna/endpoints,
+# 2026-09-25), as with OpenAI's other reasoning models. Everything else — gpt-oss and the
+# default free Ling generator included — keeps the 0.1 it has always been sent.
+NO_TEMPERATURE_MODELS = ("gpt-6-luna",)
+GENERATION_TEMPERATURE = 0.1
+
+
+def _matches(model: str, families: tuple[str, ...]) -> bool:
+    m = model.lower()
+    return any(f in m for f in families)
+
+
+def generation_temperature(model: str) -> float | None:
+    """The temperature to send for `model`, or None to omit the parameter entirely."""
+    return None if _matches(model, NO_TEMPERATURE_MODELS) else GENERATION_TEMPERATURE
+
+
 def resolve_reasoning_effort(model: str, setting: str) -> str | None:
     """The reasoning_effort to send for `model`, or None to omit the parameter.
 
-    See Settings.llm_reasoning_effort: "auto" sends "medium" to gpt-oss only, because an
-    OpenAI-compatible backend serving a non-reasoning model may reject the parameter
-    outright; ""/"off" never sends it; anything else is an explicit choice, sent as-is.
-    Every other model — the default free Ling generator included, which reasons on its
-    own and did not shorten its reasoning for effort=low — gets nothing under "auto".
+    See Settings.llm_reasoning_effort: "auto" sends "medium" to gpt-oss and gpt-6-luna
+    only (AUTO_MEDIUM_REASONING), because an OpenAI-compatible backend serving a
+    non-reasoning model may reject the parameter outright; ""/"off" never sends it;
+    anything else is an explicit choice, sent as-is. Every other model — the default free
+    Ling generator included, which reasons on its own and did not shorten its reasoning
+    for effort=low — gets nothing under "auto".
     """
     value = setting.strip().lower()
     if value in {"", "off"}:
         return None
     if value == "auto":
-        return "medium" if "gpt-oss" in model.lower() else None
+        return "medium" if _matches(model, AUTO_MEDIUM_REASONING) else None
     return value
 
 
@@ -217,11 +240,14 @@ class LLMGenerator:
         body = {**reasoning_params(self.endpoint.provider, self.reasoning_effort),
                 **self.endpoint.extra_body()}
         self.endpoint.check(model=self.model, body=body)
-        extra = {"extra_body": body} if body else {}
+        extra: dict = {"extra_body": body} if body else {}
+        # Model-aware sampling: a model that doesn't support `temperature` never sees the
+        # key (not even as null); every other model gets exactly what it always did.
+        if (temperature := generation_temperature(self.model)) is not None:
+            extra["temperature"] = temperature
         return self.client.chat.completions.create(
             model=self.model,
             messages=messages,
-            temperature=0.1,
             max_tokens=max_tokens,
             **extra,
         )

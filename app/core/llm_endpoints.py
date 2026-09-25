@@ -24,12 +24,14 @@ request to an openrouter.ai URL — at resolution, at client construction, on ev
    and a $0/$0 ``max_price``, so only a zero-priced endpoint can serve it.
 2. The judge must be ``:free`` — a paid judge id is refused outright.
 3. A paid generator id is allowed only if it is in ``openrouter_paid_model_allowlist``
-   (default: exactly ``openai/gpt-oss-120b``), and only if the request carries
-   ``PAID_ROUTING``: a pinned provider ``order``, ``allow_fallbacks: false``,
-   ``quantizations: ["bf16"]`` and a ``max_price`` no higher than
-   ``PAID_MAX_PRICE_USD_PER_M``. With fallbacks off and an explicit order, OpenRouter
-   fails the request rather than route to an endpoint outside the list, and max_price
-   "will prevent your request from running if the price is not available".
+   (default: ``openai/gpt-oss-120b`` and ``openai/gpt-6-luna``) AND has an entry in
+   ``PAID_ROUTES`` — the per-model paid routing table — and only if the request carries
+   exactly that model's routing: its pinned provider ``order``, ``allow_fallbacks:
+   false``, its ``quantizations`` filter (or none, where the table has none) and its
+   ``max_price`` caps. With fallbacks off and an explicit order, OpenRouter fails the
+   request rather than route to an endpoint outside the list, and max_price "will
+   prevent your request from running if the price is not available". An allowlisted
+   id with no table entry is refused, as is any other routing for a table model.
 4. Request fields that could add spend on their own (``models`` fallback lists,
    ``route``, ``plugins`` such as web search) are refused on any OpenRouter request.
 
@@ -63,23 +65,69 @@ FREE_ROUTING: dict = {
     "allow_fallbacks": False,
     "max_price": {"prompt": 0, "completion": 0},
 }
-# Paid generator ceiling, USD per 1M tokens. The cheapest bf16 endpoint of
-# openai/gpt-oss-120b (AkashML, $0.03 / $0.17 per M, per GET
-# /api/v1/models/openai/gpt-oss-120b/endpoints on 2026-09-24) sits exactly at it.
-PAID_MAX_PRICE_USD_PER_M: dict[str, float] = {"prompt": 0.03, "completion": 0.17}
-# Endpoint tags (provider/quantization) tried in order, and nothing else. DeepInfra's
-# bf16 endpoint is listed second for reproducibility, but at $0.037/M prompt it is ABOVE
-# the prompt cap, so max_price filters it out: if AkashML is down the request fails,
-# which is the intended behaviour (fail, never route elsewhere). Raising the prompt cap
-# to 0.037 would make it a live second choice.
-PAID_PROVIDER_ORDER: tuple[str, ...] = ("akashml/bf16", "deepinfra/bf16")
-PAID_QUANTIZATIONS: tuple[str, ...] = ("bf16",)  # excludes CoreWeave's fp4 at the same price
-PAID_ROUTING: dict = {
-    "order": list(PAID_PROVIDER_ORDER),
-    "allow_fallbacks": False,
-    "quantizations": list(PAID_QUANTIZATIONS),
-    "max_price": dict(PAID_MAX_PRICE_USD_PER_M),
+
+
+@dataclass(frozen=True)
+class PaidRoute:
+    """The exact provider routing a paid generator model must be sent with.
+
+    ``order`` is a list of OpenRouter provider slugs / endpoint tags, tried in order and
+    nothing else (``allow_fallbacks`` is always false). ``max_price`` is the per-model
+    ceiling, USD per 1M tokens, and also the rate the spend ceiling counts an unreported
+    cost at. ``quantizations`` is None where the provider does not publish one (the
+    filter is then not sent, rather than one that could match nothing).
+
+    ``bill_rate`` is the highest per-1M rate a call can actually be BILLED at, for spend
+    accounting only (never sent): max_price filters on the listed prompt/completion
+    price, but an endpoint can bill some input above it (e.g. a prompt-cache write).
+    None = max_price."""
+
+    order: tuple[str, ...]
+    max_price: Mapping[str, float]
+    quantizations: tuple[str, ...] | None = None
+    bill_rate: Mapping[str, float] | None = None
+
+    def routing(self) -> dict:
+        r: dict = {"order": list(self.order), "allow_fallbacks": False}
+        if self.quantizations is not None:
+            r["quantizations"] = list(self.quantizations)
+        r["max_price"] = dict(self.max_price)
+        return r
+
+
+# Paid generator routing, per model. A paid id is sendable only if it is here AND in
+# settings.openrouter_paid_model_allowlist. Prices per GET
+# /api/v1/models/<id>/endpoints; `order` semantics per
+# https://openrouter.ai/docs/features/provider-routing: a base slug ("openai") matches
+# that provider's endpoints but NOT its service-tier endpoints ("openai/fast",
+# "openai/flex"), which need explicit opt-in; "provider/tag" targets one endpoint.
+PAID_ROUTES: dict[str, PaidRoute] = {
+    # AkashML bf16 ($0.03 / $0.17 per M on 2026-09-24) sits exactly at the cap. DeepInfra's
+    # bf16 endpoint is listed second for reproducibility, but at $0.037/M prompt it is
+    # ABOVE the prompt cap, so max_price filters it out: if AkashML is down the request
+    # fails, which is the intended behaviour (fail, never route elsewhere); raising the
+    # prompt cap to 0.037 would make it a live second choice. The bf16 filter excludes
+    # CoreWeave's fp4 at the same price.
+    "openai/gpt-oss-120b": PaidRoute(
+        order=("akashml/bf16", "deepinfra/bf16"),
+        max_price={"prompt": 0.03, "completion": 0.17},
+        quantizations=("bf16",),
+    ),
+    # OpenAI's standard endpoint (tag "openai", $0.10 / $0.50 per M on 2026-09-25) only:
+    # the base slug does not match openai/flex or openai/fast (service tiers), Azure and
+    # Bedrock are not in the order, and fallbacks are off. OpenRouter reports the
+    # quantization as "unknown" for OpenAI, so no quantizations filter is sent. The same
+    # endpoint lists input_cache_write at $0.125/M, and a live 2026-09-25 call was billed
+    # at exactly that for its whole prompt (1,829 prompt + 104 completion tokens ->
+    # $0.00028055), so accounting bounds the prompt at $0.125, not the $0.10 filter cap.
+    # (Prompts >= 272k tokens are priced higher; ours are ~2-4k.)
+    "openai/gpt-6-luna": PaidRoute(
+        order=("openai",),
+        max_price={"prompt": 0.10, "completion": 0.50},
+        bill_rate={"prompt": 0.125, "completion": 0.50},
+    ),
 }
+
 # Body fields that can add cost independently of the model's price.
 FORBIDDEN_OPENROUTER_FIELDS = frozenset({"models", "route", "plugins", "web_search_options"})
 
@@ -136,9 +184,36 @@ def is_free(model: str) -> bool:
     return str(model).endswith(FREE_SUFFIX)
 
 
+def paid_route(model: str) -> PaidRoute:
+    """The paid routing-table entry for `model`; PaidModelRefused if it has none."""
+    route = PAID_ROUTES.get(model)
+    if route is None:
+        raise PaidModelRefused(
+            f"refusing to send paid model {model!r} to OpenRouter: it has no entry in the "
+            f"paid routing table (llm_endpoints.PAID_ROUTES: {sorted(PAID_ROUTES)})"
+        )
+    return route
+
+
+def paid_routing(model: str) -> dict:
+    """The exact provider-routing object a paid `model` must carry (a fresh copy)."""
+    return paid_route(model).routing()
+
+
+def paid_max_price(model: str) -> dict[str, float]:
+    """`model`'s max_price caps, USD per 1M tokens."""
+    return dict(paid_route(model).max_price)
+
+
+def paid_bill_rate(model: str) -> dict[str, float]:
+    """The per-1M rates spend accounting bounds a `model` call at (>= its max_price)."""
+    route = paid_route(model)
+    return dict(route.bill_rate if route.bill_rate is not None else route.max_price)
+
+
 def routing_for(model: str) -> dict:
     """The provider-routing object an OpenRouter request for `model` carries."""
-    return _copy(FREE_ROUTING if is_free(model) else PAID_ROUTING)
+    return _copy(FREE_ROUTING) if is_free(model) else paid_routing(model)
 
 
 def _copy(d: dict) -> dict:
@@ -192,19 +267,38 @@ def enforce_spend_policy(
             f"refusing to send paid model {model!r} to OpenRouter: not in "
             f"SSR_OPENROUTER_PAID_MODEL_ALLOWLIST (only ':free' ids and allowlisted models)"
         )
-    if not _price_ok(routing.get("max_price"), PAID_MAX_PRICE_USD_PER_M):
+    route = paid_route(model)  # refuses an allowlisted id with no routing-table entry
+    if not _price_ok(routing.get("max_price"), route.max_price):
         raise SpendPolicyError(
             f"refusing paid OpenRouter request: provider.max_price must be <= "
-            f"{PAID_MAX_PRICE_USD_PER_M} USD per 1M tokens"
+            f"{dict(route.max_price)} USD per 1M tokens for {model}"
         )
     order = routing.get("order")
-    if not isinstance(order, list | tuple) or not order:
-        raise SpendPolicyError("refusing paid OpenRouter request without a pinned provider.order")
-    quant = routing.get("quantizations")
-    if not isinstance(quant, list | tuple) or not quant or not set(quant) <= set(PAID_QUANTIZATIONS):
+    if not isinstance(order, list | tuple) or list(order) != list(route.order):
         raise SpendPolicyError(
-            f"refusing paid OpenRouter request: provider.quantizations must be within "
-            f"{list(PAID_QUANTIZATIONS)}"
+            f"refusing paid OpenRouter request: provider.order must be exactly "
+            f"{list(route.order)} for {model}"
+        )
+    quant = routing.get("quantizations")
+    if route.quantizations is None:
+        if "quantizations" in routing:
+            raise SpendPolicyError(
+                f"refusing paid OpenRouter request: {model} is routed with no "
+                f"provider.quantizations filter"
+            )
+    elif not isinstance(quant, list | tuple) or list(quant) != list(route.quantizations):
+        raise SpendPolicyError(
+            f"refusing paid OpenRouter request: provider.quantizations must be exactly "
+            f"{list(route.quantizations)} for {model}"
+        )
+    # Nothing beyond the table's own fields (no sort, ignore, only, ... that could widen
+    # or reorder the endpoint set), and the max_price carries only the capped keys.
+    expected = route.routing()
+    extra = set(routing) - set(expected)
+    if extra or set(routing["max_price"]) != set(route.max_price):
+        raise SpendPolicyError(
+            f"refusing paid OpenRouter request: provider routing for {model} must be exactly "
+            f"{expected} (unexpected: {sorted(extra) or 'max_price keys'})"
         )
 
 
@@ -215,7 +309,7 @@ def provider_of(role: Role, s: Settings | None = None) -> Provider:
 
 def openrouter_generator_id(model: str, allowlist: tuple[str, ...] | list[str]) -> str:
     """The generator id sent to OpenRouter: an allowlisted paid id as-is (it then needs
-    PAID_ROUTING), anything else normalised to its ``:free`` variant (FREE_ROUTING) —
+    its PAID_ROUTES entry's exact routing), anything else normalised to its ``:free`` variant (FREE_ROUTING) —
     the judge's rule, minus the allowlist exception. A free id is never checked against
     the allowlist, and a non-allowlisted id can only ever be sent as ``:free``."""
     return model if model in allowlist else free_id(model)
@@ -444,10 +538,13 @@ def completion_choice(resp: object):
     )
 
 
-def cost_upper_bound(prompt_tokens: int | None, completion_tokens: int | None) -> float:
-    """What a paid call can have cost at most, at the max_price caps — used when the
-    provider reports no cost, so the spend ceiling never counts an unknown as zero."""
-    p, c = PAID_MAX_PRICE_USD_PER_M["prompt"], PAID_MAX_PRICE_USD_PER_M["completion"]
+def cost_upper_bound(prompt_tokens: int | None, completion_tokens: int | None, model: str) -> float:
+    """What a paid call to `model` can have cost at most, at that model's billing bound
+    (paid_bill_rate: its max_price caps, or higher where the endpoint bills some input
+    above them) — used when the provider reports no cost, so the spend ceiling never
+    counts an unknown as zero. PaidModelRefused for a model with no routing-table entry."""
+    caps = paid_bill_rate(model)
+    p, c = caps["prompt"], caps["completion"]
     return ((prompt_tokens or 0) * p + (completion_tokens or 0) * c) / 1e6
 
 
