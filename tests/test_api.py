@@ -119,3 +119,111 @@ def test_answer_returns_502_when_the_llm_returns_no_completion(monkeypatch):
     r = TestClient(main.app).get("/answer", params={"q": "does it?"})
     assert r.status_code == 502
     assert r.json()["detail"] == "LLM backend returned no completion"
+
+
+# --- web modes -------------------------------------------------------------------------
+
+
+class _WebService:
+    """Fake SearchService: a web hit with a URL, plus optional S2 failure/warning."""
+
+    def __init__(self, error=None, warning=None, url="https://www.semanticscholar.org/paper/abc"):
+        self.error, self.warning, self.url = error, warning, url
+        self.calls: list[dict] = []
+
+    def retrieve(self, q, mode, top_k, **kw):
+        from app.core.interfaces import SearchHit
+
+        self.calls.append({"mode": mode, **kw})
+        if self.error:
+            raise self.error
+        if self.warning and kw.get("warnings") is not None:
+            kw["warnings"].append(self.warning)
+        return [
+            SearchHit(
+                "4983",
+                0.5,
+                "abstract",
+                {"title": "T", "url": self.url, "year": 1998, "source": "semantic_scholar"},
+            ),
+            SearchHit("d1", 0.4, "local text", {"title": "L"}),
+        ]
+
+
+def _client(monkeypatch, service):
+    from fastapi.testclient import TestClient
+
+    from app.api import main
+
+    main.limiter.reset()
+    monkeypatch.setattr(main, "get_service", lambda: service)
+    return TestClient(main.app)
+
+
+def test_search_accepts_web_modes_and_returns_source_url_year(monkeypatch):
+    from app.api import main
+
+    svc = _WebService()
+    client = _client(monkeypatch, svc)
+    for mode in ("web", "hybrid_web"):
+        r = client.get("/search", params={"q": "white matter", "mode": mode})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["mode"] == mode and body["warnings"] == []
+        web, local = body["hits"]
+        assert web == {
+            "doc_id": "4983", "score": 0.5, "title": "T", "text": "abstract",
+            "url": "https://www.semanticscholar.org/paper/abc", "year": 1998,
+            "source": "semantic_scholar",
+        }
+        assert local["source"] == "local" and local["url"] is None and local["year"] is None
+    # Web modes get the retrieval lock passed down (held around local retrieval only).
+    assert all(c["local_lock"] is main._retrieval_lock for c in svc.calls)
+
+
+def test_search_still_rejects_unknown_modes(monkeypatch):
+    r = _client(monkeypatch, _WebService()).get("/search", params={"q": "x", "mode": "internet"})
+    assert r.status_code == 422
+
+
+def test_web_mode_s2_failure_is_503_not_500(monkeypatch):
+    from app.retrieve.semantic_scholar import S2RateLimited
+
+    client = _client(monkeypatch, _WebService(error=S2RateLimited("HTTP 429")))
+    r = client.get("/search", params={"q": "x", "mode": "web"})
+    assert r.status_code == 503
+    assert "Semantic Scholar" in r.json()["detail"]
+
+
+def test_hybrid_web_degradation_warning_reaches_the_response(monkeypatch):
+    client = _client(monkeypatch, _WebService(warning="Semantic Scholar unavailable (HTTP 429)"))
+    r = client.get("/search", params={"q": "x", "mode": "hybrid_web"})
+    assert r.status_code == 200 and r.json()["warnings"] == ["Semantic Scholar unavailable (HTTP 429)"]
+
+
+def test_non_http_urls_never_reach_the_client(monkeypatch):
+    client = _client(monkeypatch, _WebService(url="javascript:alert(1)"))
+    r = client.get("/search", params={"q": "x", "mode": "web"})
+    assert r.json()["hits"][0]["url"] is None
+
+
+def test_answer_passes_web_hits_to_the_generator_unchanged(monkeypatch):
+    from app.api import main
+    from app.core.interfaces import Answer
+
+    seen = {}
+
+    class _Gen:
+        def generate(self, q, hits):
+            seen["hits"] = hits
+            return Answer(text="It does [1].", citations=[hits[0].doc_id], hits=hits)
+
+    svc = _WebService()
+    client = _client(monkeypatch, svc)
+    monkeypatch.setattr(main, "resolve_endpoint", lambda role: None)
+    monkeypatch.setattr(main, "get_generator", lambda: _Gen())
+    r = client.get("/answer", params={"q": "does it?", "mode": "hybrid_web"})
+    assert r.status_code == 200, r.text
+    assert [h.doc_id for h in seen["hits"]] == ["4983", "d1"]
+    assert seen["hits"][0].metadata["source"] == "semantic_scholar"
+    assert r.json()["citations"] == ["4983"] and r.json()["hits"][0]["source"] == "semantic_scholar"

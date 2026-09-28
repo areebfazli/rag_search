@@ -24,7 +24,8 @@ from app.core.llm_endpoints import (
     SpendPolicyError,
     resolve_endpoint,
 )
-from app.retrieve.service import MODES, SearchService
+from app.retrieve.semantic_scholar import S2Error, safe_http_url
+from app.retrieve.service import MODES, WEB_MODES, SearchService
 from app.schemas.api import AnswerResponse, Hit, SearchResponse
 
 app = FastAPI(title="Semantic Search with RAG")
@@ -114,10 +115,46 @@ def get_generator():
 
 
 def _to_hits(hits) -> list[Hit]:
-    return [
-        Hit(doc_id=h.doc_id, score=h.score, title=h.metadata.get("title", ""), text=h.text)
-        for h in hits
-    ]
+    out = []
+    for h in hits:
+        year = h.metadata.get("year")
+        out.append(
+            Hit(
+                doc_id=h.doc_id,
+                score=h.score,
+                title=h.metadata.get("title", ""),
+                text=h.text,
+                # Web hits only; re-checked here so a non-http(s) URL can never reach a
+                # client, whatever produced the hit.
+                url=safe_http_url(h.metadata.get("url")) or None,
+                year=year if isinstance(year, int) and not isinstance(year, bool) else None,
+                source=h.metadata.get("source") or "local",
+            )
+        )
+    return out
+
+
+def _retrieve(q: str, mode: str, top_k: int) -> tuple[list, list[str]]:
+    """Retrieval for one request, returning (hits, warnings).
+
+    Local modes run entirely under the retrieval lock, exactly as before. Web modes hold
+    it only around the local part (SearchService's local_lock), so a slow or throttled
+    Semantic Scholar never blocks other users' local searches. `web` has no local
+    fallback, so an S2 failure is a 503; hybrid_web degrades to local results + warning.
+    """
+    if mode not in WEB_MODES:
+        with _retrieval_lock:
+            return get_service().retrieve(q, mode=mode, top_k=top_k), []
+    warnings: list[str] = []
+    with _retrieval_lock:  # first-call construction opens embedded Qdrant: never twice
+        service = get_service()
+    try:
+        hits = service.retrieve(
+            q, mode=mode, top_k=top_k, warnings=warnings, local_lock=_retrieval_lock
+        )
+    except S2Error as e:
+        raise HTTPException(status_code=503, detail=f"Semantic Scholar search unavailable ({e})")
+    return hits, warnings
 
 
 @app.get("/")
@@ -140,9 +177,8 @@ def search(
 ) -> SearchResponse:
     if mode not in MODES:
         raise HTTPException(status_code=422, detail=f"mode must be one of {MODES}")
-    with _retrieval_lock:
-        hits = get_service().retrieve(q, mode=mode, top_k=top_k)
-    return SearchResponse(query=q, mode=mode, hits=_to_hits(hits))
+    hits, warnings = _retrieve(q, mode, top_k)
+    return SearchResponse(query=q, mode=mode, hits=_to_hits(hits), warnings=warnings)
 
 
 @app.get("/answer", response_model=AnswerResponse)
@@ -159,8 +195,10 @@ def answer(
         resolve_endpoint("generator")
     except (MissingApiKey, EndpointConfigError, SpendPolicyError) as e:
         raise HTTPException(status_code=503, detail=f"LLM not configured ({e})")
-    with _retrieval_lock:
-        hits = get_service().retrieve(q, mode=mode, top_k=top_k)
+    # Web hits go to the generator unchanged: the same grounded prompt (context as
+    # data, question delimited and sanitised) applies, and their text was already
+    # normalised as untrusted by the S2 retriever.
+    hits, warnings = _retrieve(q, mode, top_k)
     try:
         ans = get_generator().generate(q, hits)  # network call — safe outside the lock
     except OpenAIError as e:  # bad key, model gone, provider down — not a server bug
@@ -168,5 +206,10 @@ def answer(
     except EmptyCompletionError:  # HTTP 200 with no choices: an upstream failure too
         raise HTTPException(status_code=502, detail="LLM backend returned no completion")
     return AnswerResponse(
-        query=q, answer=ans.text, citations=ans.citations, hits=_to_hits(hits), verdict=ans.verdict
+        query=q,
+        answer=ans.text,
+        citations=ans.citations,
+        hits=_to_hits(hits),
+        verdict=ans.verdict,
+        warnings=warnings,
     )

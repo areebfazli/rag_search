@@ -105,3 +105,128 @@ def test_rerank_scores_stay_monotonic_across_the_slice_boundary(monkeypatch):
     scores = [h.score for h in hits]
     assert len(scores) > 3, "need results past the reranked slice to exercise the boundary"
     assert scores == sorted(scores, reverse=True), f"non-monotonic scores: {scores}"
+
+
+# --- optional web modes (Semantic Scholar), with a fake web retriever -----------------
+
+from app.retrieve.semantic_scholar import S2Error  # noqa: E402
+
+
+class FakeWeb:
+    def __init__(self, hits=None, error=None):
+        self._hits = hits or []
+        self._error = error
+        self.calls: list[int] = []
+
+    def search(self, query, top_k):
+        self.calls.append(top_k)
+        if self._error:
+            raise self._error
+        return self._hits[:top_k]
+
+
+def web_hit(doc_id, title="web title"):
+    return SearchHit(
+        doc_id,
+        1.0,
+        f"web abstract {doc_id}",
+        {"title": title, "url": f"https://www.semanticscholar.org/paper/{doc_id}", "year": 2001,
+         "source": "semantic_scholar"},
+    )
+
+
+def make_web_service(web):
+    svc = make_service()
+    svc._web = web
+    return svc
+
+
+def test_web_mode_uses_only_semantic_scholar():
+    web = FakeWeb([web_hit("w1"), web_hit("w2")])
+    svc = make_web_service(web)
+    assert [h.doc_id for h in svc.retrieve("q", mode="web", top_k=1)] == ["w1"]
+    assert web.calls == [1]
+
+
+def test_web_mode_caps_depth_at_the_s2_page_size():
+    web = FakeWeb([])
+    make_web_service(web).retrieve("q", mode="web", top_k=500)
+    assert web.calls == [100]
+
+
+def test_web_mode_propagates_s2_failure():
+    # No local fallback exists for `web`, so the caller (API -> 503) must see it.
+    with pytest.raises(S2Error):
+        make_web_service(FakeWeb(error=S2Error("HTTP 500"))).retrieve("q", mode="web")
+
+
+def test_hybrid_web_fuses_and_dedupes_papers_in_both_sources():
+    # "shared" is in the local corpus AND returned by S2 (same corpus id): it must
+    # appear once, keep the local text/title, gain S2's url/year, and — being in both
+    # the local hybrid list and the web list — rank first under RRF.
+    web = FakeWeb([web_hit("w1"), web_hit("shared", title="S2 title")])
+    svc = make_web_service(web)
+    hits = svc.retrieve("q", mode="hybrid_web", top_k=10)
+    ids = [h.doc_id for h in hits]
+    assert ids.count("shared") == 1 and ids[0] == "shared"
+    assert set(ids) == {"d1", "d2", "shared", "l1", "l2", "w1"}
+    shared = hits[0]
+    assert shared.text == "ts" and shared.metadata["source"] == "local"
+    assert shared.metadata["url"].endswith("/shared") and shared.metadata["year"] == 2001
+    w1 = next(h for h in hits if h.doc_id == "w1")
+    assert w1.metadata["source"] == "semantic_scholar"
+    assert all(h.metadata.get("source") == "local" for h in hits if h.doc_id[0] in "dl")
+    scores = [h.score for h in hits]
+    assert scores == sorted(scores, reverse=True)
+
+
+def test_hybrid_web_matches_rrf_of_local_hybrid_and_web_lists():
+    from app.retrieve.fusion import reciprocal_rank_fusion
+
+    web = FakeWeb([web_hit("w1"), web_hit("l2"), web_hit("w2")])
+    svc = make_web_service(web)
+    local = [h.doc_id for h in svc.retrieve("q", mode="hybrid", top_k=100)]
+    expected = [d for d, _ in reciprocal_rank_fusion([local, ["w1", "l2", "w2"]], k=settings.rrf_k)]
+    assert [h.doc_id for h in svc.retrieve("q", mode="hybrid_web", top_k=100)] == expected
+
+
+def test_hybrid_web_degrades_to_local_on_s2_failure():
+    svc = make_web_service(FakeWeb(error=S2Error("HTTP 429")))
+    warnings: list[str] = []
+    hits = svc.retrieve("q", mode="hybrid_web", top_k=5, warnings=warnings)
+    assert [h.doc_id for h in hits] == [h.doc_id for h in svc.retrieve("q", mode="hybrid", top_k=5)]
+    assert len(warnings) == 1 and "Semantic Scholar unavailable" in warnings[0]
+
+
+def test_hybrid_web_holds_local_lock_only_around_local_retrieval():
+    events: list[str] = []
+
+    class Lock:
+        def __enter__(self):
+            events.append("lock")
+
+        def __exit__(self, *exc):
+            events.append("unlock")
+
+    class RecordingWeb(FakeWeb):
+        def search(self, query, top_k):
+            events.append("web")
+            return super().search(query, top_k)
+
+    svc = make_web_service(RecordingWeb([web_hit("w1")]))
+    svc.retrieve("q", mode="hybrid_web", top_k=3, local_lock=Lock())
+    assert events == ["lock", "unlock", "web"]  # the S2 call never runs under the lock
+
+
+def test_local_modes_never_touch_the_web_retriever():
+    web = FakeWeb([web_hit("w1")])
+    svc = make_web_service(web)
+    for mode in ("bm25", "dense", "hybrid", "hybrid_rerank"):
+        svc.retrieve("q", mode=mode, top_k=3)
+    assert web.calls == []
+
+
+def test_hybrid_is_still_the_default_mode():
+    import inspect
+
+    assert inspect.signature(SearchService.retrieve).parameters["mode"].default == "hybrid"

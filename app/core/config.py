@@ -72,6 +72,31 @@ class Settings(BaseSettings):
     # throughput cost is minor, and it is a large win when the alternative is swapping.
     rerank_batch_size: int = Field(default=8, ge=1)
 
+    # --- Semantic Scholar web search (optional modes `web` / `hybrid_web`) ---
+    # Never used by the default mode. Without a key, requests go to S2's shared public
+    # pool ("1000 requests per second shared among all unauthenticated users", and "may
+    # be further throttled during periods of heavy use" — it 429s often); a key, sent as
+    # the `x-api-key` header only when set, has an "introductory rate limit of 1 RPS on
+    # all endpoints" (semanticscholar.org/product/api). The key only ever goes to
+    # api.semanticscholar.org (the base URL is fixed in app/retrieve/semantic_scholar.py).
+    s2_api_key: str = ""
+    # Process-wide request spacing for every S2 call, retries included — the documented
+    # per-key rate, and a polite one for the shared pool. Per process: with N uvicorn
+    # workers, set it to 1/N.
+    s2_rate_per_s: float = Field(default=1.0, gt=0)
+    s2_timeout_s: float = Field(default=10.0, gt=0)
+    # Retries after the first attempt, on 429 / 5xx / network errors, honouring
+    # Retry-After. The API caps this at 1 (SemanticScholarRetriever.for_api).
+    s2_max_retries: int = Field(default=3, ge=0)
+    # API only: the longest a request waits for a rate-limiter slot or a single retry
+    # sleep before giving up — hybrid_web then degrades to local results, web returns
+    # 503. Bounded so a flood of web-mode requests cannot park every worker thread.
+    s2_max_wait_s: float = Field(default=5.0, ge=0)
+    # Raw-response cache (gitignored under data/). web_eval always uses it; the API only
+    # when s2_api_cache is on — arbitrary public queries would otherwise grow it unbounded.
+    s2_cache_dir: str = "./data/s2_cache"
+    s2_api_cache: bool = False
+
     # --- LLM providers (generator and RAG-eval judge) ---
     # Each role picks a provider; the PROVIDER decides the base URL, the API key and
     # which model setting applies (app/core/llm_endpoints.py is the single resolver):

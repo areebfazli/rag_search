@@ -62,6 +62,14 @@
     .card .score { color: var(--accent-2); font-variant-numeric: tabular-nums; }
     .card .snippet { color: var(--muted); margin-top: 8px; font-size: 14px; }
     .rank { color: var(--accent); font-weight: 700; margin-right: 8px; }
+    .src-badge {
+      display: inline-block; margin-left: 8px; padding: 1px 8px; border-radius: 999px; font-size: 11px;
+      font-weight: 600; vertical-align: 1px; color: var(--accent); background: rgba(110, 168, 254, .12);
+      border: 1px solid rgba(110, 168, 254, .35);
+    }
+    .card .title a { color: inherit; text-decoration: underline; text-decoration-color: var(--border); text-underline-offset: 3px; }
+    .card .title a:hover { text-decoration-color: var(--accent); }
+    .warn { color: var(--danger); }
     footer { margin-top: 40px; color: var(--muted); font-size: 12.5px; text-align: center; }
     @media (max-width: 620px) { .row2 { flex-wrap: wrap; } .row2 .spacer { display: none; } }
   </style>
@@ -81,6 +89,8 @@
           <option value="dense">dense</option>
           <option value="bm25">bm25</option>
           <option value="hybrid_rerank">hybrid + rerank</option>
+          <option value="hybrid_web">hybrid + web (Semantic Scholar)</option>
+          <option value="web">web only (Semantic Scholar)</option>
         </select>
         <input id="k" type="number" min="1" max="20" value="8" title="results" />
         <span class="spacer"></span>
@@ -88,7 +98,7 @@
         <button id="ask" type="button">Ask (RAG)</button>
       </div>
     </form>
-    <div class="hint">Default config on SciFact gold qrels: <code>hybrid</code> — nDCG@10 0.724, Recall@100 0.965 (cross-encoder reranking measured, no significant gain). <b>Ask (RAG)</b> generates a cited answer via Groq.</div>
+    <div class="hint">Default config on SciFact gold qrels: <code>hybrid</code> — nDCG@10 0.724, Recall@100 0.965 (cross-encoder reranking measured, no significant gain). <b>Ask (RAG)</b> generates a cited answer via Groq. The optional <code>web</code> modes also search Semantic Scholar live (rate-limited; not part of the measured default).</div>
 
     <div id="status"></div>
     <div id="answer"></div>
@@ -127,15 +137,74 @@
       return span;
     }
 
+    // Web hits carry a URL from a third party (Semantic Scholar). Only absolute
+    // http(s) URLs become links; anything else (javascript:, data:, relative, garbage)
+    // renders as plain text. The server applies the same rule — this is defence in depth.
+    function safeHttpUrl(raw) {
+      if (typeof raw !== 'string' || !raw) return null;
+      let u;
+      try { u = new URL(raw); } catch (_) { return null; }
+      return (u.protocol === 'http:' || u.protocol === 'https:') && u.host ? u.href : null;
+    }
+
+    const SOURCES = { semantic_scholar: 'Semantic Scholar' };
+
+    // Built with DOM APIs + textContent only: every string here may come from the web.
+    function buildHitCard(h, i) {
+      const card = document.createElement('div');
+      card.className = 'card';
+      const top = document.createElement('div');
+      top.className = 'top';
+      const title = document.createElement('div');
+      title.className = 'title';
+      const rank = document.createElement('span');
+      rank.className = 'rank';
+      rank.textContent = String(i + 1);
+      title.appendChild(rank);
+      const href = safeHttpUrl(h.url);
+      const label = (h.title || '(untitled)') + (Number.isInteger(h.year) ? ` (${h.year})` : '');
+      if (href) {
+        const a = document.createElement('a');
+        a.href = href;
+        a.target = '_blank';
+        a.rel = 'noopener noreferrer nofollow';
+        a.textContent = label;
+        title.appendChild(a);
+      } else {
+        title.appendChild(document.createTextNode(label));
+      }
+      if (Object.prototype.hasOwnProperty.call(SOURCES, h.source)) {
+        const badge = document.createElement('span');
+        badge.className = 'src-badge';
+        badge.textContent = SOURCES[h.source];
+        title.appendChild(badge);
+      }
+      const meta = document.createElement('div');
+      meta.className = 'meta';
+      meta.appendChild(document.createTextNode(`${h.source === 'semantic_scholar' ? 'S2 corpus' : 'doc'} ${h.doc_id} · `));
+      const score = document.createElement('span');
+      score.className = 'score';
+      score.textContent = Number(h.score).toFixed(4);
+      meta.appendChild(score);
+      top.append(title, meta);
+      const snippet = document.createElement('div');
+      snippet.className = 'snippet';
+      const text = h.text || '';
+      snippet.textContent = text.slice(0, 280) + (text.length > 280 ? '…' : '');
+      card.append(top, snippet);
+      return card;
+    }
+
     function renderHits(hits) {
-      resultsEl.innerHTML = hits.map((h, i) => `
-        <div class="card">
-          <div class="top">
-            <div class="title"><span class="rank">${i + 1}</span>${esc(h.title) || '(untitled)'}</div>
-            <div class="meta">doc ${esc(h.doc_id)} · <span class="score">${h.score.toFixed(4)}</span></div>
-          </div>
-          <div class="snippet">${esc((h.text || '').slice(0, 280))}${(h.text || '').length > 280 ? '…' : ''}</div>
-        </div>`).join('');
+      resultsEl.replaceChildren(...hits.map(buildHitCard));
+    }
+
+    function showWarnings(data) {
+      if (!Array.isArray(data.warnings) || !data.warnings.length) return;
+      const w = document.createElement('div');
+      w.className = 'warn';
+      w.textContent = data.warnings.join(' ');
+      statusEl.appendChild(w);
     }
 
     function params() {
@@ -153,10 +222,11 @@
       statusEl.textContent = `Searching (${mode})…`;
       const t0 = performance.now();
       try {
-        const r = await fetch(`/search?q=${encodeURIComponent(q)}&mode=${mode}&top_k=${k}`);
+        const r = await fetch(`/search?q=${encodeURIComponent(q)}&mode=${encodeURIComponent(mode)}&top_k=${encodeURIComponent(k)}`);
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const data = await r.json();
         statusEl.textContent = `${data.hits.length} results · mode=${data.mode} · ${Math.round(performance.now() - t0)} ms`;
+        showWarnings(data);
         renderHits(data.hits);
       } catch (err) { statusEl.textContent = `Error: ${err.message}`; }
       finally { go.disabled = ask.disabled = false; }
@@ -169,7 +239,7 @@
       statusEl.textContent = 'Generating grounded answer…';
       const t0 = performance.now();
       try {
-        const r = await fetch(`/answer?q=${encodeURIComponent(q)}&mode=${mode}&top_k=${k}`);
+        const r = await fetch(`/answer?q=${encodeURIComponent(q)}&mode=${encodeURIComponent(mode)}&top_k=${encodeURIComponent(k)}`);
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const data = await r.json();
         statusEl.textContent = `answer · ${data.hits.length} sources · ${Math.round(performance.now() - t0)} ms`;
@@ -181,6 +251,7 @@
           </div>`;
         const pill = buildVerdictPill(data.verdict);
         if (pill) answerEl.querySelector('.label').appendChild(pill);
+        showWarnings(data);
         renderHits(data.hits);
       } catch (err) { statusEl.textContent = `Error: ${err.message}`; }
       finally { go.disabled = ask.disabled = false; }

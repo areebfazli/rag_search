@@ -264,6 +264,47 @@ alpha 0.51, so faithfulness is the least stable score the judge produces.
 (An earlier version of this eval reported "answered 0.50" from the first 10 query ids in dataset
 order: a head slice, not a sample. The harness now takes a seeded random sample and re-runs at any size via `make eval-rag`.)
 
+## Web search (Semantic Scholar)
+
+An optional, networked retrieval source, **off the default path**: `hybrid` over the local
+index stays the default and the measured headline. Two extra modes, on `/search`, `/answer`
+and the UI's mode selector:
+
+- `web`: [Semantic Scholar](https://www.semanticscholar.org/product/api) paper relevance search
+  alone (`GET /graph/v1/paper/search`, top ≤ 100 per request, S2's maximum page size).
+- `hybrid_web`: the local hybrid list and the S2 list fused with the same hand-rolled RRF.
+  SciFact doc ids are S2ORC/S2 corpus ids, so a paper in both appears once (local text, S2 URL
+  and year). If S2 fails, `hybrid_web` returns the local results plus a `warnings` entry, never
+  an error; `web` has nothing to fall back to and returns 503.
+
+Web hits carry `source: "semantic_scholar"`, `url` (http/https only, checked server- and
+client-side) and `year`. Their titles and abstracts are untrusted third-party text: they are
+flattened to one line with quote runs and control characters removed, so they cannot forge
+the grounded prompt's structure, and `/answer` passes them to the generator under the same
+prompt as local passages.
+
+**Key and limits.** No key is required, but unauthenticated requests share S2's public pool
+("1000 requests per second shared among all unauthenticated users", "further throttled during
+periods of heavy use"), which returns 429 often in practice. A free key
+([request form](https://www.semanticscholar.org/product/api#api-key-form)) goes in `.env` as
+`SSR_S2_API_KEY` and is sent as the `x-api-key` header only when set; its introductory limit is
+1 request/s. A process-wide limiter spaces every S2 request, retries included, to
+`SSR_S2_RATE_PER_S` (default 1), so the unauthenticated public API can't be used to hammer S2
+or burn the key. Retries (429/5xx/network) are bounded and honour `Retry-After`. API requests
+wait at most `SSR_S2_MAX_WAIT_S` (default 5 s) for a slot, then degrade. Raw responses are
+cached under `data/s2_cache/`: always for the eval, and for the API only with
+`SSR_S2_API_CACHE=true` (off by default, because arbitrary public queries would grow the cache
+without bound).
+
+**Eval.** `make web-eval` searches S2 for all 300 test claims (one request each, ≈ 5 min at
+1 req/s) and scores `web` against the committed local `hybrid` run on the same gold qrels
+(nDCG@10, Recall@10, Recall@100, paired t-test) into `eval/results/web_retrieval.{md,json}`.
+It first confirms the id mapping with a single `paper/batch` title lookup of the gold docs, and
+stops before any search if it fails. S2 searches ~200M papers against our 5,183, so the eval
+asks whether open-web retrieval can find the gold paper at all; it is not a like-for-like ranker
+comparison. S2's index also changes, so responses are cached with their fetch date and the
+report records it. `SSR_EVAL_LIMIT=2 make web-eval` is a 3-request smoke run.
+
 ## Limitations
 
 - **300 queries bound what can be detected.** For hybrid vs dense, the minimum detectable effect
@@ -333,7 +374,8 @@ key. Only the **grounded-answer** endpoint does, and without one `/answer` retur
 lint + test.
 
 Open <http://localhost:8000> for the search UI, or query the API directly:
-`GET /search?q=...&mode=hybrid&top_k=8` with modes `bm25`, `dense`, `hybrid`, `hybrid_rerank`.
+`GET /search?q=...&mode=hybrid&top_k=8` with modes `bm25`, `dense`, `hybrid`, `hybrid_rerank`,
+plus the optional networked `web` and `hybrid_web` ([Web search](#web-search-semantic-scholar)).
 
 ## Operational notes
 
