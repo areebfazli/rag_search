@@ -1,58 +1,77 @@
 {
   "n": 300,
   "evidence_rate": 0.5833,
-  "answered_rate": 0.65,
-  "abstention_precision": 0.8,
-  "abstention_recall": 0.672,
+  "answered_rate": 0.64,
+  "abstention_precision": 0.8056,
+  "abstention_recall": 0.696,
   "false_abstention_rate": 0.12,
-  "answered_without_evidence_rate": 0.2103,
+  "answered_without_evidence_rate": 0.1979,
   "oracle": "rationale",
   "quadrants": {
     "answered_with_evidence": 154,
-    "answered_without_evidence": 41,
+    "answered_without_evidence": 38,
     "false_abstention": 21,
-    "correct_abstention": 84
+    "correct_abstention": 87
   },
   "qrels_oracle": {
     "evidence_rate": 0.7833,
-    "abstention_precision": 0.4095,
+    "abstention_precision": 0.3981,
     "abstention_recall": 0.6615,
-    "false_abstention_rate": 0.2638,
-    "answered_without_evidence_rate": 0.1128,
+    "false_abstention_rate": 0.2766,
+    "answered_without_evidence_rate": 0.1146,
     "quadrants": {
-      "answered_with_evidence": 173,
+      "answered_with_evidence": 170,
       "answered_without_evidence": 22,
-      "false_abstention": 62,
+      "false_abstention": 65,
       "correct_abstention": 43
     }
   },
-  "verdict_accuracy": 0.73,
-  "verdict_parsed_rate": 0.8567,
+  "verdict_accuracy": 0.7767,
+  "verdict_parsed_rate": 0.95,
   "confusion": {
     "SUPPORT": {
-      "SUPPORT": 86,
+      "SUPPORT": 96,
       "CONTRADICT": 6,
       "NEI": 19,
-      "NONE": 13
+      "NONE": 3
     },
     "CONTRADICT": {
       "SUPPORT": 1,
-      "CONTRADICT": 54,
+      "CONTRADICT": 55,
       "NEI": 7,
-      "NONE": 2
+      "NONE": 1
     },
     "NEI": {
-      "SUPPORT": 14,
+      "SUPPORT": 17,
       "CONTRADICT": 13,
-      "NEI": 79,
-      "NONE": 6
+      "NEI": 82,
+      "NONE": 0
     }
   },
-  "judge_answered_fallbacks": 43,
+  "judge_answered_fallbacks": 15,
   "truncated_answers": 11,
   "retried_answers": 63,
-  "judge_verdict_agreement": 0.8833,
-  "faithfulness_answered": 0.9844,
+  "verdict_sources": {
+    "line": 257,
+    "inline": 10,
+    "stance": 18
+  },
+  "evidence_quotes": {
+    "found": {
+      "n": 0,
+      "verdict_accuracy": null
+    },
+    "not_found": {
+      "n": 0,
+      "verdict_accuracy": null
+    },
+    "no_quote": {
+      "n": 300,
+      "verdict_accuracy": 0.7767
+    }
+  },
+  "judge_verdict_agreement": 0.8842,
+  "faithfulness_answered": 0.9841,
   "context_relevance": 0.717,
   "by_label": {
     "SUPPORT": {
@@ -65,7 +84,7 @@
     },
     "NEI": {
       "n": 112,
-      "answered": 33
+      "answered": 30
     }
   },
   "generator_model": "inclusionai/ling-3.0-flash-sante:free",
@@ -87,7 +106,7 @@
     "judge_reported_usd": 0.0
   },
   "run": {
-    "git_sha": "481e623297a74a921572c2907728d7084494d11f",
+    "git_sha": "56ab63df30577c0c2165d2996a70c06cb5a5f46e",
     "dataset": "beir/scifact/test",
     "prompt_hash": "d0921f4e69fc32f9da7ab88f4f7c88bc3cb25591bc5db11793807133c4bbd78b",
     "judge_prompt_hash": "62bb62544847d70bb5839669e2974f9e79aca5311745d5660a6746261448d86f",
@@ -106,6 +125,8 @@
     "generator_max_completion_tokens": 2048,
     "generator_reasoning_effort": null,
     "generator_reasoning_param": null,
+    "generator_temperature": 0.1,
+    "default_models": true,
     "judge_model": "nvidia/nemotron-3-ultra-550b-a55b:free",
     "judge_provider": "openrouter",
     "judge_base_url": "https://openrouter.ai/api/v1",
@@ -154,10 +175,10 @@
       "qrels_doc_ids": [
         "12885341"
       ],
-      "verdict": null,
-      "predicted_label": "NONE",
+      "verdict": "SUPPORTED",
+      "predicted_label": "SUPPORT",
       "answered": true,
-      "answered_source": "judge",
+      "answered_source": "verdict",
       "judge_answered": true,
       "faithfulness": 1.0,
       "context_relevance": 1.0,
@@ -182,7 +203,8 @@
       "completion_tokens": 163,
       "reasoning_tokens": 102,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "stance"
     },
     {
       "query_id": "598",
@@ -223,7 +245,8 @@
       "completion_tokens": 1450,
       "reasoning_tokens": 1539,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1180",
@@ -265,7 +288,8 @@
       "completion_tokens": 850,
       "reasoning_tokens": 782,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1221",
@@ -309,7 +333,8 @@
       "completion_tokens": 989,
       "reasoning_tokens": 1010,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "386",
@@ -349,7 +374,8 @@
       "completion_tokens": 1637,
       "reasoning_tokens": 1859,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "775",
@@ -391,7 +417,8 @@
       "completion_tokens": 1167,
       "reasoning_tokens": 1098,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1279",
@@ -401,10 +428,10 @@
       "qrels_doc_ids": [
         "11335781"
       ],
-      "verdict": null,
-      "predicted_label": "NONE",
+      "verdict": "SUPPORTED",
+      "predicted_label": "SUPPORT",
       "answered": true,
-      "answered_source": "judge",
+      "answered_source": "verdict",
       "judge_answered": true,
       "faithfulness": 1.0,
       "context_relevance": 0.8,
@@ -430,7 +457,8 @@
       "completion_tokens": 3736,
       "reasoning_tokens": 3878,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "stance"
     },
     {
       "query_id": "859",
@@ -471,7 +499,8 @@
       "completion_tokens": 1169,
       "reasoning_tokens": 1104,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1339",
@@ -511,7 +540,8 @@
       "completion_tokens": 861,
       "reasoning_tokens": 807,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1150",
@@ -551,7 +581,8 @@
       "completion_tokens": 1873,
       "reasoning_tokens": 1929,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "350",
@@ -589,7 +620,8 @@
       "completion_tokens": 2203,
       "reasoning_tokens": 2371,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "820",
@@ -627,7 +659,8 @@
       "completion_tokens": 1829,
       "reasoning_tokens": 2175,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "637",
@@ -667,7 +700,8 @@
       "completion_tokens": 1953,
       "reasoning_tokens": 2314,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1298",
@@ -707,7 +741,8 @@
       "completion_tokens": 1234,
       "reasoning_tokens": 1115,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "956",
@@ -748,7 +783,8 @@
       "completion_tokens": 1693,
       "reasoning_tokens": 1807,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "539",
@@ -788,7 +824,8 @@
       "completion_tokens": 1999,
       "reasoning_tokens": 2020,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "236",
@@ -828,7 +865,8 @@
       "completion_tokens": 583,
       "reasoning_tokens": 556,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "702",
@@ -864,7 +902,8 @@
       "completion_tokens": 1462,
       "reasoning_tokens": 1450,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "759",
@@ -904,7 +943,8 @@
       "completion_tokens": 825,
       "reasoning_tokens": 776,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1336",
@@ -944,7 +984,8 @@
       "completion_tokens": 2021,
       "reasoning_tokens": 2173,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "452",
@@ -986,7 +1027,8 @@
       "completion_tokens": 1296,
       "reasoning_tokens": 1417,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "971",
@@ -1030,7 +1072,8 @@
       "completion_tokens": 4096,
       "reasoning_tokens": 4151,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": null
     },
     {
       "query_id": "811",
@@ -1070,7 +1113,8 @@
       "completion_tokens": 1475,
       "reasoning_tokens": 1373,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "536",
@@ -1110,7 +1154,8 @@
       "completion_tokens": 744,
       "reasoning_tokens": 726,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "718",
@@ -1150,7 +1195,8 @@
       "completion_tokens": 1456,
       "reasoning_tokens": 1688,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1012",
@@ -1190,7 +1236,8 @@
       "completion_tokens": 924,
       "reasoning_tokens": 872,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "237",
@@ -1229,7 +1276,8 @@
       "completion_tokens": 572,
       "reasoning_tokens": 489,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "300",
@@ -1268,7 +1316,8 @@
       "completion_tokens": 2610,
       "reasoning_tokens": 2684,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "613",
@@ -1308,7 +1357,8 @@
       "completion_tokens": 622,
       "reasoning_tokens": 584,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "587",
@@ -1346,7 +1396,8 @@
       "completion_tokens": 1248,
       "reasoning_tokens": 1319,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "551",
@@ -1382,7 +1433,8 @@
       "completion_tokens": 4096,
       "reasoning_tokens": 4954,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": null
     },
     {
       "query_id": "597",
@@ -1427,7 +1479,8 @@
       "completion_tokens": 1182,
       "reasoning_tokens": 1050,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "124",
@@ -1467,7 +1520,8 @@
       "completion_tokens": 1408,
       "reasoning_tokens": 1225,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "5",
@@ -1507,7 +1561,8 @@
       "completion_tokens": 456,
       "reasoning_tokens": 273,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "593",
@@ -1547,7 +1602,8 @@
       "completion_tokens": 890,
       "reasoning_tokens": 787,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "830",
@@ -1586,7 +1642,8 @@
       "completion_tokens": 1854,
       "reasoning_tokens": 1794,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "56",
@@ -1626,7 +1683,8 @@
       "completion_tokens": 1985,
       "reasoning_tokens": 2272,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "716",
@@ -1668,7 +1726,8 @@
       "completion_tokens": 746,
       "reasoning_tokens": 638,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1140",
@@ -1708,7 +1767,8 @@
       "completion_tokens": 2013,
       "reasoning_tokens": 1888,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "552",
@@ -1746,7 +1806,8 @@
       "completion_tokens": 355,
       "reasoning_tokens": 311,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "171",
@@ -1786,7 +1847,8 @@
       "completion_tokens": 847,
       "reasoning_tokens": 833,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "834",
@@ -1796,10 +1858,10 @@
       "qrels_doc_ids": [
         "5483793"
       ],
-      "verdict": null,
-      "predicted_label": "NONE",
+      "verdict": "SUPPORTED",
+      "predicted_label": "SUPPORT",
       "answered": true,
-      "answered_source": "judge",
+      "answered_source": "verdict",
       "judge_answered": true,
       "faithfulness": 0.8,
       "context_relevance": 0.7,
@@ -1825,7 +1887,8 @@
       "completion_tokens": 1543,
       "reasoning_tokens": 1487,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "stance"
     },
     {
       "query_id": "721",
@@ -1865,7 +1928,8 @@
       "completion_tokens": 772,
       "reasoning_tokens": 800,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "75",
@@ -1903,7 +1967,8 @@
       "completion_tokens": 2012,
       "reasoning_tokens": 1900,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "295",
@@ -1944,7 +2009,8 @@
       "completion_tokens": 1856,
       "reasoning_tokens": 1788,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1270",
@@ -1984,7 +2050,8 @@
       "completion_tokens": 831,
       "reasoning_tokens": 781,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "238",
@@ -1994,18 +2061,18 @@
       "qrels_doc_ids": [
         "2251426"
       ],
-      "verdict": null,
-      "predicted_label": "NONE",
-      "answered": true,
-      "answered_source": "judge",
+      "verdict": "NOT ENOUGH EVIDENCE",
+      "predicted_label": "NEI",
+      "answered": false,
+      "answered_source": "verdict",
       "judge_answered": true,
       "faithfulness": 1.0,
       "context_relevance": 0.3,
       "evidence": false,
       "evidence_qrels": true,
-      "abstention_class": "answered_without_evidence",
-      "abstention_class_qrels": "answered_with_evidence",
-      "answer": "The context does not establish a link between methionine restriction and miRNA activation. Passage [1] describes methionine restriction extending rat lifespan without mentioning miRNAs, while passage [2] discusses miRNAs in stress responses but not methionine restriction. Verdict: NOT ENOUGH EVIDENCE",
+      "abstention_class": "correct_abstention",
+      "abstention_class_qrels": "false_abstention",
+      "answer": "The context does not establish a link between methionine restriction and miRNA activation. Passage [1] describes methionine restriction extending rat lifespan without mentioning miRNAs, while passage [2] discusses miRNAs in stress responses but not methionine restriction.",
       "cited_doc_ids": [
         "4463811",
         "2251426"
@@ -2023,7 +2090,8 @@
       "completion_tokens": 957,
       "reasoning_tokens": 1024,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "inline"
     },
     {
       "query_id": "1014",
@@ -2061,7 +2129,8 @@
       "completion_tokens": 1301,
       "reasoning_tokens": 1349,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1088",
@@ -2101,7 +2170,8 @@
       "completion_tokens": 1211,
       "reasoning_tokens": 1215,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1274",
@@ -2115,10 +2185,10 @@
         "27731651",
         "4406819"
       ],
-      "verdict": null,
+      "verdict": "NOT ENOUGH EVIDENCE",
       "predicted_label": "NEI",
       "answered": false,
-      "answered_source": "judge",
+      "answered_source": "verdict",
       "judge_answered": false,
       "faithfulness": 1.0,
       "context_relevance": 0.3,
@@ -2144,7 +2214,8 @@
       "completion_tokens": 3688,
       "reasoning_tokens": 3762,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "stance"
     },
     {
       "query_id": "1130",
@@ -2184,7 +2255,8 @@
       "completion_tokens": 252,
       "reasoning_tokens": 208,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "839",
@@ -2224,7 +2296,8 @@
       "completion_tokens": 1537,
       "reasoning_tokens": 1624,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "491",
@@ -2262,7 +2335,8 @@
       "completion_tokens": 1744,
       "reasoning_tokens": 1665,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "756",
@@ -2304,7 +2378,8 @@
       "completion_tokens": 1190,
       "reasoning_tokens": 1236,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "781",
@@ -2347,7 +2422,8 @@
       "completion_tokens": 366,
       "reasoning_tokens": 274,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "623",
@@ -2385,7 +2461,8 @@
       "completion_tokens": 1554,
       "reasoning_tokens": 1876,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "904",
@@ -2397,10 +2474,10 @@
       "qrels_doc_ids": [
         "7370282"
       ],
-      "verdict": null,
-      "predicted_label": "NONE",
+      "verdict": "SUPPORTED",
+      "predicted_label": "SUPPORT",
       "answered": true,
-      "answered_source": "judge",
+      "answered_source": "verdict",
       "judge_answered": true,
       "faithfulness": 1.0,
       "context_relevance": 1.0,
@@ -2425,7 +2502,8 @@
       "completion_tokens": 304,
       "reasoning_tokens": 215,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "stance"
     },
     {
       "query_id": "1292",
@@ -2463,7 +2541,8 @@
       "completion_tokens": 1388,
       "reasoning_tokens": 1359,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "198",
@@ -2473,10 +2552,10 @@
       "qrels_doc_ids": [
         "2177022"
       ],
-      "verdict": null,
+      "verdict": "NOT ENOUGH EVIDENCE",
       "predicted_label": "NEI",
       "answered": false,
-      "answered_source": "judge",
+      "answered_source": "verdict",
       "judge_answered": false,
       "faithfulness": 1.0,
       "context_relevance": 0.2,
@@ -2484,7 +2563,7 @@
       "evidence_qrels": true,
       "abstention_class": "correct_abstention",
       "abstention_class_qrels": "false_abstention",
-      "answer": "The context discusses CCL19 as a soluble CCR7 ligand involved in dendritic cell migration [1][5], but it does not mention dLNs or state that CCL19 is absent within them. Therefore, the claim is neither supported nor refuted by the provided passages. Verdict: NOT ENOUGH EVIDENCE",
+      "answer": "The context discusses CCL19 as a soluble CCR7 ligand involved in dendritic cell migration [1][5], but it does not mention dLNs or state that CCL19 is absent within them. Therefore, the claim is neither supported nor refuted by the provided passages.",
       "cited_doc_ids": [
         "2177022",
         "40590358"
@@ -2502,7 +2581,8 @@
       "completion_tokens": 1339,
       "reasoning_tokens": 1226,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "inline"
     },
     {
       "query_id": "922",
@@ -2542,7 +2622,8 @@
       "completion_tokens": 650,
       "reasoning_tokens": 577,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "13",
@@ -2581,7 +2662,8 @@
       "completion_tokens": 1543,
       "reasoning_tokens": 1532,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "845",
@@ -2621,7 +2703,8 @@
       "completion_tokens": 276,
       "reasoning_tokens": 240,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "141",
@@ -2634,10 +2717,10 @@
         "14437255",
         "6955746"
       ],
-      "verdict": null,
-      "predicted_label": "NONE",
+      "verdict": "SUPPORTED",
+      "predicted_label": "SUPPORT",
       "answered": true,
-      "answered_source": "judge",
+      "answered_source": "verdict",
       "judge_answered": true,
       "faithfulness": 1.0,
       "context_relevance": 1.0,
@@ -2662,7 +2745,8 @@
       "completion_tokens": 358,
       "reasoning_tokens": 362,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "stance"
     },
     {
       "query_id": "814",
@@ -2700,7 +2784,8 @@
       "completion_tokens": 2256,
       "reasoning_tokens": 2314,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "113",
@@ -2740,7 +2825,8 @@
       "completion_tokens": 936,
       "reasoning_tokens": 1023,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1199",
@@ -2782,7 +2868,8 @@
       "completion_tokens": 1194,
       "reasoning_tokens": 1246,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "589",
@@ -2822,7 +2909,8 @@
       "completion_tokens": 1081,
       "reasoning_tokens": 1025,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "785",
@@ -2861,7 +2949,8 @@
       "completion_tokens": 1052,
       "reasoning_tokens": 1168,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1320",
@@ -2901,7 +2990,8 @@
       "completion_tokens": 1659,
       "reasoning_tokens": 1763,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "410",
@@ -2939,7 +3029,8 @@
       "completion_tokens": 422,
       "reasoning_tokens": 370,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1319",
@@ -2980,7 +3071,8 @@
       "completion_tokens": 1919,
       "reasoning_tokens": 2154,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "179",
@@ -3028,7 +3120,8 @@
       "completion_tokens": 2772,
       "reasoning_tokens": 2648,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1368",
@@ -3040,10 +3133,10 @@
       "qrels_doc_ids": [
         "2425364"
       ],
-      "verdict": null,
+      "verdict": "NOT ENOUGH EVIDENCE",
       "predicted_label": "NEI",
       "answered": false,
-      "answered_source": "judge",
+      "answered_source": "verdict",
       "judge_answered": false,
       "faithfulness": 1.0,
       "context_relevance": 0.0,
@@ -3072,7 +3165,8 @@
       "completion_tokens": 1858,
       "reasoning_tokens": 2084,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "stance"
     },
     {
       "query_id": "1262",
@@ -3112,7 +3206,8 @@
       "completion_tokens": 1339,
       "reasoning_tokens": 1310,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1273",
@@ -3152,7 +3247,8 @@
       "completion_tokens": 875,
       "reasoning_tokens": 845,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "569",
@@ -3192,7 +3288,8 @@
       "completion_tokens": 729,
       "reasoning_tokens": 739,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1086",
@@ -3232,7 +3329,8 @@
       "completion_tokens": 1223,
       "reasoning_tokens": 1298,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1100",
@@ -3272,7 +3370,8 @@
       "completion_tokens": 486,
       "reasoning_tokens": 483,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "217",
@@ -3312,7 +3411,8 @@
       "completion_tokens": 825,
       "reasoning_tokens": 765,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "213",
@@ -3351,7 +3451,8 @@
       "completion_tokens": 480,
       "reasoning_tokens": 330,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1370",
@@ -3391,7 +3492,8 @@
       "completion_tokens": 672,
       "reasoning_tokens": 659,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "783",
@@ -3431,7 +3533,8 @@
       "completion_tokens": 1569,
       "reasoning_tokens": 1477,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "411",
@@ -3469,7 +3572,8 @@
       "completion_tokens": 1021,
       "reasoning_tokens": 1176,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1194",
@@ -3508,7 +3612,8 @@
       "completion_tokens": 1647,
       "reasoning_tokens": 1711,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "143",
@@ -3520,10 +3625,10 @@
       "qrels_doc_ids": [
         "10582939"
       ],
-      "verdict": null,
-      "predicted_label": "NONE",
+      "verdict": "SUPPORTED",
+      "predicted_label": "SUPPORT",
       "answered": true,
-      "answered_source": "judge",
+      "answered_source": "verdict",
       "judge_answered": true,
       "faithfulness": 1.0,
       "context_relevance": 1.0,
@@ -3548,7 +3653,8 @@
       "completion_tokens": 330,
       "reasoning_tokens": 269,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "stance"
     },
     {
       "query_id": "1146",
@@ -3588,7 +3694,8 @@
       "completion_tokens": 2035,
       "reasoning_tokens": 2187,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1121",
@@ -3628,7 +3735,8 @@
       "completion_tokens": 1211,
       "reasoning_tokens": 1240,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1216",
@@ -3668,7 +3776,8 @@
       "completion_tokens": 2045,
       "reasoning_tokens": 2197,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1089",
@@ -3680,10 +3789,10 @@
       "qrels_doc_ids": [
         "17628888"
       ],
-      "verdict": null,
-      "predicted_label": "NONE",
+      "verdict": "SUPPORTED",
+      "predicted_label": "SUPPORT",
       "answered": true,
-      "answered_source": "judge",
+      "answered_source": "verdict",
       "judge_answered": true,
       "faithfulness": 1.0,
       "context_relevance": 1.0,
@@ -3708,7 +3817,8 @@
       "completion_tokens": 235,
       "reasoning_tokens": 162,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "stance"
     },
     {
       "query_id": "1021",
@@ -3746,7 +3856,8 @@
       "completion_tokens": 4096,
       "reasoning_tokens": 4757,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": null
     },
     {
       "query_id": "72",
@@ -3785,7 +3896,8 @@
       "completion_tokens": 2373,
       "reasoning_tokens": 2358,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "50",
@@ -3825,7 +3937,8 @@
       "completion_tokens": 905,
       "reasoning_tokens": 902,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "800",
@@ -3865,7 +3978,8 @@
       "completion_tokens": 2267,
       "reasoning_tokens": 2534,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "784",
@@ -3906,7 +4020,8 @@
       "completion_tokens": 1783,
       "reasoning_tokens": 1902,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "911",
@@ -3946,7 +4061,8 @@
       "completion_tokens": 1865,
       "reasoning_tokens": 1782,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "913",
@@ -3988,7 +4104,8 @@
       "completion_tokens": 1224,
       "reasoning_tokens": 1148,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "535",
@@ -4027,7 +4144,8 @@
       "completion_tokens": 1339,
       "reasoning_tokens": 1431,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "514",
@@ -4037,10 +4155,10 @@
       "qrels_doc_ids": [
         "16256507"
       ],
-      "verdict": null,
+      "verdict": "NOT ENOUGH EVIDENCE",
       "predicted_label": "NEI",
       "answered": false,
-      "answered_source": "judge",
+      "answered_source": "verdict",
       "judge_answered": false,
       "faithfulness": 0.0,
       "context_relevance": 0.6,
@@ -4065,7 +4183,8 @@
       "completion_tokens": 4096,
       "reasoning_tokens": 4015,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "stance"
     },
     {
       "query_id": "129",
@@ -4105,7 +4224,8 @@
       "completion_tokens": 753,
       "reasoning_tokens": 729,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1272",
@@ -4143,7 +4263,8 @@
       "completion_tokens": 1776,
       "reasoning_tokens": 1831,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "478",
@@ -4182,7 +4303,8 @@
       "completion_tokens": 2063,
       "reasoning_tokens": 2119,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1137",
@@ -4222,7 +4344,8 @@
       "completion_tokens": 934,
       "reasoning_tokens": 883,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "549",
@@ -4234,10 +4357,10 @@
       "qrels_doc_ids": [
         "9433958"
       ],
-      "verdict": null,
-      "predicted_label": "NONE",
+      "verdict": "SUPPORTED",
+      "predicted_label": "SUPPORT",
       "answered": true,
-      "answered_source": "judge",
+      "answered_source": "verdict",
       "judge_answered": true,
       "faithfulness": 1.0,
       "context_relevance": 1.0,
@@ -4262,7 +4385,8 @@
       "completion_tokens": 179,
       "reasoning_tokens": 147,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "stance"
     },
     {
       "query_id": "700",
@@ -4300,7 +4424,8 @@
       "completion_tokens": 1187,
       "reasoning_tokens": 1196,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1335",
@@ -4340,7 +4465,8 @@
       "completion_tokens": 2034,
       "reasoning_tokens": 2320,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "436",
@@ -4380,7 +4506,8 @@
       "completion_tokens": 1055,
       "reasoning_tokens": 1080,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1303",
@@ -4418,7 +4545,8 @@
       "completion_tokens": 947,
       "reasoning_tokens": 907,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1020",
@@ -4459,7 +4587,8 @@
       "completion_tokens": 3520,
       "reasoning_tokens": 3924,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1385",
@@ -4500,7 +4629,8 @@
       "completion_tokens": 304,
       "reasoning_tokens": 240,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "48",
@@ -4540,7 +4670,8 @@
       "completion_tokens": 3096,
       "reasoning_tokens": 2723,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "729",
@@ -4580,7 +4711,8 @@
       "completion_tokens": 4042,
       "reasoning_tokens": 3986,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "127",
@@ -4619,7 +4751,8 @@
       "completion_tokens": 1204,
       "reasoning_tokens": 1097,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1226",
@@ -4657,7 +4790,8 @@
       "completion_tokens": 922,
       "reasoning_tokens": 921,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "793",
@@ -4699,7 +4833,8 @@
       "completion_tokens": 929,
       "reasoning_tokens": 1015,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1019",
@@ -4739,7 +4874,8 @@
       "completion_tokens": 1410,
       "reasoning_tokens": 1616,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "870",
@@ -4778,7 +4914,8 @@
       "completion_tokens": 1703,
       "reasoning_tokens": 1991,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1204",
@@ -4788,17 +4925,17 @@
       "qrels_doc_ids": [
         "31141365"
       ],
-      "verdict": null,
-      "predicted_label": "NONE",
-      "answered": true,
-      "answered_source": "judge",
+      "verdict": "NOT ENOUGH EVIDENCE",
+      "predicted_label": "NEI",
+      "answered": false,
+      "answered_source": "verdict",
       "judge_answered": true,
       "faithfulness": 1.0,
       "context_relevance": 0.3,
       "evidence": false,
       "evidence_qrels": true,
-      "abstention_class": "answered_without_evidence",
-      "abstention_class_qrels": "answered_with_evidence",
+      "abstention_class": "correct_abstention",
+      "abstention_class_qrels": "false_abstention",
       "answer": "The provided context passages do not mention H3K4me3 or H3K79me2. Passage [1] discusses chromatin states of quiescent hair follicle stem cells but only references H3K27me3 and polycomb-group repression, not the combination specified in the question.",
       "cited_doc_ids": [
         "31141365"
@@ -4816,7 +4953,8 @@
       "completion_tokens": 1443,
       "reasoning_tokens": 1291,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "stance"
     },
     {
       "query_id": "1332",
@@ -4854,7 +4992,8 @@
       "completion_tokens": 1479,
       "reasoning_tokens": 1360,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1144",
@@ -4894,7 +5033,8 @@
       "completion_tokens": 1044,
       "reasoning_tokens": 906,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "540",
@@ -4937,7 +5077,8 @@
       "completion_tokens": 1400,
       "reasoning_tokens": 1504,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "674",
@@ -4979,7 +5120,8 @@
       "completion_tokens": 713,
       "reasoning_tokens": 713,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "248",
@@ -4991,10 +5133,10 @@
       "qrels_doc_ids": [
         "1568684"
       ],
-      "verdict": null,
-      "predicted_label": "NONE",
+      "verdict": "SUPPORTED",
+      "predicted_label": "SUPPORT",
       "answered": true,
-      "answered_source": "judge",
+      "answered_source": "verdict",
       "judge_answered": true,
       "faithfulness": 1.0,
       "context_relevance": 1.0,
@@ -5019,7 +5161,8 @@
       "completion_tokens": 117,
       "reasoning_tokens": 79,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "stance"
     },
     {
       "query_id": "42",
@@ -5059,7 +5202,8 @@
       "completion_tokens": 1111,
       "reasoning_tokens": 1136,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1389",
@@ -5099,7 +5243,8 @@
       "completion_tokens": 1482,
       "reasoning_tokens": 1494,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1207",
@@ -5137,7 +5282,8 @@
       "completion_tokens": 927,
       "reasoning_tokens": 930,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1163",
@@ -5178,7 +5324,8 @@
       "completion_tokens": 2724,
       "reasoning_tokens": 2665,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "3",
@@ -5222,7 +5369,8 @@
       "completion_tokens": 2480,
       "reasoning_tokens": 2572,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "269",
@@ -5261,7 +5409,8 @@
       "completion_tokens": 1606,
       "reasoning_tokens": 1856,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "879",
@@ -5301,7 +5450,8 @@
       "completion_tokens": 1582,
       "reasoning_tokens": 1760,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1259",
@@ -5342,7 +5492,8 @@
       "completion_tokens": 1535,
       "reasoning_tokens": 1646,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "692",
@@ -5354,10 +5505,10 @@
       "qrels_doc_ids": [
         "24088502"
       ],
-      "verdict": null,
-      "predicted_label": "NONE",
+      "verdict": "REFUTED",
+      "predicted_label": "CONTRADICT",
       "answered": true,
-      "answered_source": "judge",
+      "answered_source": "verdict",
       "judge_answered": true,
       "faithfulness": 1.0,
       "context_relevance": 0.8,
@@ -5365,7 +5516,7 @@
       "evidence_qrels": true,
       "abstention_class": "answered_with_evidence",
       "abstention_class_qrels": "answered_with_evidence",
-      "answer": "The context does not support this claim. Passage [1] found that serious nosocomial infections did not decrease significantly after universal leukoreduction (adjusted OR 0.97; 95% CI 0.87\u20131.09), indicating no clear increase in infectious complications from leuko-increased blood. Verdict: REFUTED",
+      "answer": "The context does not support this claim. Passage [1] found that serious nosocomial infections did not decrease significantly after universal leukoreduction (adjusted OR 0.97; 95% CI 0.87\u20131.09), indicating no clear increase in infectious complications from leuko-increased blood.",
       "cited_doc_ids": [
         "24088502"
       ],
@@ -5382,7 +5533,8 @@
       "completion_tokens": 1903,
       "reasoning_tokens": 1994,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "inline"
     },
     {
       "query_id": "960",
@@ -5422,7 +5574,8 @@
       "completion_tokens": 1677,
       "reasoning_tokens": 1958,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1191",
@@ -5464,7 +5617,8 @@
       "completion_tokens": 1137,
       "reasoning_tokens": 1132,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "628",
@@ -5474,18 +5628,18 @@
       "qrels_doc_ids": [
         "24512064"
       ],
-      "verdict": null,
-      "predicted_label": "NONE",
-      "answered": true,
-      "answered_source": "judge",
+      "verdict": "NOT ENOUGH EVIDENCE",
+      "predicted_label": "NEI",
+      "answered": false,
+      "answered_source": "verdict",
       "judge_answered": true,
       "faithfulness": 1.0,
       "context_relevance": 0.8,
       "evidence": false,
       "evidence_qrels": true,
-      "abstention_class": "answered_without_evidence",
-      "abstention_class_qrels": "answered_with_evidence",
-      "answer": "The context states that HTLV-I infection is endemic in Japan, the Caribbean, Africa, and Melanesia, but does not indicate that infection is most frequent in individuals of African origin [3]. Verdict: NOT ENOUGH EVIDENCE",
+      "abstention_class": "correct_abstention",
+      "abstention_class_qrels": "false_abstention",
+      "answer": "The context states that HTLV-I infection is endemic in Japan, the Caribbean, Africa, and Melanesia, but does not indicate that infection is most frequent in individuals of African origin [3].",
       "cited_doc_ids": [
         "24512064"
       ],
@@ -5502,7 +5656,8 @@
       "completion_tokens": 1904,
       "reasoning_tokens": 2016,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "inline"
     },
     {
       "query_id": "261",
@@ -5548,7 +5703,8 @@
       "completion_tokens": 1759,
       "reasoning_tokens": 1926,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1382",
@@ -5588,7 +5744,8 @@
       "completion_tokens": 540,
       "reasoning_tokens": 448,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": null
     },
     {
       "query_id": "1029",
@@ -5634,7 +5791,8 @@
       "completion_tokens": 510,
       "reasoning_tokens": 433,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "805",
@@ -5674,7 +5832,8 @@
       "completion_tokens": 776,
       "reasoning_tokens": 765,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1241",
@@ -5714,7 +5873,8 @@
       "completion_tokens": 1316,
       "reasoning_tokens": 1461,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "502",
@@ -5750,7 +5910,8 @@
       "completion_tokens": 335,
       "reasoning_tokens": 377,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "233",
@@ -5790,7 +5951,8 @@
       "completion_tokens": 760,
       "reasoning_tokens": 772,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "993",
@@ -5830,7 +5992,8 @@
       "completion_tokens": 269,
       "reasoning_tokens": 172,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "298",
@@ -5871,7 +6034,8 @@
       "completion_tokens": 640,
       "reasoning_tokens": 631,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "327",
@@ -5911,7 +6075,8 @@
       "completion_tokens": 875,
       "reasoning_tokens": 862,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": null
     },
     {
       "query_id": "544",
@@ -5949,7 +6114,8 @@
       "completion_tokens": 1538,
       "reasoning_tokens": 1549,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1196",
@@ -5959,10 +6125,10 @@
       "qrels_doc_ids": [
         "25649714"
       ],
-      "verdict": null,
+      "verdict": "NOT ENOUGH EVIDENCE",
       "predicted_label": "NEI",
       "answered": false,
-      "answered_source": "judge",
+      "answered_source": "verdict",
       "judge_answered": false,
       "faithfulness": 1.0,
       "context_relevance": 0.0,
@@ -5970,7 +6136,7 @@
       "evidence_qrels": true,
       "abstention_class": "correct_abstention",
       "abstention_class_qrels": "false_abstention",
-      "answer": "The provided passages do not address whether safe places to study are effective at decreasing homelessness. The articles focus on the effects of homelessness on children, mental health outreach, rehousing outcomes, and youth health perceptions, but none evaluate study spaces as an intervention [1][2][3][4][5]. Verdict: NOT ENOUGH EVIDENCE",
+      "answer": "The provided passages do not address whether safe places to study are effective at decreasing homelessness. The articles focus on the effects of homelessness on children, mental health outreach, rehousing outcomes, and youth health perceptions, but none evaluate study spaces as an intervention [1][2][3][4][5].",
       "cited_doc_ids": [
         "33135135",
         "154243324",
@@ -5991,7 +6157,8 @@
       "completion_tokens": 1102,
       "reasoning_tokens": 1229,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "inline"
     },
     {
       "query_id": "1337",
@@ -6031,7 +6198,8 @@
       "completion_tokens": 1649,
       "reasoning_tokens": 1402,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "133",
@@ -6075,7 +6243,8 @@
       "completion_tokens": 1887,
       "reasoning_tokens": 1782,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "100",
@@ -6087,10 +6256,10 @@
       "qrels_doc_ids": [
         "4381486"
       ],
-      "verdict": null,
-      "predicted_label": "NONE",
+      "verdict": "SUPPORTED",
+      "predicted_label": "SUPPORT",
       "answered": true,
-      "answered_source": "judge",
+      "answered_source": "verdict",
       "judge_answered": true,
       "faithfulness": 1.0,
       "context_relevance": 1.0,
@@ -6098,7 +6267,7 @@
       "evidence_qrels": true,
       "abstention_class": "answered_with_evidence",
       "abstention_class_qrels": "answered_with_evidence",
-      "answer": "The context supports the claim [1]. Verdict: SUPPORTED",
+      "answer": "The context supports the claim [1].",
       "cited_doc_ids": [
         "4381486"
       ],
@@ -6115,7 +6284,8 @@
       "completion_tokens": 263,
       "reasoning_tokens": 266,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "inline"
     },
     {
       "query_id": "560",
@@ -6156,7 +6326,8 @@
       "completion_tokens": 1955,
       "reasoning_tokens": 1967,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "723",
@@ -6196,7 +6367,8 @@
       "completion_tokens": 781,
       "reasoning_tokens": 807,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "57",
@@ -6236,7 +6408,8 @@
       "completion_tokens": 382,
       "reasoning_tokens": 309,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "232",
@@ -6275,7 +6448,8 @@
       "completion_tokens": 1928,
       "reasoning_tokens": 2025,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1110",
@@ -6316,7 +6490,8 @@
       "completion_tokens": 1621,
       "reasoning_tokens": 1855,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "49",
@@ -6356,7 +6531,8 @@
       "completion_tokens": 1397,
       "reasoning_tokens": 1288,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "743",
@@ -6396,7 +6572,8 @@
       "completion_tokens": 1016,
       "reasoning_tokens": 1028,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1281",
@@ -6436,7 +6613,8 @@
       "completion_tokens": 1447,
       "reasoning_tokens": 1393,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1316",
@@ -6446,10 +6624,10 @@
       "qrels_doc_ids": [
         "27910499"
       ],
-      "verdict": null,
+      "verdict": "NOT ENOUGH EVIDENCE",
       "predicted_label": "NEI",
       "answered": false,
-      "answered_source": "judge",
+      "answered_source": "verdict",
       "judge_answered": false,
       "faithfulness": 1.0,
       "context_relevance": 0.2,
@@ -6457,7 +6635,7 @@
       "evidence_qrels": false,
       "abstention_class": "correct_abstention",
       "abstention_class_qrels": "correct_abstention",
-      "answer": "None of the provided passages directly address whether transferred UCB T cells acquire a memory-like phenotype in recipients. Passage [1] discusses immune reconstitution and T-cell expansion after UCB transplantation but does not mention a memory-like phenotype, while passages [2] and [4] describe memory T cell biology without reference to UCB. Verdict: NOT ENOUGH EVIDENCE",
+      "answer": "None of the provided passages directly address whether transferred UCB T cells acquire a memory-like phenotype in recipients. Passage [1] discusses immune reconstitution and T-cell expansion after UCB transplantation but does not mention a memory-like phenotype, while passages [2] and [4] describe memory T cell biology without reference to UCB.",
       "cited_doc_ids": [
         "27243019",
         "24879055",
@@ -6476,7 +6654,8 @@
       "completion_tokens": 1394,
       "reasoning_tokens": 1496,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "inline"
     },
     {
       "query_id": "148",
@@ -6518,7 +6697,8 @@
       "completion_tokens": 1456,
       "reasoning_tokens": 1541,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1175",
@@ -6557,7 +6737,8 @@
       "completion_tokens": 303,
       "reasoning_tokens": 239,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "132",
@@ -6567,10 +6748,10 @@
       "qrels_doc_ids": [
         "7975937"
       ],
-      "verdict": null,
-      "predicted_label": "NONE",
+      "verdict": "SUPPORTED",
+      "predicted_label": "SUPPORT",
       "answered": true,
-      "answered_source": "judge",
+      "answered_source": "verdict",
       "judge_answered": true,
       "faithfulness": 0.8,
       "context_relevance": 0.6,
@@ -6595,7 +6776,8 @@
       "completion_tokens": 559,
       "reasoning_tokens": 479,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "stance"
     },
     {
       "query_id": "1179",
@@ -6633,7 +6815,8 @@
       "completion_tokens": 1725,
       "reasoning_tokens": 1631,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "887",
@@ -6669,7 +6852,8 @@
       "completion_tokens": 4096,
       "reasoning_tokens": 4606,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": null
     },
     {
       "query_id": "832",
@@ -6709,7 +6893,8 @@
       "completion_tokens": 688,
       "reasoning_tokens": 636,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1132",
@@ -6752,7 +6937,8 @@
       "completion_tokens": 2048,
       "reasoning_tokens": 2154,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "440",
@@ -6792,7 +6978,8 @@
       "completion_tokens": 1362,
       "reasoning_tokens": 1245,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "831",
@@ -6830,7 +7017,8 @@
       "completion_tokens": 1289,
       "reasoning_tokens": 1290,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "208",
@@ -6870,7 +7058,8 @@
       "completion_tokens": 1791,
       "reasoning_tokens": 1828,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "532",
@@ -6910,7 +7099,8 @@
       "completion_tokens": 497,
       "reasoning_tokens": 456,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "303",
@@ -6948,7 +7138,8 @@
       "completion_tokens": 2443,
       "reasoning_tokens": 2476,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "649",
@@ -6986,7 +7177,8 @@
       "completion_tokens": 437,
       "reasoning_tokens": 452,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "385",
@@ -7029,7 +7221,8 @@
       "completion_tokens": 1636,
       "reasoning_tokens": 1768,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "439",
@@ -7067,7 +7260,8 @@
       "completion_tokens": 1524,
       "reasoning_tokens": 1446,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "94",
@@ -7105,7 +7299,8 @@
       "completion_tokens": 768,
       "reasoning_tokens": 804,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": null
     },
     {
       "query_id": "1104",
@@ -7145,7 +7340,8 @@
       "completion_tokens": 1116,
       "reasoning_tokens": 974,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "554",
@@ -7184,7 +7380,8 @@
       "completion_tokens": 1739,
       "reasoning_tokens": 1786,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "823",
@@ -7224,7 +7421,8 @@
       "completion_tokens": 434,
       "reasoning_tokens": 333,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "115",
@@ -7264,7 +7462,8 @@
       "completion_tokens": 729,
       "reasoning_tokens": 751,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "324",
@@ -7303,7 +7502,8 @@
       "completion_tokens": 1436,
       "reasoning_tokens": 1309,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "501",
@@ -7343,7 +7543,8 @@
       "completion_tokens": 1547,
       "reasoning_tokens": 1849,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1200",
@@ -7379,7 +7580,8 @@
       "completion_tokens": 2545,
       "reasoning_tokens": 2599,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "728",
@@ -7421,7 +7623,8 @@
       "completion_tokens": 1807,
       "reasoning_tokens": 1737,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "907",
@@ -7459,7 +7662,8 @@
       "completion_tokens": 605,
       "reasoning_tokens": 612,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1213",
@@ -7498,7 +7702,8 @@
       "completion_tokens": 3440,
       "reasoning_tokens": 4067,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1344",
@@ -7537,7 +7742,8 @@
       "completion_tokens": 3485,
       "reasoning_tokens": 3960,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "343",
@@ -7576,7 +7782,8 @@
       "completion_tokens": 4096,
       "reasoning_tokens": 4713,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": null
     },
     {
       "query_id": "847",
@@ -7614,7 +7821,8 @@
       "completion_tokens": 4096,
       "reasoning_tokens": 4700,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": null
     },
     {
       "query_id": "362",
@@ -7653,7 +7861,8 @@
       "completion_tokens": 1875,
       "reasoning_tokens": 1937,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "808",
@@ -7693,7 +7902,8 @@
       "completion_tokens": 843,
       "reasoning_tokens": 943,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1041",
@@ -7732,7 +7942,8 @@
       "completion_tokens": 4096,
       "reasoning_tokens": 4395,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": null
     },
     {
       "query_id": "384",
@@ -7771,7 +7982,8 @@
       "completion_tokens": 3668,
       "reasoning_tokens": 4042,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "727",
@@ -7810,7 +8022,8 @@
       "completion_tokens": 1514,
       "reasoning_tokens": 1404,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "99",
@@ -7852,7 +8065,8 @@
       "completion_tokens": 1086,
       "reasoning_tokens": 1056,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1049",
@@ -7892,7 +8106,8 @@
       "completion_tokens": 1700,
       "reasoning_tokens": 1905,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "415",
@@ -7932,7 +8147,8 @@
       "completion_tokens": 1925,
       "reasoning_tokens": 1956,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1245",
@@ -7970,7 +8186,8 @@
       "completion_tokens": 1248,
       "reasoning_tokens": 1321,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "882",
@@ -8010,7 +8227,8 @@
       "completion_tokens": 745,
       "reasoning_tokens": 671,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "525",
@@ -8050,7 +8268,8 @@
       "completion_tokens": 1515,
       "reasoning_tokens": 1738,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "742",
@@ -8090,7 +8309,8 @@
       "completion_tokens": 368,
       "reasoning_tokens": 302,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "388",
@@ -8100,10 +8320,10 @@
       "qrels_doc_ids": [
         "1148122"
       ],
-      "verdict": null,
+      "verdict": "NOT ENOUGH EVIDENCE",
       "predicted_label": "NEI",
       "answered": false,
-      "answered_source": "judge",
+      "answered_source": "verdict",
       "judge_answered": false,
       "faithfulness": 1.0,
       "context_relevance": 0.0,
@@ -8111,7 +8331,7 @@
       "evidence_qrels": true,
       "abstention_class": "correct_abstention",
       "abstention_class_qrels": "false_abstention",
-      "answer": "The provided context passages do not mention IBP or its regulation under ethanol stress, so the claim is neither supported nor refuted by the given information. Verdict: NOT ENOUGH EVIDENCE",
+      "answer": "The provided context passages do not mention IBP or its regulation under ethanol stress, so the claim is neither supported nor refuted by the given information.",
       "cited_doc_ids": [],
       "retrieved_doc_ids": [
         "1148122",
@@ -8126,7 +8346,8 @@
       "completion_tokens": 964,
       "reasoning_tokens": 1032,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "inline"
     },
     {
       "query_id": "578",
@@ -8166,7 +8387,8 @@
       "completion_tokens": 915,
       "reasoning_tokens": 830,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1185",
@@ -8206,7 +8428,8 @@
       "completion_tokens": 155,
       "reasoning_tokens": 112,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "475",
@@ -8249,7 +8472,8 @@
       "completion_tokens": 1152,
       "reasoning_tokens": 1248,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "517",
@@ -8288,7 +8512,8 @@
       "completion_tokens": 1111,
       "reasoning_tokens": 1096,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "279",
@@ -8328,7 +8553,8 @@
       "completion_tokens": 473,
       "reasoning_tokens": 412,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "967",
@@ -8369,7 +8595,8 @@
       "completion_tokens": 1194,
       "reasoning_tokens": 1120,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "715",
@@ -8405,7 +8632,8 @@
       "completion_tokens": 933,
       "reasoning_tokens": 824,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "513",
@@ -8446,7 +8674,8 @@
       "completion_tokens": 1578,
       "reasoning_tokens": 1679,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1232",
@@ -8486,7 +8715,8 @@
       "completion_tokens": 220,
       "reasoning_tokens": 138,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1359",
@@ -8527,7 +8757,8 @@
       "completion_tokens": 2384,
       "reasoning_tokens": 2277,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "575",
@@ -8537,10 +8768,10 @@
       "qrels_doc_ids": [
         "10300888"
       ],
-      "verdict": null,
+      "verdict": "NOT ENOUGH EVIDENCE",
       "predicted_label": "NEI",
       "answered": false,
-      "answered_source": "judge",
+      "answered_source": "verdict",
       "judge_answered": false,
       "faithfulness": 1.0,
       "context_relevance": 0.1,
@@ -8548,7 +8779,7 @@
       "evidence_qrels": true,
       "abstention_class": "correct_abstention",
       "abstention_class_qrels": "false_abstention",
-      "answer": "The context does not provide information on whole chromosome aneuploidy in domesticated *Saccharomyces cerevisiae* populations. While passage [1] discusses the genomes and domestication of industrial *S. cerevisiae* yeasts, it does not mention aneuploidy or its prevalence. Verdict: NOT ENOUGH EVIDENCE",
+      "answer": "The context does not provide information on whole chromosome aneuploidy in domesticated *Saccharomyces cerevisiae* populations. While passage [1] discusses the genomes and domestication of industrial *S. cerevisiae* yeasts, it does not mention aneuploidy or its prevalence.",
       "cited_doc_ids": [
         "10300888"
       ],
@@ -8565,7 +8796,8 @@
       "completion_tokens": 1125,
       "reasoning_tokens": 1122,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "inline"
     },
     {
       "query_id": "54",
@@ -8606,7 +8838,8 @@
       "completion_tokens": 399,
       "reasoning_tokens": 335,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "636",
@@ -8646,7 +8879,8 @@
       "completion_tokens": 1036,
       "reasoning_tokens": 771,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "53",
@@ -8686,7 +8920,8 @@
       "completion_tokens": 498,
       "reasoning_tokens": 467,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "163",
@@ -8698,10 +8933,10 @@
       "qrels_doc_ids": [
         "18872233"
       ],
-      "verdict": null,
-      "predicted_label": "NONE",
+      "verdict": "SUPPORTED",
+      "predicted_label": "SUPPORT",
       "answered": true,
-      "answered_source": "judge",
+      "answered_source": "verdict",
       "judge_answered": true,
       "faithfulness": 1.0,
       "context_relevance": 0.8,
@@ -8727,7 +8962,8 @@
       "completion_tokens": 804,
       "reasoning_tokens": 933,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "stance"
     },
     {
       "query_id": "528",
@@ -8767,7 +9003,8 @@
       "completion_tokens": 2394,
       "reasoning_tokens": 2245,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1197",
@@ -8809,7 +9046,8 @@
       "completion_tokens": 1226,
       "reasoning_tokens": 1337,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "914",
@@ -8849,7 +9087,8 @@
       "completion_tokens": 1741,
       "reasoning_tokens": 1565,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "437",
@@ -8889,7 +9128,8 @@
       "completion_tokens": 1408,
       "reasoning_tokens": 1595,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "212",
@@ -8929,7 +9169,8 @@
       "completion_tokens": 1128,
       "reasoning_tokens": 1298,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "619",
@@ -8970,7 +9211,8 @@
       "completion_tokens": 1677,
       "reasoning_tokens": 1878,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "508",
@@ -9009,7 +9251,8 @@
       "completion_tokens": 1585,
       "reasoning_tokens": 1526,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "577",
@@ -9047,7 +9290,8 @@
       "completion_tokens": 2445,
       "reasoning_tokens": 2916,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "249",
@@ -9087,7 +9331,8 @@
       "completion_tokens": 1120,
       "reasoning_tokens": 1129,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "957",
@@ -9128,7 +9373,8 @@
       "completion_tokens": 1435,
       "reasoning_tokens": 1460,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1266",
@@ -9169,7 +9415,8 @@
       "completion_tokens": 2085,
       "reasoning_tokens": 2196,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1062",
@@ -9209,7 +9456,8 @@
       "completion_tokens": 660,
       "reasoning_tokens": 575,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "659",
@@ -9219,10 +9467,10 @@
       "qrels_doc_ids": [
         "1215116"
       ],
-      "verdict": null,
+      "verdict": "NOT ENOUGH EVIDENCE",
       "predicted_label": "NEI",
       "answered": false,
-      "answered_source": "judge",
+      "answered_source": "verdict",
       "judge_answered": false,
       "faithfulness": 1.0,
       "context_relevance": 0.1,
@@ -9247,7 +9495,8 @@
       "completion_tokens": 510,
       "reasoning_tokens": 503,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "stance"
     },
     {
       "query_id": "180",
@@ -9287,7 +9536,8 @@
       "completion_tokens": 378,
       "reasoning_tokens": 310,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "521",
@@ -9327,7 +9577,8 @@
       "completion_tokens": 1717,
       "reasoning_tokens": 1828,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1",
@@ -9337,10 +9588,10 @@
       "qrels_doc_ids": [
         "31715818"
       ],
-      "verdict": null,
+      "verdict": "NOT ENOUGH EVIDENCE",
       "predicted_label": "NEI",
       "answered": false,
-      "answered_source": "judge",
+      "answered_source": "verdict",
       "judge_answered": false,
       "faithfulness": 1.0,
       "context_relevance": 0.0,
@@ -9348,7 +9599,7 @@
       "evidence_qrels": false,
       "abstention_class": "correct_abstention",
       "abstention_class_qrels": "correct_abstention",
-      "answer": "The provided passages do not discuss 0-dimensional biomaterials or their inductive properties [1][2][3][4][5]. Therefore, the context does not contain sufficient information to evaluate this claim. Verdict: NOT ENOUGH EVIDENCE",
+      "answer": "The provided passages do not discuss 0-dimensional biomaterials or their inductive properties [1][2][3][4][5]. Therefore, the context does not contain sufficient information to evaluate this claim.",
       "cited_doc_ids": [
         "43385013",
         "21456232",
@@ -9369,7 +9620,8 @@
       "completion_tokens": 1351,
       "reasoning_tokens": 1468,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "inline"
     },
     {
       "query_id": "1395",
@@ -9405,7 +9657,8 @@
       "completion_tokens": 1236,
       "reasoning_tokens": 1269,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "982",
@@ -9445,7 +9698,8 @@
       "completion_tokens": 1848,
       "reasoning_tokens": 2143,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "431",
@@ -9485,7 +9739,8 @@
       "completion_tokens": 807,
       "reasoning_tokens": 753,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "443",
@@ -9525,7 +9780,8 @@
       "completion_tokens": 1436,
       "reasoning_tokens": 1348,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "185",
@@ -9568,7 +9824,8 @@
       "completion_tokens": 958,
       "reasoning_tokens": 1046,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1107",
@@ -9608,7 +9865,8 @@
       "completion_tokens": 1435,
       "reasoning_tokens": 1556,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "768",
@@ -9647,7 +9905,8 @@
       "completion_tokens": 1698,
       "reasoning_tokens": 1673,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "137",
@@ -9687,7 +9946,8 @@
       "completion_tokens": 1067,
       "reasoning_tokens": 1136,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "51",
@@ -9727,7 +9987,8 @@
       "completion_tokens": 388,
       "reasoning_tokens": 367,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1225",
@@ -9767,7 +10028,8 @@
       "completion_tokens": 759,
       "reasoning_tokens": 605,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "690",
@@ -9809,7 +10071,8 @@
       "completion_tokens": 614,
       "reasoning_tokens": 595,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "744",
@@ -9850,7 +10113,8 @@
       "completion_tokens": 1245,
       "reasoning_tokens": 1299,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "338",
@@ -9890,7 +10154,8 @@
       "completion_tokens": 548,
       "reasoning_tokens": 406,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "837",
@@ -9930,7 +10195,8 @@
       "completion_tokens": 1564,
       "reasoning_tokens": 1476,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "312",
@@ -9972,7 +10238,8 @@
       "completion_tokens": 892,
       "reasoning_tokens": 977,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "239",
@@ -10013,7 +10280,8 @@
       "completion_tokens": 2206,
       "reasoning_tokens": 2381,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "354",
@@ -10052,7 +10320,8 @@
       "completion_tokens": 980,
       "reasoning_tokens": 978,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "118",
@@ -10093,7 +10362,8 @@
       "completion_tokens": 957,
       "reasoning_tokens": 1044,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "821",
@@ -10132,7 +10402,8 @@
       "completion_tokens": 1100,
       "reasoning_tokens": 1244,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "142",
@@ -10172,7 +10443,8 @@
       "completion_tokens": 921,
       "reasoning_tokens": 845,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "880",
@@ -10212,7 +10484,8 @@
       "completion_tokens": 675,
       "reasoning_tokens": 628,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": null
     },
     {
       "query_id": "399",
@@ -10252,7 +10525,8 @@
       "completion_tokens": 1609,
       "reasoning_tokens": 1751,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1280",
@@ -10292,7 +10566,8 @@
       "completion_tokens": 1225,
       "reasoning_tokens": 930,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "218",
@@ -10332,7 +10607,8 @@
       "completion_tokens": 1049,
       "reasoning_tokens": 1030,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "533",
@@ -10372,7 +10648,8 @@
       "completion_tokens": 1281,
       "reasoning_tokens": 1270,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "268",
@@ -10411,7 +10688,8 @@
       "completion_tokens": 3545,
       "reasoning_tokens": 4077,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "873",
@@ -10460,7 +10738,8 @@
       "completion_tokens": 345,
       "reasoning_tokens": 333,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1363",
@@ -10470,10 +10749,10 @@
       "qrels_doc_ids": [
         "8290953"
       ],
-      "verdict": null,
+      "verdict": "NOT ENOUGH EVIDENCE",
       "predicted_label": "NEI",
       "answered": false,
-      "answered_source": "judge",
+      "answered_source": "verdict",
       "judge_answered": false,
       "faithfulness": 1.0,
       "context_relevance": 0.1,
@@ -10498,7 +10777,8 @@
       "completion_tokens": 1117,
       "reasoning_tokens": 1264,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "stance"
     },
     {
       "query_id": "146",
@@ -10538,7 +10818,8 @@
       "completion_tokens": 476,
       "reasoning_tokens": 363,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "936",
@@ -10579,7 +10860,8 @@
       "completion_tokens": 1167,
       "reasoning_tokens": 1102,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1362",
@@ -10617,7 +10899,8 @@
       "completion_tokens": 924,
       "reasoning_tokens": 877,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "691",
@@ -10653,7 +10936,8 @@
       "completion_tokens": 4096,
       "reasoning_tokens": 4182,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": null
     },
     {
       "query_id": "684",
@@ -10693,7 +10977,8 @@
       "completion_tokens": 1574,
       "reasoning_tokens": 1597,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1282",
@@ -10731,7 +11016,8 @@
       "completion_tokens": 3534,
       "reasoning_tokens": 3898,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "693",
@@ -10771,7 +11057,8 @@
       "completion_tokens": 1483,
       "reasoning_tokens": 1460,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "903",
@@ -10811,7 +11098,8 @@
       "completion_tokens": 492,
       "reasoning_tokens": 395,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "507",
@@ -10850,7 +11138,8 @@
       "completion_tokens": 1910,
       "reasoning_tokens": 2014,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1271",
@@ -10890,7 +11179,8 @@
       "completion_tokens": 1312,
       "reasoning_tokens": 1317,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "421",
@@ -10929,7 +11219,8 @@
       "completion_tokens": 1458,
       "reasoning_tokens": 1613,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "921",
@@ -10969,7 +11260,8 @@
       "completion_tokens": 2159,
       "reasoning_tokens": 2339,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "527",
@@ -11008,7 +11300,8 @@
       "completion_tokens": 1673,
       "reasoning_tokens": 1777,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "641",
@@ -11049,7 +11342,8 @@
       "completion_tokens": 1053,
       "reasoning_tokens": 1139,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": null
     },
     {
       "query_id": "770",
@@ -11089,7 +11383,8 @@
       "completion_tokens": 3351,
       "reasoning_tokens": 3365,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "230",
@@ -11127,7 +11422,8 @@
       "completion_tokens": 4096,
       "reasoning_tokens": 4525,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": null
     },
     {
       "query_id": "516",
@@ -11168,7 +11464,8 @@
       "completion_tokens": 373,
       "reasoning_tokens": 311,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "274",
@@ -11208,7 +11505,8 @@
       "completion_tokens": 2946,
       "reasoning_tokens": 2800,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1290",
@@ -11248,7 +11546,8 @@
       "completion_tokens": 1064,
       "reasoning_tokens": 907,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "660",
@@ -11286,7 +11585,8 @@
       "completion_tokens": 887,
       "reasoning_tokens": 864,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "70",
@@ -11300,10 +11600,10 @@
         "4414547",
         "5956380"
       ],
-      "verdict": null,
-      "predicted_label": "NONE",
+      "verdict": "SUPPORTED",
+      "predicted_label": "SUPPORT",
       "answered": true,
-      "answered_source": "judge",
+      "answered_source": "verdict",
       "judge_answered": true,
       "faithfulness": 1.0,
       "context_relevance": 1.0,
@@ -11329,7 +11629,8 @@
       "completion_tokens": 338,
       "reasoning_tokens": 240,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "stance"
     },
     {
       "query_id": "294",
@@ -11368,7 +11669,8 @@
       "completion_tokens": 1168,
       "reasoning_tokens": 1202,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1202",
@@ -11408,7 +11710,8 @@
       "completion_tokens": 1225,
       "reasoning_tokens": 1337,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "975",
@@ -11447,7 +11750,8 @@
       "completion_tokens": 1837,
       "reasoning_tokens": 2143,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "314",
@@ -11489,7 +11793,8 @@
       "completion_tokens": 2119,
       "reasoning_tokens": 2044,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1024",
@@ -11529,7 +11834,8 @@
       "completion_tokens": 1551,
       "reasoning_tokens": 1695,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1278",
@@ -11568,7 +11874,8 @@
       "completion_tokens": 849,
       "reasoning_tokens": 869,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "644",
@@ -11606,7 +11913,8 @@
       "completion_tokens": 2042,
       "reasoning_tokens": 2252,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1099",
@@ -11642,7 +11950,8 @@
       "completion_tokens": 4096,
       "reasoning_tokens": 4579,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": null
     },
     {
       "query_id": "380",
@@ -11682,7 +11991,8 @@
       "completion_tokens": 516,
       "reasoning_tokens": 498,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "183",
@@ -11722,7 +12032,8 @@
       "completion_tokens": 1391,
       "reasoning_tokens": 1714,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "852",
@@ -11760,7 +12071,8 @@
       "completion_tokens": 1610,
       "reasoning_tokens": 1861,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1187",
@@ -11801,7 +12113,8 @@
       "completion_tokens": 3559,
       "reasoning_tokens": 3893,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "128",
@@ -11840,7 +12153,8 @@
       "completion_tokens": 1947,
       "reasoning_tokens": 1898,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "985",
@@ -11880,7 +12194,8 @@
       "completion_tokens": 1081,
       "reasoning_tokens": 1087,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "216",
@@ -11920,7 +12235,8 @@
       "completion_tokens": 300,
       "reasoning_tokens": 183,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "130",
@@ -11960,7 +12276,8 @@
       "completion_tokens": 798,
       "reasoning_tokens": 774,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "219",
@@ -12000,7 +12317,8 @@
       "completion_tokens": 259,
       "reasoning_tokens": 177,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "1379",
@@ -12048,7 +12366,8 @@
       "completion_tokens": 2134,
       "reasoning_tokens": 2002,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "36",
@@ -12089,7 +12408,8 @@
       "completion_tokens": 3798,
       "reasoning_tokens": 3905,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     },
     {
       "query_id": "275",
@@ -12133,7 +12453,8 @@
       "completion_tokens": 1931,
       "reasoning_tokens": 1801,
       "generation_cost_usd": 0.0,
-      "generation_provider": "Novita"
+      "generation_provider": "Novita",
+      "verdict_source": "line"
     }
   ]
 }
