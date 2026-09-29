@@ -145,8 +145,16 @@ free-tier cap of 1,000 requests/day (account-wide) partway through and resumed f
 checkpoint the next day, and 2 claims that had received empty provider responses were
 retried after the fix in commit 481e623 (retry an empty completion instead of skipping the claim).
 
-**Verdict accuracy is 0.73 (219 of 300), 95% Wilson CI 0.677–0.777.** Per label: SUPPORT 0.694
-(86 of 124), CONTRADICT 0.844 (54 of 64), NEI 0.705 (79 of 112).
+**Verdict accuracy is 0.7767 (233 of 300), 95% Wilson CI 0.726–0.820.** Per label: SUPPORT 0.774
+(96 of 124), CONTRADICT 0.859 (55 of 64), NEI 0.732 (82 of 112).
+
+**What changed (0.73 → 0.78).** Same 300 stored Ling answers, zero new LLM calls: a
+verdict-recovery parser — developed and frozen on 100 SciFact *train* claims, then applied as-is
+to the test answers — reads a verdict restated in the prose when the final `Verdict:` line is
+missing (inline recovery), or falls back to a stance-inference rule. Paired exact McNemar against
+the previous committed run (`make rag-compare`): verdict correctness moves 14 claims from wrong to
+right and 0 from right to wrong (p ≈ 0.0001); abstention (+0.01, p = 0.25) and citation rate
+(+0.00, p = 1.00) don't move, as expected since the underlying answers are unchanged.
 
 Abstention is scored against a **rationale oracle**: the context has evidence when a document the
 annotators cited *with rationale sentences* is in the top-5. NEI claims have no rationale
@@ -156,38 +164,42 @@ document, so abstaining on them is the correct action.
 |---|---|
 | Faithfulness (over answered, LLM judge) | 0.98 |
 | Context relevance (all, LLM judge) | 0.72 |
-| **3-class verdict accuracy** (vs gold label, no judge) | **0.73** (95% CI 0.677–0.777) |
-| Verdict line parsed | 0.86 |
+| **3-class verdict accuracy** (vs gold label, no judge) | **0.78** (0.7767; 95% CI 0.726–0.820) |
+| Verdict line parsed (incl. recovered) | 0.95 |
 | Truncated answers (hit the token budget after 1 retry) | 11 of 300 |
 | Answers that needed the retry | 63 of 300 |
 | Replies citing at least one passage | 282 of 300 |
 | Bare `Verdict:`-only replies | 0 of 300 |
 | Evidence retrieved (rationale doc in top-5) | 0.58 |
-| Answered (model attempted an answer) | 0.65 |
-| **Abstention precision** (abstained & no evidence) | **0.80** |
-| Abstention recall (no evidence & abstained) | 0.67 |
+| Answered (model attempted an answer) | 0.64 |
+| **Abstention precision** (abstained & no evidence) | **0.81** |
+| Abstention recall (no evidence & abstained) | 0.70 |
 | False abstention (had evidence, abstained anyway) | 0.12 |
-| Answered without evidence, as a share of answers given (hallucination risk) | 0.21 |
+| Answered without evidence, as a share of answers given (hallucination risk) | 0.20 |
 
 |  | evidence retrieved (175) | no evidence (125) |
 |---|---|---|
-| **answered** (195) | 154 answered with evidence | 41 answered with nothing to go on |
-| **abstained** (105) | 21 declined despite having the evidence | 84 correct |
+| **answered** (192) | 154 answered with evidence | 38 answered with nothing to go on |
+| **abstained** (108) | 21 declined despite having the evidence | 87 correct |
 
-Verdicts against the gold label (`NONE` = answered with no parseable verdict line, always wrong):
+Verdicts against the gold label (`NONE` = answered with no parseable/recoverable verdict line,
+always wrong):
 
 | Gold \ predicted | SUPPORT | CONTRADICT | NEI | NONE |
 |---|---|---|---|---|
-| **SUPPORT** (124) | 86 | 6 | 19 | 13 |
-| **CONTRADICT** (64) | 1 | 54 | 7 | 2 |
-| **NEI** (112) | 14 | 13 | 79 | 6 |
+| **SUPPORT** (124) | 96 | 6 | 19 | 3 |
+| **CONTRADICT** (64) | 1 | 55 | 7 | 1 |
+| **NEI** (112) | 17 | 13 | 82 | 0 |
 
 **Paired comparisons with the earlier runs.** The sample nests, so the first 50 of these 300
 claims are exactly the claims both earlier 50-claim runs scored, with the same retrieval,
 generator prompt, judge model, judge prompt and scoring: the previous committed Ling run (commit
 1bcdb33, run at c91d5dc) and the paid `openai/gpt-oss-120b` run before it (commit 9e6b2ea, run at
 133e9c7, 1024-token budget). `make rag-compare` pairs them claim by claim with an exact two-sided
-McNemar test (b = earlier run right and this run wrong, c = the reverse):
+McNemar test (b = earlier run right and this run wrong, c = the reverse). **These numbers all
+predate the verdict-recovery parser** — they're scored with the old strict parser (a bare
+`Verdict:` line only), not re-run against it, so read them as "on the old parser," not against the
+0.78 headline above:
 
 | On the 50 shared claims | Earlier run | This run | b | c | p |
 |---|---|---|---|---|---|
@@ -208,25 +220,30 @@ the 50 claims cite a passage only under Ling, 1 only under gpt-oss. On the same 
 replies were a bare `Verdict:` line against 0 for Ling, and the gpt-oss run cost $0.0049 against
 $0.
 
-**Remaining failure modes.** 81 of 300 verdicts are wrong. From the confusion matrix:
+**Remaining failure modes.** 67 of 300 verdicts are wrong (down from 81 before the parser fix).
+From the confusion matrix:
 
-- **NEI claims answered anyway (33 of 112)**, the largest group: 14 SUPPORTED and 13 REFUTED
-  (27 with a wrong explicit verdict), plus 6 answered in prose with no verdict line. They are 33 of
-  the 41 answers given without evidence; the other 8 are correct verdicts (6 CONTRADICT, 2
-  SUPPORT) whose rationale doc wasn't retrieved.
-- **SUPPORT claims abstained on (19 of 124)**, 16 of them with the rationale doc in the context
-  (3 of those 16 were truncated at the token budget).
-- **SUPPORT claims answered with no verdict line (13)**, scored `NONE`; none was truncated. In all,
-  43 of 300 replies have no parseable verdict line: 21 answered in prose (13 SUPPORT, 6 NEI, 2
-  CONTRADICT) and 22 abstentions, 11 of them truncated.
-- Smaller: 6 SUPPORT claims answered REFUTED, 7 CONTRADICT claims abstained on, 2 CONTRADICT
-  claims answered with no verdict line, and 1 CONTRADICT claim answered SUPPORTED.
+- **NEI claims answered anyway (30 of 112)**, still the largest group: 17 SUPPORTED and 13
+  REFUTED, all now resolved to an explicit predicted label (0 scored `NONE` for NEI, down from 6
+  answered-in-prose before the parser). They account for most of the 38 answers given without
+  evidence; the other 8 are correct verdicts (6 CONTRADICT, 2 SUPPORT) whose rationale doc wasn't
+  retrieved.
+- **SUPPORT claims abstained on (19 of 124)**, unchanged by the parser fix — this failure mode is
+  about the model choosing to abstain, not about parsing its reply. 16 of the 19 have the
+  rationale doc in the context (3 of those 16 were truncated at the token budget).
+- **Unparseable replies are down to 15 of 300** (was 43). The recovery parser resolves 28 of the
+  previously-unparsed replies straight from the prose — 10 by finding a verdict restated inline,
+  18 by a stance-inference rule — leaving 15 truly unparseable. Of those, the judge marks 11 as
+  abstentions (scored `NEI`, exactly the 11 truncated-at-budget answers) and 4 as answered anyway
+  (scored `NONE`, always wrong: 3 SUPPORT, 1 CONTRADICT).
+- Smaller: 6 SUPPORT claims answered REFUTED, 7 CONTRADICT claims abstained on, and 1 CONTRADICT
+  claim answered SUPPORTED.
 
 **Finding: the oracle decides whether abstention looks broken.** Scored the legacy way, against
 BEIR qrels (which mark a cited abstract relevant for NEI claims too), the *same answers* give
-abstention precision 0.41 and 62 "false" abstentions (false-abstention rate 0.26). Under the
-rationale oracle, 41 of those 62 are NEI claims where refusing was the right call, and precision
-is 0.80.
+abstention precision 0.40 and 65 "false" abstentions (false-abstention rate 0.28). Under the
+rationale oracle, 44 of those 65 are NEI claims where refusing was the right call, and precision
+is 0.81.
 
 **Earlier runs.** Before the OpenRouter move, a Groq-hosted `openai/gpt-oss-120b` run with a
 `qwen/qwen3.8-27b` judge scored verdict accuracy 0.70 with 0.86 of verdict lines parsed. Two fixes took gpt-oss to
@@ -316,13 +333,15 @@ report records it. `SSR_EVAL_LIMIT=2 make web-eval` is a 3-request smoke run.
 - **NEI labelling.** For the 112 NEI claims, BEIR's qrels mark the cited abstract relevant even
   though annotators found no rationale in it, and the whole hybrid-vs-dense recall gain sits on
   that stratum (Finding 1).
-- **300 claims still leave a ±5-point interval on RAG accuracy.** The eval now covers every
-  SciFact test claim, and the 95% Wilson interval on verdict accuracy is 0.677–0.777 (0.73 ± 0.05,
-  width 0.10), so a gap of a few points between two runs' headline rates means nothing on its
+- **300 claims still leave a ~5-point interval on RAG accuracy.** The eval now covers every
+  SciFact test claim, and the 95% Wilson interval on verdict accuracy is 0.726–0.820 (0.78 ± 0.05,
+  width 0.09), so a gap of a few points between two runs' headline rates means nothing on its
   own; compare runs claim by claim with `make rag-compare` instead.
 - **Paired comparisons with older runs cover only 50 claims.** The gpt-oss and earlier Ling runs
   scored only the first 50 claims, so the McNemar tests above rest on those 50 shared claims, not
   the full 300. At that size only large effects, like the citation gap, can reach significance.
+  Those tables also predate the verdict-recovery parser, so they're on the old strict parser, not
+  comparable to the 0.78 headline above.
 - **One judge model.** Faithfulness and context relevance come from a single judge (Nemotron 3
   Ultra), with no second model or human labels to check it against. It is from a different model
   family than the generator to avoid self-evaluation bias, but a single LLM judge still carries
@@ -340,12 +359,18 @@ report records it. `SSR_EVAL_LIMIT=2 make web-eval` is a 3-request smoke run.
 
 ## What I'd do next
 
-- **A stricter NEI and verdict-line prompt**, developed on SciFact *train* claims
-  (`SSR_RAG_DATASET=beir/scifact/train`) so the test claims stay clean, then confirmed on the 300
-  test claims with `make rag-compare` (paired McNemar against this run). The targets: 33 of 112 NEI
-  claims are answered (14 SUPPORTED, 13 REFUTED, 6 in prose), and 43 of 300 replies have no
-  parseable verdict line (21 answered in prose, 22 abstentions, 11 of them truncated). Structured
-  output or a format-only retry is the fallback if the prompt alone doesn't fix the format.
+- **A small verifier trained on SciFact train hard negatives** ("is this sentence actual
+  evidence?"), building on the NLI baseline already measured (`app/verify/nli.py`,
+  DeBERTa-v3-base-mnli-fever-anli, tuned only on the 809 SciFact train claims: 0.637 verdict
+  accuracy on test vs 0.73 for the Ling LLM at the time, weakest on CONTRADICT at 0.56 — not
+  adopted as the verdict source, kept as a starting point). The target is the two error modes the
+  confusion matrix still shows after the parser fix: 30 of 112 NEI claims answered anyway
+  (over-inference from weak or tangential context) and 19 of 124 SUPPORT claims abstained on
+  despite having the rationale doc (too-literal a read of the passage). A stricter, evidence-first
+  NEI prompt (quote the finding sentence before the verdict) was tried on 100 SciFact train claims
+  and wasn't clearly better than baseline plus the parser (0.847 vs 0.837 verdict accuracy,
+  McNemar p = 1.0), and only 64 of 98 replies followed the required format — so a trained verifier
+  is the next lever, not another prompt rewrite.
 - **Re-run the judge-consistency study on the 300 Ling answers**, and human spot-check faithfulness
   on the rows where judge repeats disagree, since faithfulness is the judge's least stable score
   (alpha 0.51 at T = 0.7).
