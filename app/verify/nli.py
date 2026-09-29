@@ -166,7 +166,13 @@ class NLIVerifier:
 
     `tokenizer` / `model` may be injected (tests); otherwise both load from the HF cache
     by `model_name`. Nothing here downloads unless the model is missing locally.
+
+    Subclass hooks (app.verify.trained): `claim_first` feeds the pair as
+    [CLS] claim [SEP] premise [SEP] (truncating the premise) instead of the MNLI order,
+    and `_label_names` maps the checkpoint's id2label onto our labels.
     """
+
+    claim_first: bool = False
 
     def __init__(
         self,
@@ -209,7 +215,7 @@ class NLIVerifier:
             model = quantize_dynamic(model, {torch.nn.Linear}, dtype=torch.qint8)
         self.tokenizer = tokenizer
         self.model = model
-        self.labels = label_order(model.config.id2label)
+        self.labels = self._label_names(model.config.id2label)
         self._specials = tokenizer.num_special_tokens_to_add(pair=True)
         # Throughput accounting: model forwards only (tokenisation included, cache
         # lookups excluded), so ms/pair is what a cold pair costs.
@@ -220,6 +226,9 @@ class NLIVerifier:
     @property
     def dtype(self) -> str:
         return "int8-dynamic" if self.int8 else "fp32"
+
+    def _label_names(self, id2label: Mapping) -> list[str]:
+        return label_order(id2label)
 
     # --- inputs ---------------------------------------------------------------------
 
@@ -252,11 +261,12 @@ class NLIVerifier:
     # --- scoring --------------------------------------------------------------------
 
     def _forward(self, premises: Sequence[str], claims: Sequence[str]) -> list[list[float]]:
+        first, second = (claims, premises) if self.claim_first else (premises, claims)
         enc = self.tokenizer(
-            list(premises),
-            list(claims),
+            list(first),
+            list(second),
             padding=True,
-            truncation="only_first",
+            truncation="only_second" if self.claim_first else "only_first",
             max_length=self.max_length,
             return_tensors="pt",
         )
