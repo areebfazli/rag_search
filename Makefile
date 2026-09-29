@@ -1,4 +1,4 @@
-.PHONY: install index api eval eval-rag rag-compare analysis latency web-eval test lint ci
+.PHONY: install index api eval eval-rag rag-compare verify-eval analysis latency web-eval test lint ci
 
 install:  ## create env + install deps
 	uv sync
@@ -23,6 +23,9 @@ eval-rag:  ## RAG answer-quality eval (needs SSR_OPENROUTER_API_KEY in .env; ~$0
 
 web-eval:  ## S2 web search vs local hybrid on gold qrels -> eval/results/web_retrieval.{md,json} (set SSR_S2_API_KEY; ~300 requests at 1 req/s)
 	uv run --locked python -m app.eval.web_eval
+
+verify-eval:  ## NLI (DeBERTa) verdicts, no LLM -> data/eval_runs/verify_*/ (SSR_RAG_DATASET, SSR_RAG_N; ARGS=--tune on train only)
+	uv run --locked python -m app.eval.verify_eval $(ARGS)
 
 rag-compare:  ## paired McNemar of two RAG runs: make rag-compare A=path/rag.json B=path/rag.json
 	uv run --locked python -m app.eval.rag_compare $(A) $(B)

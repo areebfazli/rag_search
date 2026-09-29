@@ -25,6 +25,23 @@ class Settings(BaseSettings):
     # SSR_RERANKER_MODEL, but measure before assuming a bigger reranker helps.
     reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
+    # --- NLI verifier (app/verify/nli.py; offline claim verdicts, no LLM) ---
+    # An MNLI/FEVER/ANLI-trained DeBERTa-v3-base cross-encoder that scores each
+    # (abstract, claim) pair as entailment / neutral / contradiction. Its claim-level
+    # threshold and aggregation rule are frozen constants in app/verify/nli.py, tuned on
+    # beir/scifact/train only (the 300 test claims are SciFact's public dev set).
+    nli_model: str = "MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli"
+    # Pairs per forward pass. 1 is fastest on CPU: measured on 29 SciFact pairs (fp32, 4
+    # threads, i5-10210U) batch 1/8/16 ran 525/640/799 ms per pair — padding to the
+    # longest pair costs more than batching saves — and peak memory grows with batch.
+    nli_batch_size: int = Field(default=1, ge=1)
+    # torch intra-op threads; 0 leaves torch's own default. The reference laptop has 4
+    # physical cores, and hyper-threads do not speed up a dense matmul.
+    nli_threads: int = Field(default=4, ge=0)
+    # Dynamic int8 quantisation of the Linear layers. Off: on 300 train claims it dropped
+    # verdict accuracy from 0.72 to 0.37 and was no faster (see nli.FROZEN).
+    nli_int8: bool = False
+
     # --- Vector store (Qdrant local/embedded: on-disk path, or ":memory:") ---
     qdrant_location: str = "./data/qdrant"
     qdrant_collection: str = "corpus"
