@@ -1,0 +1,474 @@
+{
+  "secondary_artifact": true,
+  "headline": "original",
+  "source_run": "eval/results/rag.json",
+  "run": {
+    "git_sha": "56ab63df30577c0c2165d2996a70c06cb5a5f46e",
+    "dataset": "beir/scifact/test",
+    "generator_model": "inclusionai/ling-3.0-flash-sante:free",
+    "judge_model": "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "prompt_hash": "d0921f4e69fc32f9da7ab88f4f7c88bc3cb25591bc5db11793807133c4bbd78b",
+    "n_requested": "all",
+    "sample_seed": 13,
+    "canonical": true
+  },
+  "audit": {
+    "paper": "Sylvestre, J. (2026). Gold Label Errors in the SciFact Benchmark: An LLM-Assisted Annotation Audit. BioNLP 2026. https://aclanthology.org/2026.bionlp-1.9/",
+    "repo": "https://github.com/Kefez/scifact-audit-bionlp2026",
+    "commit": "5711f3fdf2305552df2b6e700dca2ebd7c8806e1",
+    "files": {
+      "LICENSE": "0548d6f5882e0c3fea922f19208f6228da22d7a9d22d6f91536cc032234330a0",
+      "corrections/README.md": "bdd98405b6c5e188b10f72b115b23d6cf4116bebc1ece51035b110a3a63c8eb6",
+      "corrections/dev_corrections.json": "c45ff40e3a8906192595462596dd56146e476aafa5b39fb3cf5a367b80a62b23",
+      "results/stage2_manual_review/scifact_false_alarms_25_review.csv": "9704c80788db4eaee051eef6c60b188df71e7555a3f7c64c821c5fef2974eb85",
+      "results/stage2_manual_review/scifact_false_alarms_remaining_24_review.csv": "c84af6ee62148f927a3712f37f290e45cac524f425169ba64dd81d2a1f5674dd",
+      "paper/scifact_audit_bionlp2026.tex": "eebcc98f78c89b66cb045e09303ef3865e2326355f4b9a3df02885624e056841"
+    },
+    "license": "corrections + review CSVs: CC BY 4.0 (derived from SciFact); code: MIT",
+    "annotators": 1,
+    "n_corrections_strict": 11,
+    "n_per_document": 1,
+    "n_debatable": 8,
+    "debatable_ids": [
+      "57",
+      "163",
+      "431",
+      "540",
+      "982",
+      "1041",
+      "1132",
+      "1150"
+    ]
+  },
+  "n_claims": 300,
+  "n_label_changed": 11,
+  "n_debatable_in_run": 8,
+  "tiers": {
+    "original": {
+      "n": 300,
+      "correct": 233,
+      "verdict_accuracy": 0.7767,
+      "verdict_accuracy_ci95": [
+        0.7262,
+        0.8201
+      ],
+      "per_label": {
+        "SUPPORT": {
+          "n": 124,
+          "correct": 96,
+          "accuracy": 0.7742
+        },
+        "CONTRADICT": {
+          "n": 64,
+          "correct": 55,
+          "accuracy": 0.8594
+        },
+        "NEI": {
+          "n": 112,
+          "correct": 82,
+          "accuracy": 0.7321
+        }
+      },
+      "confusion": {
+        "SUPPORT": {
+          "SUPPORT": 96,
+          "CONTRADICT": 6,
+          "NEI": 19,
+          "NONE": 3
+        },
+        "CONTRADICT": {
+          "SUPPORT": 1,
+          "CONTRADICT": 55,
+          "NEI": 7,
+          "NONE": 1
+        },
+        "NEI": {
+          "SUPPORT": 17,
+          "CONTRADICT": 13,
+          "NEI": 82,
+          "NONE": 0
+        }
+      },
+      "answered_rate": 0.64,
+      "evidence_rate": 0.5833,
+      "abstention_precision": 0.8056,
+      "abstention_recall": 0.696,
+      "false_abstention_rate": 0.12,
+      "answered_without_evidence_rate": 0.1979,
+      "quadrants": {
+        "answered_with_evidence": 154,
+        "answered_without_evidence": 38,
+        "false_abstention": 21,
+        "correct_abstention": 87
+      }
+    },
+    "corrected_strict": {
+      "n": 300,
+      "correct": 244,
+      "verdict_accuracy": 0.8133,
+      "verdict_accuracy_ci95": [
+        0.7654,
+        0.8534
+      ],
+      "per_label": {
+        "SUPPORT": {
+          "n": 116,
+          "correct": 97,
+          "accuracy": 0.8362
+        },
+        "CONTRADICT": {
+          "n": 66,
+          "correct": 59,
+          "accuracy": 0.8939
+        },
+        "NEI": {
+          "n": 118,
+          "correct": 88,
+          "accuracy": 0.7458
+        }
+      },
+      "confusion": {
+        "SUPPORT": {
+          "SUPPORT": 97,
+          "CONTRADICT": 2,
+          "NEI": 14,
+          "NONE": 3
+        },
+        "CONTRADICT": {
+          "SUPPORT": 0,
+          "CONTRADICT": 59,
+          "NEI": 6,
+          "NONE": 1
+        },
+        "NEI": {
+          "SUPPORT": 17,
+          "CONTRADICT": 13,
+          "NEI": 88,
+          "NONE": 0
+        }
+      },
+      "answered_rate": 0.64,
+      "evidence_rate": 0.5667,
+      "abstention_precision": 0.8519,
+      "abstention_recall": 0.7077,
+      "false_abstention_rate": 0.0941,
+      "answered_without_evidence_rate": 0.1979,
+      "quadrants": {
+        "answered_with_evidence": 154,
+        "answered_without_evidence": 38,
+        "false_abstention": 16,
+        "correct_abstention": 92
+      }
+    },
+    "corrected_excl_debatable": {
+      "n": 292,
+      "correct": 239,
+      "verdict_accuracy": 0.8185,
+      "verdict_accuracy_ci95": [
+        0.7702,
+        0.8585
+      ],
+      "per_label": {
+        "SUPPORT": {
+          "n": 110,
+          "correct": 93,
+          "accuracy": 0.8455
+        },
+        "CONTRADICT": {
+          "n": 64,
+          "correct": 58,
+          "accuracy": 0.9062
+        },
+        "NEI": {
+          "n": 118,
+          "correct": 88,
+          "accuracy": 0.7458
+        }
+      },
+      "confusion": {
+        "SUPPORT": {
+          "SUPPORT": 93,
+          "CONTRADICT": 2,
+          "NEI": 12,
+          "NONE": 3
+        },
+        "CONTRADICT": {
+          "SUPPORT": 0,
+          "CONTRADICT": 58,
+          "NEI": 5,
+          "NONE": 1
+        },
+        "NEI": {
+          "SUPPORT": 17,
+          "CONTRADICT": 13,
+          "NEI": 88,
+          "NONE": 0
+        }
+      },
+      "answered_rate": 0.6404,
+      "evidence_rate": 0.5651,
+      "abstention_precision": 0.8476,
+      "abstention_recall": 0.7008,
+      "false_abstention_rate": 0.097,
+      "answered_without_evidence_rate": 0.2032,
+      "quadrants": {
+        "answered_with_evidence": 149,
+        "answered_without_evidence": 38,
+        "false_abstention": 16,
+        "correct_abstention": 89
+      }
+    }
+  },
+  "changed_claims": [
+    {
+      "query_id": "208",
+      "error_type": "overgeneralization",
+      "justification": "Abstract sentences [1] and [8] establish CHEK2 role in breast cancer and report OR 2.26 for 1100delC mutation",
+      "gold_before": "SUPPORT",
+      "gold_after": "CONTRADICT",
+      "rationale_docs_before": 1,
+      "rationale_docs_after": 1,
+      "predicted_label": "CONTRADICT",
+      "correct_before": false,
+      "correct_after": true,
+      "answered": true,
+      "evidence_before": true,
+      "evidence_after": true,
+      "abstention_class_before": "answered_with_evidence",
+      "abstention_class_after": "answered_with_evidence"
+    },
+    {
+      "query_id": "343",
+      "error_type": "outcome_mismatch",
+      "justification": "Claim asks about bleeding events; evidence reports CV mortality, MI, stroke, CHF\u2014bleeding never mentioned",
+      "gold_before": "SUPPORT",
+      "gold_after": "NEI",
+      "rationale_docs_before": 1,
+      "rationale_docs_after": 0,
+      "predicted_label": "NEI",
+      "correct_before": false,
+      "correct_after": true,
+      "answered": false,
+      "evidence_before": true,
+      "evidence_after": false,
+      "abstention_class_before": "false_abstention",
+      "abstention_class_after": "correct_abstention"
+    },
+    {
+      "query_id": "593",
+      "error_type": "label_reversal",
+      "justification": "Evidence states incidence 'did not change over time'; claim says 'decreased by 10%'",
+      "gold_before": "SUPPORT",
+      "gold_after": "CONTRADICT",
+      "rationale_docs_before": 1,
+      "rationale_docs_after": 1,
+      "predicted_label": "CONTRADICT",
+      "correct_before": false,
+      "correct_after": true,
+      "answered": true,
+      "evidence_before": true,
+      "evidence_after": true,
+      "abstention_class_before": "answered_with_evidence",
+      "abstention_class_after": "answered_with_evidence"
+    },
+    {
+      "query_id": "770",
+      "error_type": "outcome_mismatch",
+      "justification": "PFS non-significant (p=0.07); QoL comparison is between two fluoropyrimidines, not single-agent vs combination",
+      "gold_before": "SUPPORT",
+      "gold_after": "NEI",
+      "rationale_docs_before": 1,
+      "rationale_docs_after": 0,
+      "predicted_label": "NEI",
+      "correct_before": false,
+      "correct_after": true,
+      "answered": false,
+      "evidence_before": true,
+      "evidence_after": false,
+      "abstention_class_before": "false_abstention",
+      "abstention_class_after": "correct_abstention"
+    },
+    {
+      "query_id": "808",
+      "error_type": "label_reversal",
+      "justification": "Abstract sentence [3] states 'does not rely on cis-acting sequences', contradicting claim",
+      "gold_before": "SUPPORT",
+      "gold_after": "CONTRADICT",
+      "rationale_docs_before": 1,
+      "rationale_docs_after": 1,
+      "predicted_label": "CONTRADICT",
+      "correct_before": false,
+      "correct_after": true,
+      "answered": true,
+      "evidence_before": true,
+      "evidence_after": true,
+      "abstention_class_before": "answered_with_evidence",
+      "abstention_class_after": "answered_with_evidence"
+    },
+    {
+      "query_id": "847",
+      "error_type": "entity_mismatch",
+      "justification": "Rationale cites rifampicin (1960s drug); claim says 'new drugs'. Moxifloxacin data supports claim direction but 'often' is unsupported",
+      "gold_before": "CONTRADICT",
+      "gold_after": "NEI",
+      "rationale_docs_before": 1,
+      "rationale_docs_after": 0,
+      "predicted_label": "NEI",
+      "correct_before": false,
+      "correct_after": true,
+      "answered": false,
+      "evidence_before": true,
+      "evidence_after": false,
+      "abstention_class_before": "false_abstention",
+      "abstention_class_after": "correct_abstention"
+    },
+    {
+      "query_id": "879",
+      "error_type": "label_reversal",
+      "justification": "Abstract sentence [6] concludes 'the large majority of lincRNAs do not function through encoded proteins', agreeing with claim",
+      "gold_before": "CONTRADICT",
+      "gold_after": "SUPPORT",
+      "rationale_docs_before": 1,
+      "rationale_docs_after": 1,
+      "predicted_label": "SUPPORT",
+      "correct_before": false,
+      "correct_after": true,
+      "answered": true,
+      "evidence_before": true,
+      "evidence_after": true,
+      "abstention_class_before": "answered_with_evidence",
+      "abstention_class_after": "answered_with_evidence"
+    },
+    {
+      "query_id": "1216",
+      "error_type": "entity_mismatch",
+      "justification": "Paper reports on mouse Tmem27; claim specifies 'human beta cells'",
+      "gold_before": "SUPPORT",
+      "gold_after": "NEI",
+      "rationale_docs_before": 1,
+      "rationale_docs_after": 0,
+      "predicted_label": "NEI",
+      "correct_before": false,
+      "correct_after": true,
+      "answered": false,
+      "evidence_before": true,
+      "evidence_after": false,
+      "abstention_class_before": "false_abstention",
+      "abstention_class_after": "correct_abstention"
+    },
+    {
+      "query_id": "1274",
+      "error_type": "entity_mismatch",
+      "justification": "Paper studies V. cholerae and A. baylyi; claim attributes to E. coli",
+      "gold_before": "SUPPORT",
+      "gold_after": "NEI",
+      "rationale_docs_before": 1,
+      "rationale_docs_after": 0,
+      "predicted_label": "NEI",
+      "correct_before": false,
+      "correct_after": true,
+      "answered": false,
+      "evidence_before": true,
+      "evidence_after": false,
+      "abstention_class_before": "false_abstention",
+      "abstention_class_after": "correct_abstention"
+    },
+    {
+      "query_id": "1368",
+      "error_type": "outcome_mismatch",
+      "justification": "Claim asks about preterm birth; evidence reports gestational diabetes, pre-eclampsia, SGA\u2014preterm birth absent",
+      "gold_before": "SUPPORT",
+      "gold_after": "NEI",
+      "rationale_docs_before": 1,
+      "rationale_docs_after": 0,
+      "predicted_label": "NEI",
+      "correct_before": false,
+      "correct_after": true,
+      "answered": false,
+      "evidence_before": false,
+      "evidence_after": false,
+      "abstention_class_before": "correct_abstention",
+      "abstention_class_after": "correct_abstention"
+    },
+    {
+      "query_id": "1385",
+      "error_type": "label_reversal",
+      "justification": "Rationale states 'enhancing cSMAC formation reduced stimulatory capacity', opposite of claim",
+      "gold_before": "SUPPORT",
+      "gold_after": "CONTRADICT",
+      "rationale_docs_before": 1,
+      "rationale_docs_after": 1,
+      "predicted_label": "CONTRADICT",
+      "correct_before": false,
+      "correct_after": true,
+      "answered": true,
+      "evidence_before": true,
+      "evidence_after": true,
+      "abstention_class_before": "answered_with_evidence",
+      "abstention_class_after": "answered_with_evidence"
+    }
+  ],
+  "debatable_claims": [
+    {
+      "query_id": "57",
+      "gold_label": "CONTRADICT",
+      "predicted_label": "CONTRADICT",
+      "correct": true
+    },
+    {
+      "query_id": "163",
+      "gold_label": "SUPPORT",
+      "predicted_label": "SUPPORT",
+      "correct": true
+    },
+    {
+      "query_id": "431",
+      "gold_label": "SUPPORT",
+      "predicted_label": "NEI",
+      "correct": false
+    },
+    {
+      "query_id": "540",
+      "gold_label": "SUPPORT",
+      "predicted_label": "SUPPORT",
+      "correct": true
+    },
+    {
+      "query_id": "982",
+      "gold_label": "SUPPORT",
+      "predicted_label": "SUPPORT",
+      "correct": true
+    },
+    {
+      "query_id": "1041",
+      "gold_label": "CONTRADICT",
+      "predicted_label": "NEI",
+      "correct": false
+    },
+    {
+      "query_id": "1132",
+      "gold_label": "SUPPORT",
+      "predicted_label": "NEI",
+      "correct": false
+    },
+    {
+      "query_id": "1150",
+      "gold_label": "SUPPORT",
+      "predicted_label": "SUPPORT",
+      "correct": true
+    }
+  ],
+  "per_document": [
+    {
+      "query_id": "597",
+      "doc_id": "12779444",
+      "error_type": "per_document_outcome_mismatch",
+      "file_says": "doc_id None -> NEI",
+      "applied": false,
+      "in_run": true,
+      "claim_label_if_applied_per_document": "SUPPORT",
+      "rationale_docs": "3 -> 2",
+      "evidence_flag_would_change": false
+    }
+  ]
+}

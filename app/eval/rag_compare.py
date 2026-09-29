@@ -20,8 +20,13 @@ how many were dropped from each side. The settings that differ between the runs
 (models, prompt hashes, dataset, sample size, ...) are listed, so a delta can be read
 against what actually changed.
 
+``--labels audit`` (or ``audit-excl-debatable``) scores both runs against the SciFact
+label-audit corrections instead of the original gold labels (app.eval.label_audit: same
+predictions, the 11 corrected claims relabelled — and, for the second, the 8 debatable
+claims dropped); the report says which answer key was used.
+
 Run:
-    uv run python -m app.eval.rag_compare A.json B.json [--intersect] [--out report.md]
+    uv run python -m app.eval.rag_compare A.json B.json [--intersect] [--labels audit] [--out report.md]
 """
 from __future__ import annotations
 
@@ -33,6 +38,9 @@ from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 MAX_P = 0.05
+# --labels choice -> label_audit tier (None: the rows' own gold labels).
+LABEL_TIERS = {"original": None, "audit": "corrected_strict",
+               "audit-excl-debatable": "corrected_excl_debatable"}
 
 # (key, label, outcome). Each outcome is True when the run got that claim "right".
 OUTCOMES: tuple[tuple[str, str, Callable[[Mapping], bool]], ...] = (
@@ -201,6 +209,9 @@ def to_markdown(result: Mapping, name_a: str, name_b: str) -> str:
         f"{pairing}. Δ = B − A; b = A right & B wrong, c = A wrong & B right; exact two-sided "
         f"McNemar (binomial on b + c), significant at p < {MAX_P}.",
         "",
+        *([f"Answer key: **{result['labels']}** — both runs re-scored against the SciFact "
+           f"label-audit corrections (app.eval.label_audit), not the original gold labels.", ""]
+          if result.get("labels", "original") != "original" else []),
         "| Outcome | A | B | Δ | b | c | both | neither | p | Significant |",
         "|---|---|---|---|---|---|---|---|---|---|",
     ]
@@ -221,18 +232,37 @@ def to_markdown(result: Mapping, name_a: str, name_b: str) -> str:
     return "\n".join(lines)
 
 
+def relabel_runs(a: Mapping, b: Mapping, tier: str) -> tuple[dict, dict]:
+    """Both runs with rows re-scored under a label_audit tier. Imported lazily: it loads the
+    SciFact labels and the pinned audit files, which the default comparison never needs."""
+    from app.eval import label_audit
+    from app.ingest.corpus import load_claim_labels
+
+    audit = label_audit.load_audit()
+    labels = load_claim_labels(label_audit.AUDIT_DATASET)
+    return (label_audit.relabel_blob(a, labels, audit, tier),
+            label_audit.relabel_blob(b, labels, audit, tier))
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     ap = argparse.ArgumentParser(prog="python -m app.eval.rag_compare", description=__doc__.split("\n")[0])
     ap.add_argument("a", help="baseline rag.json (A)")
     ap.add_argument("b", help="candidate rag.json (B)")
     ap.add_argument("--intersect", action="store_true",
                     help="score only the common claims when the claim sets differ")
+    ap.add_argument("--labels", choices=tuple(LABEL_TIERS), default="original",
+                    help="answer key: the runs' own gold labels (default), or the SciFact label "
+                         "audit's corrections (strict, or with debatable claims excluded)")
     ap.add_argument("--out", help="also write the markdown report to this path")
     args = ap.parse_args(sys.argv[1:] if argv is None else list(argv))
     try:
-        result = compare(load_run(args.a), load_run(args.b), intersect=args.intersect)
-    except CompareError as e:
+        a, b = load_run(args.a), load_run(args.b)
+        if (tier := LABEL_TIERS[args.labels]) is not None:
+            a, b = relabel_runs(a, b, tier)
+        result = compare(a, b, intersect=args.intersect)
+    except (CompareError, ValueError) as e:
         raise SystemExit(f"rag_compare: {e}") from None
+    result["labels"] = args.labels
     md = to_markdown(result, args.a, args.b)
     print(md)
     if args.out:

@@ -1,4 +1,4 @@
-.PHONY: install index api eval eval-rag rag-compare verify-eval verify-export verify-train verify-combine analysis latency web-eval test lint ci
+.PHONY: install index api eval eval-rag rag-compare rag-audit verify-eval verify-export verify-train verify-combine analysis latency web-eval test lint ci
 
 install:  ## create env + install deps
 	uv sync
@@ -38,8 +38,11 @@ verify-train:  ## fine-tune the PubMedBERT evidence verifier on CPU (~3 h, resum
 verify-combine:  ## verifier x Ling rules R0-R4: tune on the 100 held-out train claims, then test once on 300 (STAGE=all|validate|tune|test) -> data/eval_runs/verify_*/
 	HF_HUB_OFFLINE=1 uv run --locked python -m app.eval.verify_combine $(STAGE) $(ARGS)
 
-rag-compare:  ## paired McNemar of two RAG runs: make rag-compare A=path/rag.json B=path/rag.json
-	uv run --locked python -m app.eval.rag_compare $(A) $(B)
+rag-compare:  ## paired McNemar of two RAG runs: make rag-compare A=path/rag.json B=path/rag.json [ARGS=--labels=audit]
+	uv run --locked python -m app.eval.rag_compare $(A) $(B) $(ARGS)
+
+rag-audit:  ## re-score rag.json under the SciFact label audit (offline, no LLM) -> eval/results/rag_label_audit.{md,json}; RUNS=other/rag.json writes next to each
+	uv run --locked python -m app.eval.label_audit $(RUNS) $(ARGS)
 
 # --locked: run against uv.lock exactly as committed, and fail (rather than silently
 # re-resolve and rewrite it) if pyproject.toml has drifted. `make install` is the step
