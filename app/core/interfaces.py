@@ -34,7 +34,8 @@ class Answer:
     hits: list[SearchHit]
     # Machine-readable claim verdict ("SUPPORTED" | "REFUTED" | "NOT ENOUGH EVIDENCE"),
     # parsed from the optional final line the prompt asks for when the input is a
-    # claim. None for ordinary questions, or when the line is missing or malformed.
+    # claim (with narrow fallbacks: generator.parse_verdict). None for ordinary
+    # questions, or when no verdict can be read unambiguously.
     verdict: str | None = None
 
 

@@ -28,8 +28,9 @@ class AnswerResponse(BaseModel):
     answer: str
     citations: list[str]
     hits: list[Hit]
-    # Additive + optional, so existing clients are unaffected. Set only when the input
-    # was a claim and the model ended with a well-formed verdict line (which is then
-    # stripped from `answer`): SUPPORTED | REFUTED | NOT ENOUGH EVIDENCE.
+    # Additive + optional, so existing clients are unaffected. Set when the model ended
+    # with a well-formed verdict line or a trailing "Verdict: X" on its last line (either
+    # is stripped from `answer`), or — for a claim, never a question — stated its stance
+    # in its first sentence (generator.parse_verdict): SUPPORTED | REFUTED | NOT ENOUGH EVIDENCE.
     verdict: str | None = None
     warnings: list[str] = []

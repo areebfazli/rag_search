@@ -283,8 +283,10 @@ REPLIES = {
     "claim one": "Supported [1].\nVerdict: SUPPORTED",
     "claim two": "Refuted [2].\nVerdict: REFUTED",
     "claim three": "The context does not say.\nVerdict: NOT ENOUGH EVIDENCE",
-    "claim four": "The context does not contain enough information.",
-    "claim five": "Passage [1] contradicts this.",
+    # q4/q5 carry no verdict in any form (no line, no inline field, no first-sentence
+    # stance), so they stay the judge-fallback cases under generator.parse_verdict too.
+    "claim four": "Nothing here settles it.",
+    "claim five": "Passage [1] reports the opposite finding.",
 }
 
 
@@ -437,6 +439,10 @@ def test_rag_json_keeps_every_scored_query(rag_run):
         "reasoning_tokens": 10,
         "generation_cost_usd": GEN_COST_USD,
         "generation_provider": "AkashML",
+        "verdict_source": "line",  # a well-formed final line
+        "evidence_quote": None,  # the fake reply quotes nothing
+        "quote_passage": None,
+        "quote_found": None,
     }
     assert rows["2"]["abstention_class"] == "answered_without_evidence"
     # NEI + rationale-free qrels doc retrieved: the two oracles disagree on this one.
@@ -1385,3 +1391,94 @@ def test_luna_checkpoint_signature_differs_from_the_default_generator(monkeypatc
     assert ling["generator"]["model"] == DEFAULT_GEN_MODEL and luna["generator"]["model"] == LUNA
     assert luna["reasoning_effort"] == "medium" and ling["reasoning_effort"] is None
     assert rag_eval.rag_signature(ling) != rag_eval.rag_signature(luna)
+
+
+# --- verdict recovery on stored rows (reparse_row), resume and offline re-score -------------
+
+
+def _stored(answer, verdict=None, judge_answered=True, truncated=False, gold="CONTRADICT"):
+    return {
+        "query_id": "7", "gold_label": gold, "verdict": verdict,
+        "predicted_label": predicted_label(verdict, judge_answered)
+        if verdict else ("NONE" if judge_answered else "NEI"),
+        "answered": judge_answered, "answered_source": "verdict" if verdict else "judge",
+        "judge_answered": judge_answered, "faithfulness": 1.0, "context_relevance": 1.0,
+        "evidence": True, "evidence_qrels": True, "truncated": truncated,
+        "abstention_class": "x", "abstention_class_qrels": "x",
+        "answer": answer, "cited_doc_ids": ["a", "b"], "retrieved_doc_ids": ["a", "b", "c"],
+    }
+
+
+def test_reparse_row_recovers_an_inline_verdict_and_rederives_everything():
+    r = rag_eval.reparse_row(_stored("Opposite effect [2]. Verdict: REFUTED [3]"), "a claim")
+    assert (r["verdict"], r["verdict_source"], r["predicted_label"]) == ("REFUTED", "inline", "CONTRADICT")
+    assert r["answered"] is True and r["answered_source"] == "verdict"
+    assert r["abstention_class"] == "answered_with_evidence"
+    assert r["answer"] == "Opposite effect [2]." and r["cited_doc_ids"] == ["b"]
+
+
+def test_reparse_row_stance_overrides_the_judge_and_keeps_the_text():
+    text = "The provided context does not discuss this. Passage [1] is about mice."
+    r = rag_eval.reparse_row(_stored(text, judge_answered=True, gold="NEI"), "a claim")
+    assert (r["verdict"], r["verdict_source"], r["predicted_label"]) == (
+        "NOT ENOUGH EVIDENCE", "stance", "NEI")
+    assert r["answered"] is False and r["abstention_class"] == "false_abstention"
+    assert r["answer"] == text
+
+
+def test_reparse_row_leaves_parsed_and_unrecoverable_rows_alone():
+    parsed = _stored("Refuted [1].", verdict="REFUTED")
+    assert rag_eval.reparse_row(parsed, "c") == {**parsed, "verdict_source": "line"}
+    plain = _stored("Nothing here settles it.")
+    assert rag_eval.reparse_row(plain, "c") == {**plain, "verdict_source": None}
+    # A question never gets a stance verdict, stored or fresh.
+    q = _stored("The passages support the use of aspirin [1].")
+    assert rag_eval.reparse_row(q, "Does aspirin help?")["verdict"] is None
+
+
+def test_reparse_row_handles_the_truncation_note():
+    note = rag_eval.TRUNCATION_NOTE
+    cut = _stored(f"The context directly contradicts the claim [1]. It then\n\n{note}", truncated=True)
+    r = rag_eval.reparse_row(cut, "a claim")
+    assert r["verdict"] == "REFUTED" and r["answer"].endswith(note)
+    empty = _stored(note, truncated=True)
+    assert rag_eval.reparse_row(empty, "a claim")["verdict"] is None
+
+
+def test_resume_applies_the_current_parser_with_no_llm_call(rate_limited, tmp_path):
+    setup, _, out = rate_limited
+    setup("generate", None, [])
+    rag_eval.main()
+    (ckpt,) = _checkpoint_files(tmp_path)
+    blob = json.loads(ckpt.read_text())
+    qid = next(q for q, r in blob["rows"].items() if r["answer"] == REPLIES["claim five"])
+    # A row checkpointed by an older parser: no verdict, reply ending "... Verdict: X".
+    blob["rows"][qid].update(answer="Passage [1] reports the opposite [1]. Verdict: REFUTED",
+                             verdict=None, predicted_label="NONE", answered_source="judge")
+    ckpt.write_text(json.dumps(blob))
+    gen2, judge2 = setup("generate", None, [])
+    rag_eval.main()
+    assert gen2.calls == [] and judge2.queries == []
+    out_row = next(r for r in json.loads((out / "rag.json").read_text())["rows"] if r["query_id"] == qid)
+    assert (out_row["verdict"], out_row["verdict_source"], out_row["predicted_label"]) == (
+        "REFUTED", "inline", "CONTRADICT")
+
+
+def test_rag_json_records_verdict_sources_and_quote_stats(rag_run):
+    _, blob, _ = rag_run
+    assert blob["verdict_sources"] == {"line": 3, "inline": 0, "stance": 0}
+    assert blob["evidence_quotes"]["no_quote"]["n"] == 5  # the fakes quote nothing
+    assert all("quote_found" in r and "verdict_source" in r for r in blob["rows"])
+
+
+def test_rescore_rebuilds_aggregates_and_refuses_eval_results(tmp_path, monkeypatch):
+    from app.eval import rag_rescore
+
+    rows = [_stored("Opposite effect [2]. Verdict: REFUTED"), {**_stored("Nothing."), "query_id": "8"}]
+    blob = {"verdict_accuracy": 0.0, "run": {"dataset": "d", "canonical": True}, "rows": rows}
+    out = rag_rescore.rescore(blob, {"7": "a claim", "8": "another claim"})
+    assert out["verdict_accuracy"] == 0.5 and out["verdict_sources"]["inline"] == 1
+    assert out["run"]["canonical"] is False and out["run"]["rescored"] is True
+    monkeypatch.setattr(rag_eval, "OUT", tmp_path / "results")
+    with pytest.raises(SystemExit, match="refusing"):
+        rag_rescore.main(["in.json", str(tmp_path / "results" / "rag.json")])

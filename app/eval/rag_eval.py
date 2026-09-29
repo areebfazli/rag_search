@@ -70,7 +70,13 @@ cap (Groq tokens/day, OpenRouter's free requests/day) just pauses the run: it st
 the checkpoint saved and the output dir untouched, and resumes after the quota resets.
 Skipped rows (pipeline errors, unparseable judge replies) are never checkpointed, so a
 re-run retries them. ``SSR_EVAL_REFRESH=1`` ignores the checkpoint; a corrupt or
-wrong-shaped one degrades to recompute.
+wrong-shaped one degrades to recompute. The verdict parser is NOT in the signature: every
+row, resumed or fresh, goes through reparse_row, which re-reads a stored reply that has no
+verdict with the current generator.parse_verdict (no LLM call), so a resumed run records
+what a fresh one would. Each row says which parse produced its verdict (``verdict_source``:
+line / inline / stance / None) and, when the reply quotes its evidence, whether the quote
+really occurs in the cited passage (``quote_found``; measured only, never a verdict flip).
+``python -m app.eval.rag_rescore`` applies the same re-read to a finished rag.json.
 
 Before any LLM call the run prints the requests still needed (remaining rows x (1
 generation + the expected truncation-retry rate + 1 judge)) and the wall-clock estimate.
@@ -119,8 +125,12 @@ from app.core.llm_endpoints import (
 )
 from app.core.interfaces import SearchHit, hit_passage
 from app.generate.generator import (
+    TRUNCATION_NOTE,
     LLMGenerator,
     generation_temperature,
+    looks_like_question,
+    map_citations,
+    parse_verdict,
     resolve_reasoning_effort,
 )
 from app.generate.prompts import SYSTEM, VERDICTS, build_user_prompt
@@ -447,6 +457,50 @@ def predicted_label(verdict: str | None, answered: bool) -> str:
     return NO_VERDICT if answered else "NEI"
 
 
+def reparse_row(row: dict, query: str) -> dict:
+    """Re-apply the generator's verdict parser to a row that has no verdict.
+
+    A checkpointed row keeps the answer text generate() served: a verdict-line reply
+    has its line stripped (and its verdict stored), every other reply is kept whole. So
+    a row stored with no verdict can be parsed again with the CURRENT parser, without an
+    LLM call — which is what lets a resumed run, or an offline re-score of a committed
+    rag.json, reproduce what a fresh generation would now record. A row that already
+    has a verdict is left alone (its source is "line" if it predates the field).
+
+    Everything derived from the verdict is recomputed: answered (the verdict now
+    decides it, not the judge), predicted label, both abstention classes, and the cited
+    doc ids (from the new display text, as generate() does). The judge's own scores are
+    kept: they were given for the same reply.
+    """
+    if row.get("verdict") is not None:
+        return {**row, "verdict_source": row.get("verdict_source") or "line"}
+    answer = row.get("answer") or ""
+    note = f"\n\n{TRUNCATION_NOTE}"
+    truncated_note = answer.endswith(TRUNCATION_NOTE)
+    raw = answer[: -len(note)] if answer.endswith(note) else (
+        "" if answer == TRUNCATION_NOTE else answer
+    )
+    text, verdict, source = parse_verdict(raw, allow_stance=not looks_like_question(query))
+    if verdict is None:
+        return {**row, "verdict_source": None}
+    if truncated_note:
+        text = f"{text}\n\n{TRUNCATION_NOTE}" if text else TRUNCATION_NOTE
+    answered, answered_source = resolve_answered(verdict, row["judge_answered"])
+    retrieved = [SearchHit(d, 0.0, "") for d in row.get("retrieved_doc_ids") or []]
+    return {
+        **row,
+        "verdict": verdict,
+        "verdict_source": source,
+        "predicted_label": predicted_label(verdict, answered),
+        "answered": answered,
+        "answered_source": answered_source,
+        "abstention_class": _abstention_class(answered, row["evidence"]),
+        "abstention_class_qrels": _abstention_class(answered, row["evidence_qrels"]),
+        "answer": text,
+        "cited_doc_ids": map_citations(text, retrieved) if retrieved else row.get("cited_doc_ids", []),
+    }
+
+
 def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
@@ -599,6 +653,17 @@ def verdict_scores(rows: list[dict]) -> dict:
     }
 
 
+def _quote_stats(rows: list[dict]) -> dict:
+    out = {}
+    for key, want in (("found", True), ("not_found", False), ("no_quote", None)):
+        sub = [r for r in rows if r.get("quote_found") is want]
+        out[key] = {
+            "n": len(sub),
+            "verdict_accuracy": _rate(sum(r["predicted_label"] == r["gold_label"] for r in sub), len(sub)),
+        }
+    return out
+
+
 def aggregate(
     rows: list[dict],
     gen_model: str | None = None,
@@ -630,6 +695,14 @@ def aggregate(
         # count here depresses verdict accuracy for reasons unrelated to the model's call.
         "truncated_answers": sum(bool(r.get("truncated")) for r in rows),
         "retried_answers": sum((r.get("generation_attempts") or 1) > 1 for r in rows),
+        # Which parse produced each verdict (generator.parse_verdict), and — for replies
+        # that quote their evidence — how often the quote is really in the cited passage,
+        # with verdict accuracy on each side of that split.
+        "verdict_sources": {
+            src: sum(r.get("verdict_source") == src for r in rows)
+            for src in ("line", "inline", "stance")
+        },
+        "evidence_quotes": _quote_stats(rows),
         "judge_verdict_agreement": _rate(
             sum(r["judge_answered"] == r["answered"] for r in with_verdict), len(with_verdict)
         ),
@@ -1208,6 +1281,9 @@ def main(argv: Sequence[str] = ()) -> None:
     sig = rag_signature(sig_fields)
     ckpt = checkpoint_path(sig)
     done, prior = load_checkpoint(ckpt, sig, qids)
+    # Rows stored with no verdict are parsed again with the current parser (no LLM
+    # call), so a resumed run records exactly what a fresh generation would now.
+    done = {q: reparse_row(r, queries[q]) for q, r in done.items()}
     if done:
         print(f"  (resuming — {len(done)}/{len(qids)} rows already done, {ckpt})", flush=True)
     todo_ids = [q for q in qids if q not in done]
@@ -1409,7 +1485,8 @@ def main(argv: Sequence[str] = ()) -> None:
             continue
         answered, answered_source = resolve_answered(ans.verdict, s["answered"])
         f = flags[qid]
-        done[qid] = {
+        quote = getattr(ans, "evidence_quote", None)
+        done[qid] = reparse_row({
             "query_id": qid,
             "mode": MODE,
             "gold_label": label.label,
@@ -1439,12 +1516,20 @@ def main(argv: Sequence[str] = ()) -> None:
             # the upstream provider that served it; None where not reported.
             "generation_cost_usd": getattr(ans, "cost_usd", None),
             "generation_provider": getattr(ans, "provider", None),
-        }
+            # Which parse produced the verdict ("line" | "inline" | "stance"; None = no
+            # verdict), and the evidence-quote check: the reply's first quoted span, the
+            # [n] next to it, and whether it really occurs in that passage (None = the
+            # reply quotes nothing). Measured only: quote_found never changes a verdict.
+            "verdict_source": getattr(ans, "verdict_source", None),
+            "evidence_quote": quote.quote if quote else None,
+            "quote_passage": quote.passage if quote else None,
+            "quote_found": quote.found if quote else None,
+        }, q)
         checkpoint()  # persisted at once: a daily-cap stop loses no finished row
         r = done[qid]
         print(
             f"  [{n}/{len(qids)}] q{qid:>4} {label.label:<10} -> {r['predicted_label']:<10} "
-            f"{'answered' if answered else 'abstain '}({answered_source[0]}) "
+            f"{'answered' if r['answered'] else 'abstain '}({r['answered_source'][0]}) "
             f"{'eR' if f['evidence'] else '--'}{'eQ' if f['evidence_qrels'] else '--'} "
             f"faith={s['faithfulness']:.2f} ctx={s['context_relevance']:.2f}"
             f"{'  TRUNCATED' if r['truncated'] else ''}  {q[:40]}",

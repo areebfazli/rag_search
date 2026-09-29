@@ -14,6 +14,7 @@ larger budget, and flags one that is still cut off instead of passing it off as 
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 
 from openai import OpenAI
@@ -29,7 +30,7 @@ from app.core.llm_endpoints import (
     response_cost,
     response_provider,
 )
-from app.core.interfaces import Answer, SearchHit
+from app.core.interfaces import Answer, SearchHit, hit_passage
 from app.generate.prompts import SYSTEM, VERDICTS, build_user_prompt
 
 _CITE = re.compile(r"\[(\d+)\]")
@@ -90,6 +91,191 @@ def split_verdict(text: str) -> tuple[str, str | None]:
     return (body or text.strip()), verdict
 
 
+# --- verdict recovery when the final Verdict line is missing -----------------------------
+#
+# Designed on the unparsed replies of a 100-claim beir/scifact/train run (never on test).
+# Both fallbacks are deliberately narrow, and both keep split_verdict's guarantee that
+# text quoted from a passage never counts as the model's own verdict:
+#
+# * "inline": ``Verdict: X`` closing the LAST line after the prose, e.g. "... [2].
+#   Verdict: REFUTED". It must follow a finished sentence (., !, ?, ) or ]), carry no
+#   quote marks on either side, and be the reply's only "verdict:" mention anywhere.
+# * "stance": the reply's own first sentence opens with the context as its subject and
+#   a stance verb as its main verb ("The passages support ...", "The context does not
+#   provide enough evidence ..."). The subject must come first and the matched subject +
+#   verb must be quote-free, so "Passage [2] says 'the context supports ...'" can't
+#   match; a first sentence with a hedge outside quotes (partially, but, however, ...),
+#   or a reply with any "verdict:" mention, is not read at all.
+#   It is off for questions (looks_like_question): an answer to a question may well say
+#   "the passages support X" without the input being a claim to judge.
+VERDICT_SOURCES = ("line", "inline", "stance")
+_QUOTE_CHARS = "\"“”«»„"
+_INLINE_MARKUP = r"[\s*_`]*"  # no quotes: a quoted "Verdict: X" is a passage's, not ours
+_INLINE_VERDICT = re.compile(
+    rf"(?<=[.!?)\]])\s+{_INLINE_MARKUP}verdict{_INLINE_MARKUP}:{_INLINE_MARKUP}"
+    rf"({_VERDICT_ALT}){_INLINE_MARKUP}(?:\s*\[\d+\])*\.?{_INLINE_MARKUP}$",
+    re.IGNORECASE,
+)
+_VERDICT_MENTION = re.compile(r"verdict[\s*_`'\"]*:", re.IGNORECASE)
+_SUBJECT = (
+    r"(?:the\s+|these\s+|this\s+|both\s+|all\s+)?"
+    r"(?:(?:provided|given|retrieved|available|cited|supplied)\s+)?"
+    r"(?:context(?:\s+passages?)?|passages?|evidence|abstracts?)"
+    r"(?:\s*\[\d+\])*"
+)
+_ADVERB = r"(?:\s+(?:directly|clearly|strongly|explicitly|consistently))?"
+_YES_NO = r"(?:(?:yes|no)\s*[,.;:]\s*)?"
+_CLAIM_IS = rf"{_YES_NO}(?:the\s+|this\s+)?(?:claim|statement)\s+is{_ADVERB}\s+"
+
+
+def _stance(active: str, passive: str) -> re.Pattern[str]:
+    """Anchored at the sentence start: the context as subject ("The passages support"),
+    or the claim as subject with the context as agent ("The claim is supported by
+    passage [1]")."""
+    return re.compile(
+        rf"^(?:{_YES_NO}{_SUBJECT}{_ADVERB}\s+(?:{active})"
+        rf"|{_CLAIM_IS}(?:{passive})(?:\s+by\s+{_SUBJECT}|\s*[.,;:]))",
+        re.IGNORECASE,
+    )
+
+
+_STANCE = (
+    ("NOT ENOUGH EVIDENCE", re.compile(
+        rf"^{_YES_NO}{_SUBJECT}\s+(?:do|does)\s+not{_ADVERB}\s+"
+        r"(?:provide|contain|include|offer|give|present|report|mention|address|discuss|"
+        r"describe|state|show|establish)\b",  # not "support": it can mean refute (train)
+        re.IGNORECASE,
+    )),
+    ("REFUTED", _stance(r"refutes?|contradicts?|disproves?", r"refuted|contradicted|disproved")),
+    ("SUPPORTED", _stance(r"supports?|confirms?", r"supported|confirmed")),
+)
+_HEDGE = re.compile(
+    r"\b(?:partial(?:ly)?|partly|but|however|although|though|whereas|while|only|mixed|"
+    r"indirect(?:ly)?|suggests?|may|might)\b",
+    re.IGNORECASE,
+)
+# The prompt's own "Answer (cite with [n]):" marker, which a model sometimes echoes.
+_ANSWER_MARKER = re.compile(r"^answer\s*\(cite with \[n\]\)\s*:\s*", re.IGNORECASE)
+_QUOTED_SPAN = re.compile(r'["“][^"“”]*["”]')
+_FIRST_SENTENCE = re.compile(r"^(.*?[.!?])(?=\s|$)", re.DOTALL)
+_QUESTION_START = re.compile(
+    r"^(?:what|how|why|when|where|which|who|whom|whose|is|are|was|were|do|does|did|can|"
+    r"could|should|would|will|has|have|had)\b",
+    re.IGNORECASE,
+)
+
+
+def looks_like_question(query: str) -> bool:
+    """True for an input phrased as a question (ends in '?' or opens with a wh-word or
+    auxiliary): only a claim is judged from the reply's first sentence."""
+    q = query.strip()
+    return q.endswith("?") or bool(_QUESTION_START.match(q))
+
+
+def _stance_verdict(text: str) -> str | None:
+    first_line = next((ln for ln in text.splitlines() if ln.strip()), "")
+    first_line = _ANSWER_MARKER.sub("", first_line.strip().lstrip("*_` "))
+    m = _FIRST_SENTENCE.match(first_line)
+    sentence = m.group(1) if m else first_line.strip()
+    # Hedges count only in the model's own words, not inside a span it quotes.
+    if _HEDGE.search(_QUOTED_SPAN.sub(" ", sentence)):
+        return None
+    for verdict, pattern in _STANCE:
+        # The anchored match must itself be quote-free: the stance is the model's own
+        # subject and verb, never words it is quoting (a later quoted span is fine).
+        if (hit := pattern.match(sentence)) and not any(c in hit.group(0) for c in _QUOTE_CHARS):
+            return verdict
+    return None
+
+
+def parse_verdict(text: str, allow_stance: bool = True) -> tuple[str, str | None, str | None]:
+    """(display_text, verdict, source): split_verdict first; failing that, the two
+    narrow fallbacks above, tried only when the reply has no verdict-like line at all
+    (a malformed or competing one stays unparsed — ambiguity is never guessed through).
+    source is "line", "inline", "stance", or None with no verdict."""
+    body, verdict = split_verdict(text)
+    if verdict is not None:
+        return body, verdict, "line"
+    lines = text.rstrip().splitlines()
+    if not lines or any(_VERDICT_LIKE.match(ln) for ln in lines):
+        return text, None, None
+    mentions = len(_VERDICT_MENTION.findall(text))
+    if mentions == 1:
+        last = lines[-1]
+        m = _INLINE_VERDICT.search(last)
+        if m and last[: m.start()].count('"') % 2 == 0 and not any(
+            c in last[: m.start()][-3:] for c in _QUOTE_CHARS
+        ):
+            head = last[: m.start()].rstrip()
+            display = "\n".join([*lines[:-1], head]).rstrip()
+            return display, " ".join(m.group(1).upper().split()), "inline"
+    if mentions == 0 and allow_stance and (verdict := _stance_verdict(text)) is not None:
+        return text, verdict, "stance"
+    return text, None, None
+
+
+_QUOTE_SPAN = re.compile(r'["“]([^"“”\n]{12,})["”]')
+_ELLIPSIS = re.compile(r"\.\.\.|…")
+_NON_ALNUM = re.compile(r"[^0-9a-z]+")
+# How far after a closing quote (or before an opening one) its [n] may sit.
+_QUOTE_CITE_WINDOW = 12
+
+
+def _norm_for_match(text: str) -> str:
+    """Case-, punctuation- and whitespace-insensitive form for substring matching:
+    NFKC (fullwidth, ligatures), [n] markers dropped, every non-alphanumeric run -> one
+    space. Punctuation drift (curly vs straight quotes, dashes, spacing around '%') is
+    what a faithful copy usually differs by; words and numbers must still match."""
+    t = unicodedata.normalize("NFKC", text).lower()
+    t = _CITE.sub(" ", t)
+    return _NON_ALNUM.sub(" ", t).strip()
+
+
+@dataclass(frozen=True)
+class EvidenceQuote:
+    """The first quoted span in a reply and whether it is really in the context.
+
+    passage is the 1-based [n] next to the quote (None if it carries none); found is
+    True when the quote occurs verbatim (after _norm_for_match) in THAT passage — or in
+    any passage when it names none — and False otherwise. An ellipsis splits the quote
+    into fragments that must each occur, in order."""
+
+    quote: str
+    passage: int | None
+    found: bool
+
+
+def check_evidence_quote(text: str, hits: list[SearchHit]) -> EvidenceQuote | None:
+    """Find the reply's first quoted span and check it against the cited passage.
+    None when the reply quotes nothing. A measurement only: it never changes the
+    verdict."""
+    m = _QUOTE_SPAN.search(text)
+    if m is None:
+        return None
+    quote = m.group(1).strip()
+    after = text[m.end(): m.end() + _QUOTE_CITE_WINDOW]
+    before = text[max(0, m.start() - _QUOTE_CITE_WINDOW): m.start()]
+    cite = _CITE.search(after) or (list(_CITE.finditer(before)) or [None])[-1]
+    passage = int(cite.group(1)) if cite else None
+    if passage is not None and 1 <= passage <= len(hits):
+        pool = [hits[passage - 1]]
+    else:
+        pool = hits if passage is None else []
+    frags = [f for f in (_norm_for_match(p) for p in _ELLIPSIS.split(quote)) if f]
+
+    def occurs(hay: str) -> bool:
+        pos = 0
+        for f in frags:
+            i = hay.find(f" {f} ", pos)  # whole words: "reduced" never matches "unreduced"
+            if i < 0:
+                return False
+            pos = i + len(f) + 1
+        return bool(frags)
+
+    found = any(occurs(" " + _norm_for_match(hit_passage(h)) + " ") for h in pool)
+    return EvidenceQuote(quote=quote, passage=passage, found=found)
+
+
 # Appended to the display text when the reply is still cut off after the retry: a
 # half-sentence must not read as a complete answer (an empty one least of all).
 TRUNCATION_NOTE = "[Answer truncated: the model ran out of its token budget.]"
@@ -115,6 +301,11 @@ class GeneratedAnswer(Answer):
     # served the final attempt (None when the backend doesn't say).
     cost_usd: float | None = None
     provider: str | None = None
+    # Which parse produced `verdict` (VERDICT_SOURCES: "line" | "inline" | "stance"), None
+    # when there is none; and the evidence-quote check (check_evidence_quote) — None when
+    # the reply quotes nothing. Measurements for the eval; the API does not expose them.
+    verdict_source: str | None = None
+    evidence_quote: EvidenceQuote | None = None
 
 
 # Model families "auto" sends reasoning effort "medium" to (substring match on the id, so
@@ -277,7 +468,7 @@ class LLMGenerator:
         raw = normalize_citations((choice.message.content or "").strip())
         # A cut-off reply can't have been cut inside a valid verdict line (the whole line
         # must match a full verdict value), so the parse is safe on a truncated reply.
-        text, verdict = split_verdict(raw)
+        text, verdict, verdict_source = parse_verdict(raw, allow_stance=not looks_like_question(query))
         if truncated:
             text = f"{text}\n\n{TRUNCATION_NOTE}" if text else TRUNCATION_NOTE
         completion_tokens, reasoning_tokens = _usage_counts(resp)
@@ -297,4 +488,6 @@ class LLMGenerator:
             # enforce a spend ceiling treat None as "unknown, assume the worst".
             cost_usd=None if any(c is None for c in costs) else sum(costs),
             provider=response_provider(resp),
+            verdict_source=verdict_source,
+            evidence_quote=check_evidence_quote(text, hits),
         )
