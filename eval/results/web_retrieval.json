@@ -1,0 +1,126 @@
+{
+  "title": "BEIR/SciFact (300 test claims)",
+  "dataset": "beir/scifact/test",
+  "n_queries": 300,
+  "depth": 100,
+  "fetched_from": "2026-09-29T18:11:51+00:00",
+  "fetched_to": "2026-09-29T18:52:51+00:00",
+  "scored_on": "2026-09-29",
+  "requests_sent": 456,
+  "authenticated": true,
+  "dropped_no_abstract": 2608,
+  "mapping": {
+    "n_gold_docs": 283,
+    "found_in_s2": 264,
+    "title_matches": 256,
+    "match_rate": 0.9045936395759717,
+    "threshold": 0.9,
+    "confirmed": true,
+    "mismatch_examples": [
+      {
+        "doc_id": "1471041",
+        "local": "High abundance of plasma cells secreting transglutaminase 2\u2013specific IgA autoantibodies with limited somatic hypermutation in celiac disease intestinal lesions",
+        "s2": "Abundance and unique repertoire of plasma cells secreting IgA autoantibodies to transglutaminase 2 in the intestinal lesion of celiac disease"
+      },
+      {
+        "doc_id": "2565138",
+        "local": "Hyaluronan impairs vascular function and drug delivery in a mouse model of pancreatic cancer",
+        "s2": "Supplemental Figure 2"
+      },
+      {
+        "doc_id": "5304891",
+        "local": "Inter-individual variability and genetic influences on cytokine responses to bacteria and fungi",
+        "s2": "Inter-individual variability and genetic influences on cytokine responses against bacterial and fungal pathogens"
+      },
+      {
+        "doc_id": "8764879",
+        "local": "PU.1-mediated upregulation of CSF1R is crucial for leukemia stem cell potential induced by MOZ-TIF2",
+        "s2": "PU.1-mediated upregulation of M-CSFR is critical for MOZ-leukemia stem cell potential"
+      },
+      {
+        "doc_id": "10300888",
+        "local": "Domestication and Divergence of Saccharomyces cerevisiae Beer Yeasts",
+        "s2": "A Systematic Map of Genetic Variation in Plasmodium falciparum"
+      }
+    ]
+  },
+  "scores": {
+    "hybrid": {
+      "ndcg@10": 0.7241151165725345,
+      "recall@10": 0.8553888888888889,
+      "recall@100": 0.965
+    },
+    "web": {
+      "ndcg@10": 0.035376584670940826,
+      "recall@10": 0.043333333333333335,
+      "recall@100": 0.05583333333333333
+    },
+    "web_any": {
+      "ndcg@10": 0.03747257328087206,
+      "recall@10": 0.05,
+      "recall@100": 0.0625
+    }
+  },
+  "comparisons": {
+    "web_vs_hybrid": {
+      "ndcg@10": {
+        "delta": -0.6887385319015936,
+        "p": 3.85764056914452e-96,
+        "wtl": {
+          "W": 0,
+          "T": 48,
+          "L": 252
+        }
+      },
+      "recall@10": {
+        "delta": -0.8120555555555555,
+        "p": 1.0969283419388289e-112,
+        "wtl": {
+          "W": 0,
+          "T": 53,
+          "L": 247
+        }
+      },
+      "recall@100": {
+        "delta": -0.9091666666666667,
+        "p": 1.8969894318298477e-159,
+        "wtl": {
+          "W": 0,
+          "T": 26,
+          "L": 274
+        }
+      }
+    },
+    "web_any_vs_hybrid": {
+      "ndcg@10": {
+        "delta": -0.6866425432916624,
+        "p": 3.963066520477877e-96,
+        "wtl": {
+          "W": 0,
+          "T": 48,
+          "L": 252
+        }
+      },
+      "recall@10": {
+        "delta": -0.8053888888888888,
+        "p": 2.3946734167926844e-110,
+        "wtl": {
+          "W": 0,
+          "T": 55,
+          "L": 245
+        }
+      },
+      "recall@100": {
+        "delta": -0.9025,
+        "p": 9.84560365265022e-155,
+        "wtl": {
+          "W": 0,
+          "T": 28,
+          "L": 272
+        }
+      }
+    }
+  },
+  "stat_test": "student",
+  "max_p": 0.05
+}

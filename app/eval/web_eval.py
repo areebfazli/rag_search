@@ -269,7 +269,10 @@ def main() -> int:
 
     refresh = bool(os.environ.get("SSR_EVAL_REFRESH"))
     cache = (_WriteOnlyCache if refresh else ResponseCache)(settings.s2_cache_dir)
-    retriever = SemanticScholarRetriever(cache=cache, max_wait_s=None, max_backoff_s=60.0)
+    # S2 has answered 429 with Retry-After: 64 s even with a key at <=1 req/s (2026-09-29), so
+    # the offline eval waits up to 3 min per 429 instead of stopping; the API path keeps
+    # its short max_wait_s budget.
+    retriever = SemanticScholarRetriever(cache=cache, max_wait_s=None, max_backoff_s=180.0)
     service = SearchService(dense=_NoLocalIndex(), lexical=_NoLocalIndex(), web=retriever)
 
     # Up-front cost: uncached searches + the mapping batch (if uncached).
