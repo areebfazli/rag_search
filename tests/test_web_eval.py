@@ -2,11 +2,13 @@
 import json
 
 import httpx
+import numpy as np
 import pytest
 
 from app.core.config import settings
 from app.core.interfaces import SearchHit
 from app.eval import web_eval
+from app.retrieve.query_rewrite import MAX_TERMS
 from app.retrieve.semantic_scholar import SemanticScholarRetriever
 
 
@@ -82,6 +84,22 @@ def test_output_dir_guards_the_committed_artifact(monkeypatch):
     assert not canonical and out.parent == web_eval.RUNS and out.name.startswith("web_")
 
 
+CLAIM_ONE = "Zeta kinase activates macrophages via lysosomal cathepsin."
+CLAIM_TWO = "Omega receptor binds ligand."
+
+
+class FakeEmbedder:
+    def __init__(self):
+        self.documents: list[str] = []
+
+    def encode_query(self, text):
+        return np.ones(3, dtype=np.float32) / np.sqrt(3)
+
+    def encode_documents(self, texts, batch_size=32, show_progress=True):
+        self.documents += list(texts)
+        return np.stack([np.array([len(t), 1.0, 2.0], dtype=np.float32) / np.linalg.norm([len(t), 1.0, 2.0]) for t in texts])
+
+
 def _fake_s2(requests):
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
@@ -91,18 +109,20 @@ def _fake_s2(requests):
                 200, json=[{"corpusId": int(i.split(":")[1]), "title": f"Title {i.split(':')[1]}"} for i in ids]
             )
         q = request.url.params["query"]
-        data = {
-            "claim one": [{"corpusId": 11, "title": "Title 11", "abstract": "a"},
-                          {"corpusId": 99, "title": "noise", "abstract": "b"}],
-            "claim two": [{"corpusId": 22, "title": "Title 22", "abstract": None}],  # no abstract
-        }[q]
+        if q.startswith("Zeta"):  # claim one: raw and rewrite queries
+            data = [{"corpusId": 11, "title": "Title 11", "abstract": "a"},
+                    {"corpusId": 99, "title": "noise", "abstract": "b"}]
+        elif q.startswith("Omega"):
+            data = [{"corpusId": 22, "title": "Title 22", "abstract": None}]  # no abstract
+        else:
+            data = []
         return httpx.Response(200, json={"total": len(data), "offset": 0, "data": data})
 
     return handler
 
 
 def _patch_main(monkeypatch, tmp_path, requests):
-    queries = {"1": "claim one", "2": "claim two"}
+    queries = {"1": CLAIM_ONE, "2": CLAIM_TWO}
     qrels = {"1": {"11": 1}, "2": {"22": 1}}
     monkeypatch.setattr("app.ingest.corpus.load_queries_qrels", lambda: (queries, qrels))
     monkeypatch.setattr(
@@ -110,13 +130,14 @@ def _patch_main(monkeypatch, tmp_path, requests):
         lambda: [{"doc_id": "11", "title": "Title 11"}, {"doc_id": "22", "title": "Title 22"}],
     )
     monkeypatch.setattr(web_eval, "load_hybrid_run", lambda n: {"1": {"11": 2.0}, "2": {"5": 1.0}})
+    embedders: list = []
+    monkeypatch.setattr(web_eval, "make_embedder", lambda: embedders.append(FakeEmbedder()) or embedders[-1])
     monkeypatch.setattr(settings, "s2_cache_dir", str(tmp_path / "s2_cache"))
     monkeypatch.setattr(settings, "eval_dataset", web_eval.CANONICAL_DATASET)
     monkeypatch.setattr(web_eval, "OUT", tmp_path / "results")
     monkeypatch.setattr(web_eval, "RUNS", tmp_path / "runs")
-    monkeypatch.delenv("SSR_EVAL_LIMIT", raising=False)
-    monkeypatch.delenv("SSR_EVAL_REFRESH", raising=False)
-    monkeypatch.delenv("SSR_WEB_EVAL_ALLOW_UNMAPPED", raising=False)
+    for var in ("SSR_EVAL_LIMIT", "SSR_EVAL_REFRESH", "SSR_WEB_EVAL_ALLOW_UNMAPPED", "SSR_WEB_EVAL_N"):
+        monkeypatch.delenv(var, raising=False)
 
     def factory(**kw):
         return SemanticScholarRetriever(
@@ -128,24 +149,39 @@ def _patch_main(monkeypatch, tmp_path, requests):
         )
 
     monkeypatch.setattr(web_eval, "SemanticScholarRetriever", factory)
+    return embedders
 
 
 def test_main_end_to_end_on_fakes_and_resumes_from_cache(monkeypatch, tmp_path):
     requests: list = []
-    _patch_main(monkeypatch, tmp_path, requests)
+    embedders = _patch_main(monkeypatch, tmp_path, requests)
     assert web_eval.main() == 0
-    assert len(requests) == 3  # 1 mapping batch + 2 searches, nothing else
+    sent = [r.url.params.get("query") for r in requests if r.url.path.endswith("/search")]
+    # 1 mapping batch + 2 raw claims + 2 rewrite primaries + 2 pooled fallbacks (neither
+    # primary filled the page). The rerank rows reuse these responses: no extra requests.
+    assert len(requests) == 7 and len(sent) == 6
+    assert CLAIM_ONE in sent and CLAIM_TWO in sent
+    assert "Zeta kinase activates macrophages lysosomal cathepsin" in sent
     blob = json.loads((tmp_path / "results" / "web_retrieval.json").read_text())
     assert blob["mapping"]["confirmed"] and blob["n_queries"] == 2
     assert blob["scores"]["web"]["recall@10"] == 0.5  # claim two's paper has no abstract
     assert blob["scores"]["web_any"]["recall@10"] == 1.0  # ...but S2 did find it
     assert blob["scores"]["hybrid"]["recall@10"] == 0.5
+    for key in ("web_rewrite", "web_rerank", "web_rewrite_rerank"):
+        assert blob["scores"][key]["recall@100"] == 0.5
+        assert blob["scores"][f"{key}_any"]["recall@100"] == 1.0
     assert blob["dropped_no_abstract"] == 1 and blob["fetched_from"]
+    assert blob["rewrite"]["fallback_used"] == 2 and blob["rewrite"]["max_terms"] == MAX_TERMS
+    assert blob["embeddings"]["computed"] > 0
     assert "~200M papers" in (tmp_path / "results" / "web_retrieval.md").read_text()
+    assert len(embedders) == 1  # one embedder shared by every rerank row
 
-    # A re-run is served entirely from the on-disk cache: zero new requests.
+    # A re-run is served entirely from the on-disk caches: zero requests, zero embeddings.
     assert web_eval.main() == 0
-    assert len(requests) == 3
+    assert len(requests) == 7
+    assert embedders[-1].documents == []
+    blob = json.loads((tmp_path / "results" / "web_retrieval.json").read_text())
+    assert blob["embeddings"]["computed"] == 0 and blob["embeddings"]["cached"] > 0
 
 
 def test_main_stops_before_searching_when_the_id_mapping_fails(monkeypatch, tmp_path):
@@ -158,3 +194,46 @@ def test_main_stops_before_searching_when_the_id_mapping_fails(monkeypatch, tmp_
     assert web_eval.main() == 1
     assert len(requests) == 1  # only the batch lookup; no search request spent
     assert not (tmp_path / "results").exists()
+
+
+def test_sampled_run_is_never_canonical(monkeypatch, tmp_path):
+    requests: list = []
+    _patch_main(monkeypatch, tmp_path, requests)
+    monkeypatch.setenv("SSR_WEB_EVAL_N", "2")
+    assert web_eval.main() == 0
+    assert not (tmp_path / "results").exists()
+    (run_dir,) = (tmp_path / "runs").iterdir()
+    blob = json.loads((run_dir / "web_retrieval.json").read_text())
+    assert blob["n_queries"] == 2 and blob["sample_seed"] == web_eval.SEED
+    assert run_dir.name == "web_beir-scifact-test_2"
+
+
+@pytest.mark.filterwarnings("ignore::RuntimeWarning")  # identical toy runs: zero-variance t-tests
+def test_rows_and_pairs_cover_every_variant_in_both_views():
+    keys = [k for k, _ in web_eval.ROWS]
+    assert keys[0] == "hybrid"
+    for v in web_eval.VARIANTS:
+        assert v in keys and f"{v}_any" in keys
+        assert (v, "hybrid") in web_eval.PAIRS and (f"{v}_any", "hybrid") in web_eval.PAIRS
+        if v != "web":
+            assert (v, "web") in web_eval.PAIRS and (f"{v}_any", "web_any") in web_eval.PAIRS
+    assert "recall@5" in web_eval.METRICS
+
+    qrels = {"q1": {"a": 1}, "q2": {"b": 1}}
+    runs = {k: {"q1": {"a": 2.0, "x": 1.0}, "q2": {"b": 1.0}} for k in keys}
+    runs["web"] = {"q1": {"x": 1.0}, "q2": {}}
+    r = web_eval.score(qrels, runs)
+    assert set(r["scores"]) == set(keys)
+    assert set(r["comparisons"]) == {f"{a}_vs_{b}" for a, b in web_eval.PAIRS}
+    assert r["comparisons"]["web_rewrite_vs_web"]["recall@5"]["delta"] == 1.0
+    meta = {
+        "title": "t", "fetched_from": "a", "fetched_to": "b", "n_queries": 2, "requests_sent": 0,
+        "authenticated": False, "dropped_no_abstract": 0,
+        "mapping": {"found_in_s2": 1, "n_gold_docs": 1, "title_matches": 1, "match_rate": 1.0, "threshold": 0.9},
+        "rewrite": {"max_terms": 6, "fallback_terms": 3, "fallback_used": 0, "no_terms": 0},
+        "embeddings": {"cached": 0, "computed": 0},
+    }
+    md = web_eval.to_markdown(r, meta)
+    for _, label in web_eval.ROWS:
+        assert f"| {label} |" in md
+    assert "Recall@5" in md and "web_rewrite_rerank_any vs web_any" in md

@@ -113,6 +113,16 @@ class Settings(BaseSettings):
     # when s2_api_cache is on — arbitrary public queries would otherwise grow it unbounded.
     s2_cache_dir: str = "./data/s2_cache"
     s2_api_cache: bool = False
+    # Web-mode pipeline (app/retrieve/web_search.py), both deterministic and LLM-free:
+    # send S2 a keyword rewrite of the claim (a 6-term query + a 3-term one, results
+    # pooled) instead of the raw sentence, and re-rank the S2 candidates locally with
+    # RRF(bge-small dense, BM25 over the candidates). Defaults follow web_eval's measured
+    # result (eval/results/web_retrieval.md): on the 300 SciFact test claims (rules
+    # frozen on 100 train claims), rewrite+rerank lifts gold-paper Recall@5 from 0.040 to
+    # 0.185 and nDCG@10 from 0.035 to 0.159 vs the raw-claim query (45 better / 1 worse,
+    # p<0.0001). Rerank alone does nothing (p=1.0); the rewrite is what lets it work.
+    s2_query_rewrite: bool = True
+    s2_rerank: bool = True
 
     # --- LLM providers (generator and RAG-eval judge) ---
     # Each role picks a provider; the PROVIDER decides the base URL, the API key and

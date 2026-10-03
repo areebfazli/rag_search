@@ -26,9 +26,11 @@ class Embedder:
         fn = getattr(self.model, "get_embedding_dimension", None)
         return fn() if fn else self.model.get_sentence_embedding_dimension()
 
-    def encode_documents(self, texts: list[str], batch_size: int = 32) -> np.ndarray:
+    def encode_documents(
+        self, texts: list[str], batch_size: int = 32, show_progress: bool = True
+    ) -> np.ndarray:
         return self.model.encode(
-            texts, batch_size=batch_size, normalize_embeddings=True, show_progress_bar=True
+            texts, batch_size=batch_size, normalize_embeddings=True, show_progress_bar=show_progress
         )
 
     def encode_query(self, text: str) -> np.ndarray:

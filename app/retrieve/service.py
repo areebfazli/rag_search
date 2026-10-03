@@ -19,6 +19,7 @@ from app.index.vector_store import VectorStore
 from app.retrieve.dense import DenseRetriever
 from app.retrieve.fusion import fuse_hits
 from app.retrieve.semantic_scholar import S2_MAX_LIMIT, S2Error
+from app.retrieve.web_search import WebSearch
 
 LOCAL_MODES = ("bm25", "dense", "hybrid", "hybrid_rerank")
 # Optional, networked (Semantic Scholar) — never the default. `web` is S2 alone;
@@ -67,14 +68,48 @@ class SearchService:
 
     @property
     def web(self):
-        """The Semantic Scholar retriever — built lazily, only when a web mode is used."""
+        """The web pipeline (Semantic Scholar + optional rewrite/rerank, per settings) —
+        built lazily, only when a web mode is used."""
         if self._web is None:
             with self._web_lock:
                 if self._web is None:
                     from app.retrieve.semantic_scholar import SemanticScholarRetriever
+                    from app.retrieve.web_search import EmbeddingCache
 
-                    self._web = SemanticScholarRetriever.for_api()
+                    self._web = WebSearch(
+                        SemanticScholarRetriever.for_api(),
+                        rewrite=settings.s2_query_rewrite,
+                        rerank=settings.s2_rerank,
+                        embedder=self._web_embedder,
+                        rarity=self._term_rarity,
+                        # Same opt-in as the response cache: public queries must not
+                        # grow data/ without bound.
+                        emb_cache=(
+                            EmbeddingCache(Path(settings.s2_cache_dir) / "emb")
+                            if settings.s2_api_cache
+                            else None
+                        ),
+                    )
         return self._web
+
+    def _web_embedder(self):
+        """The local dense embedder when this service built one (shared, so the model
+        loads once), else a fresh one."""
+        embedder = getattr(self, "embedder", None)
+        if embedder is None:
+            embedder = Embedder()
+        return embedder
+
+    def _term_rarity(self):
+        """Local-corpus term rarity for the rewrite's term cap, from the loaded BM25
+        index's documents; None (entity/length priority) if the index carries none."""
+        docs = getattr(self.lexical, "docs", None)
+        if not docs:
+            return None
+        from app.ingest.corpus import document_passage
+        from app.retrieve.query_rewrite import TermRarity
+
+        return TermRarity.from_texts(document_passage(d) for d in docs)
 
     @property
     def reranker(self):
@@ -144,7 +179,7 @@ class SearchService:
         local_lock: AbstractContextManager | None,
     ) -> list[SearchHit]:
         if mode == "web":
-            return self.web.search(query, min(top_k, S2_MAX_LIMIT))
+            return self._web_search(query, min(top_k, S2_MAX_LIMIT), local_lock)
         # hybrid_web: the local hybrid list and the S2 list, fused with the same RRF.
         # fuse_hits dedupes by doc_id (SciFact ids are S2 corpus ids), and the local list
         # goes first, so a paper in both keeps the local text/title and gains S2's url/year.
@@ -155,7 +190,7 @@ class SearchService:
             SearchHit(h.doc_id, h.score, h.text, {**h.metadata, "source": "local"}) for h in local
         ]
         try:
-            web = self.web.search(query, min(candidate_k, S2_MAX_LIMIT))
+            web = self._web_search(query, min(candidate_k, S2_MAX_LIMIT), local_lock)
         except S2Error as e:
             if warnings is not None:
                 warnings.append(
@@ -163,3 +198,13 @@ class SearchService:
                 )
             return local[:top_k]
         return fuse_hits([local, web], k=settings.rrf_k, top_k=candidate_k)[:top_k]
+
+    def _web_search(
+        self, query: str, k: int, local_lock: AbstractContextManager | None
+    ) -> list[SearchHit]:
+        """S2 results for `query`. The pipeline's local rerank (embedder work) runs under
+        `local_lock`, like every other use of the shared models; the S2 calls never do.
+        An injected plain retriever (tests) is called as-is."""
+        if isinstance(self.web, WebSearch):
+            return self.web.search(query, k, lock=local_lock)
+        return self.web.search(query, k)

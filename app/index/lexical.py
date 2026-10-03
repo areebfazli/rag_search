@@ -25,10 +25,10 @@ class LexicalIndex:
         self.stemmer = Stemmer.Stemmer(STEMMER_LANGUAGE)
         self.docs: list[dict] = []
 
-    def build(self, docs: list[dict], texts: list[str]) -> None:
-        corpus_tokens = bm25s.tokenize(texts, stemmer=self.stemmer)
+    def build(self, docs: list[dict], texts: list[str], show_progress: bool = True) -> None:
+        corpus_tokens = bm25s.tokenize(texts, stemmer=self.stemmer, show_progress=show_progress)
         self.retriever = bm25s.BM25()
-        self.retriever.index(corpus_tokens)
+        self.retriever.index(corpus_tokens, show_progress=show_progress)
         self.docs = docs
 
     def describe(self) -> dict:
@@ -63,7 +63,7 @@ class LexicalIndex:
     def search(self, query: str, top_k: int) -> list[SearchHit]:
         q_tokens = bm25s.tokenize(query, stemmer=self.stemmer, show_progress=False)
         k = min(top_k, len(self.docs))
-        idxs, scores = self.retriever.retrieve(q_tokens, k=k)
+        idxs, scores = self.retriever.retrieve(q_tokens, k=k, show_progress=False)
         hits: list[SearchHit] = []
         for idx, score in zip(idxs[0], scores[0]):
             doc = self.docs[int(idx)]

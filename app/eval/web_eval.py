@@ -52,13 +52,17 @@ from app.retrieve.semantic_scholar import (
     ResponseCache,
     S2Error,
     SemanticScholarRetriever,
-    parse_search,
     search_params,
 )
 
 DEPTH = S2_MAX_LIMIT  # one page of S2's max size; the local hybrid run is also depth 100
-METRICS = ["ndcg@10", "recall@10", "recall@100"]
-PRETTY = {"ndcg@10": "nDCG@10", "recall@10": "Recall@10", "recall@100": "Recall@100"}
+METRICS = ["recall@5", "recall@10", "recall@100", "ndcg@10"]
+PRETTY = {
+    "recall@5": "Recall@5",
+    "recall@10": "Recall@10",
+    "recall@100": "Recall@100",
+    "ndcg@10": "nDCG@10",
+}
 MAX_P = 0.05
 # Share of gold doc ids whose S2 title must match the local SciFact title for the id
 # mapping to count as confirmed. Titles differ slightly across sources (punctuation,
@@ -71,14 +75,31 @@ EST_LATENCY_S = 1.0  # rough per-request S2 latency for the up-front time estima
 OUT = Path("eval/results")
 RUNS = Path("data/eval_runs")
 CANONICAL_DATASET = Settings.model_fields["eval_dataset"].default
+SEED = 13  # sample seed for SSR_WEB_EVAL_N (rag_eval's shuffle-then-prefix sampling)
 
+# The web pipeline variants (app/retrieve/web_search.WebSearch): key -> (rewrite, rerank).
+# Each also has an `<key>_any` twin over the same responses, keeping papers that have no
+# abstract ("did S2 find the paper at all").
+VARIANTS = {
+    "web": (False, False),
+    "web_rewrite": (True, False),
+    "web_rerank": (False, True),
+    "web_rewrite_rerank": (True, True),
+}
+LABELS = {
+    "web": "S2, raw claim as query (web mode as before)",
+    "web_rewrite": "S2, keyword rewrite",
+    "web_rerank": "S2, raw claim + local rerank",
+    "web_rewrite_rerank": "S2, keyword rewrite + local rerank",
+}
 # (key, label) of the rows in the report; "hybrid" is the committed local run.
-ROWS = [
-    ("hybrid", "Local hybrid (RRF, 5,183 docs)"),
-    ("web", "Semantic Scholar search (web mode)"),
-    ("web_any", "Semantic Scholar search, incl. no-abstract papers"),
+ROWS = [("hybrid", "Local hybrid (RRF, 5,183 docs)")]
+for _key, _label in LABELS.items():
+    ROWS += [(_key, _label), (f"{_key}_any", f"{_label}, incl. no-abstract papers")]
+# Every web row vs the local hybrid; every new variant vs raw S2 in the same view.
+PAIRS = [(k, "hybrid") for k, _ in ROWS[1:]] + [
+    (f"{k}{view}", f"web{view}") for k in VARIANTS if k != "web" for view in ("", "_any")
 ]
-PAIRS = [("web", "hybrid"), ("web_any", "hybrid")]
 
 Run_ = dict[str, dict[str, float]]
 
@@ -208,6 +229,15 @@ def to_markdown(result: dict, meta: dict) -> str:
         "measures whether open-web retrieval surfaces the gold paper among everything, not "
         "a like-for-like ranker comparison.",
         "",
+        "Variants (app/retrieve/web_search.py; no LLM anywhere): *raw* sends the claim "
+        "sentence as the S2 query; *rewrite* sends a keyword query built from it "
+        f"(app/retrieve/query_rewrite.py: ≤{meta['rewrite']['max_terms']} content terms, "
+        f"plus a {meta['rewrite']['fallback_terms']}-term fallback query whose results are "
+        "pooled with the first's, unless the first alone fills the page); *rerank* re-orders "
+        "the S2 candidates (≤100 per query) locally by RRF of bge-small similarity to the "
+        "claim and BM25 over the candidates. Rewrite rules were chosen on a seeded 100-claim "
+        "beir/scifact/train sample and frozen before the test run.",
+        "",
         "| Config | " + " | ".join(PRETTY[m] for m in METRICS) + " |",
         "|" + "---|" * (len(METRICS) + 1),
     ]
@@ -231,6 +261,7 @@ def to_markdown(result: dict, meta: dict) -> str:
                 f"{'yes' if c['p'] < MAX_P else 'no'} |"
             )
     mp = meta["mapping"]
+    rw = meta["rewrite"]
     lines += [
         "",
         "## Id mapping check",
@@ -240,32 +271,132 @@ def to_markdown(result: dict, meta: dict) -> str:
         f"(match rate {mp['match_rate']:.3f}, threshold {mp['threshold']}).",
         "",
         f"Queries: {meta['n_queries']} · S2 requests this run: {meta['requests_sent']} · "
-        f"authenticated: {meta['authenticated']} · web hits dropped for having no abstract: "
-        f"{meta['dropped_no_abstract']}.",
+        f"authenticated: {meta['authenticated']} · raw-query web hits dropped for having no "
+        f"abstract: {meta['dropped_no_abstract']} · rewrite fallback query sent for "
+        f"{rw['fallback_used']}/{meta['n_queries']} claims · rewritten claims with no content "
+        f"terms (sent raw): {rw['no_terms']} · candidate embeddings cached/computed this run: "
+        f"{meta['embeddings']['cached']}/{meta['embeddings']['computed']}.",
         "",
     ]
     return "\n".join(lines)
 
 
-def output_dir(limit: int, n_queries: int) -> tuple[Path, bool]:
-    if not limit and settings.eval_dataset == CANONICAL_DATASET:
+def output_dir(limit: int, n_queries: int, sampled: bool = False) -> tuple[Path, bool]:
+    if not limit and not sampled and settings.eval_dataset == CANONICAL_DATASET:
         return OUT, True
     slug = "".join(c if c.isalnum() else "-" for c in settings.eval_dataset).strip("-")
     return RUNS / f"web_{slug}_{n_queries}", False
 
 
+def make_embedder():
+    """bge-small for the rerank (a seam for tests). Loads the model only — never Qdrant."""
+    from app.index.embedder import Embedder
+
+    return Embedder()
+
+
+def load_rarity(docs: list[dict]):
+    from app.ingest.corpus import document_passage
+    from app.retrieve.query_rewrite import TermRarity
+
+    return TermRarity.from_texts(document_passage(d) for d in docs)
+
+
+def local_hybrid_run(queries: dict[str, str], n_total: int) -> Run_:
+    """The local hybrid run for these claims. On the canonical split it is the committed
+    run from retrieval_eval's cache (Qdrant is never opened); on any other split (the
+    train dev sample) it is computed once through SearchService — which opens the local
+    index — and cached by retrieval_eval.cached_run under its own key."""
+    if settings.eval_dataset == CANONICAL_DATASET:
+        run = load_hybrid_run(n_total)
+    else:
+        from app.eval.retrieval_eval import cached_run
+        from app.retrieve.service import SearchService
+
+        print("Non-canonical split: computing the local hybrid run (opens the local index).")
+        run = cached_run(SearchService(), queries, f"hybrid_web-eval-s{SEED}", "hybrid", None)
+    missing = [q for q in queries if q not in run]
+    if missing:
+        raise ValueError(f"local hybrid run lacks {len(missing)} of these claims (e.g. {missing[:3]})")
+    return {q: run[q] for q in queries}
+
+
+def pipelines(retriever, embedder_factory, rarity, emb_cache) -> dict:
+    """One WebSearch per row key, sharing the retriever, embedder, rarity and caches.
+    strict: a failed fallback request stops the run instead of scoring a thinner pool."""
+    from app.retrieve.web_search import WebSearch
+
+    embedder: list = []
+
+    def shared_embedder():
+        if not embedder:
+            embedder.append(embedder_factory())
+        return embedder[0]
+
+    out = {}
+    for key, (rewrite, rerank) in VARIANTS.items():
+        for view, keep in (("", False), ("_any", True)):
+            out[key + view] = WebSearch(
+                retriever,
+                rewrite=rewrite,
+                rerank=rerank,
+                embedder=shared_embedder,
+                rarity=rarity,
+                emb_cache=emb_cache,
+                keep_no_abstract=keep,
+                strict=True,
+            )
+    return out
+
+
+def estimate_requests(web: dict, queries: dict[str, str], reader: ResponseCache, refresh: bool):
+    """(min, max) uncached S2 searches: raw claims + rewrite primaries, plus fallbacks —
+    known exactly when the primary is cached, else counted as possible."""
+    from app.retrieve.semantic_scholar import parse_search
+
+    def uncached(q: str) -> bool:
+        return refresh or reader.get(SEARCH_PATH, search_params(q, DEPTH)) is None
+
+    rewrite = web["web_rewrite"]
+    lo = hi = 0
+    for text in queries.values():
+        raw = int(uncached(text))
+        lo += raw
+        hi += raw
+        qs = rewrite.queries(text)
+        first = uncached(qs[0])
+        lo += first
+        hi += first
+        if len(qs) > 1:
+            if first:
+                hi += uncached(qs[1])
+            else:
+                entry = reader.get(SEARCH_PATH, search_params(qs[0], DEPTH)) or {}
+                need = len(parse_search(entry.get("response"), DEPTH)) < DEPTH
+                lo += need and uncached(qs[1])
+                hi += need and uncached(qs[1])
+    return lo, hi
+
+
 def main() -> int:
+    from app.eval.rag_eval import sample_claims
     from app.eval.retrieval_eval import _json_safe
     from app.ingest.corpus import load_documents, load_queries_qrels
+    from app.retrieve import query_rewrite
     from app.retrieve.service import SearchService
+    from app.retrieve.web_search import EmbeddingCache
 
     queries, qrels_dict = load_queries_qrels()
     n_total = len(queries)
     limit = int(os.environ.get("SSR_EVAL_LIMIT", "0"))
+    n_env = os.environ.get("SSR_WEB_EVAL_N", "all").strip().lower()
+    sampled = n_env not in ("", "all")
+    if sampled:
+        queries = {q: queries[q] for q in sample_claims(queries, int(n_env), SEED)}
     if limit:
         queries = dict(list(queries.items())[:limit])
     qrels_dict = {q: v for q, v in qrels_dict.items() if q in queries}
-    out, canonical = output_dir(limit, len(queries))
+    out, canonical = output_dir(limit, len(queries), sampled)
 
     refresh = bool(os.environ.get("SSR_EVAL_REFRESH"))
     cache = (_WriteOnlyCache if refresh else ResponseCache)(settings.s2_cache_dir)
@@ -273,33 +404,33 @@ def main() -> int:
     # the offline eval waits up to 3 min per 429 instead of stopping; the API path keeps
     # its short max_wait_s budget.
     retriever = SemanticScholarRetriever(cache=cache, max_wait_s=None, max_backoff_s=180.0)
-    service = SearchService(dense=_NoLocalIndex(), lexical=_NoLocalIndex(), web=retriever)
+    docs = load_documents()
+    local_titles = {d["doc_id"]: d["title"] for d in docs}
+    emb_cache = EmbeddingCache(Path(settings.s2_cache_dir) / "emb")
+    web = pipelines(retriever, make_embedder, load_rarity(docs), emb_cache)
 
     # Up-front cost: uncached searches + the mapping batch (if uncached).
     gold_ids = sorted({d for v in qrels_dict.values() for d in v}, key=int)
     reader = ResponseCache(settings.s2_cache_dir)  # always reads, even under refresh
-    uncached = sum(
-        1
-        for text in queries.values()
-        if refresh or reader.get(SEARCH_PATH, search_params(text, DEPTH)) is None
-    )
+    lo, hi = estimate_requests(web, queries, reader, refresh)
     n_batches = -(-len(gold_ids) // S2_BATCH_MAX_IDS)
-    est = uncached + n_batches
     print(
-        f"Eval set: {settings.eval_dataset}, {len(queries)} claims, {len(gold_ids)} gold docs. "
+        f"Eval set: {settings.eval_dataset}, {len(queries)} claims"
+        + (f" (seeded sample, seed {SEED})" if sampled else "")
+        + f", {len(gold_ids)} gold docs. "
         f"S2 key: {'set' if retriever.authenticated else 'NOT set (shared public pool; expect 429s)'}."
     )
     print(
-        f"Expected S2 requests: ~{est} (≤{n_batches} batch + {uncached} uncached searches; "
-        f"retries extra) → ≥{est / settings.s2_rate_per_s / 60:.1f} min at "
-        f"{settings.s2_rate_per_s:g} req/s, ~{est * (1 / settings.s2_rate_per_s + EST_LATENCY_S) / 60:.1f} min "
+        f"Expected S2 requests: ~{lo + n_batches}–{hi + n_batches} (≤{n_batches} batch + "
+        f"{lo}–{hi} uncached searches; retries extra) → ≥{(lo + n_batches) / settings.s2_rate_per_s / 60:.1f}–"
+        f"{(hi + n_batches) / settings.s2_rate_per_s / 60:.1f} min at {settings.s2_rate_per_s:g} req/s, "
+        f"~{(hi + n_batches) * (1 / settings.s2_rate_per_s + EST_LATENCY_S) / 60:.1f} min worst case "
         "with latency."
     )
     if not canonical:
         print(f"Non-canonical run — writing to {out}, not {OUT}")
 
-    hybrid = load_hybrid_run(n_total)
-    local_titles = {d["doc_id"]: d["title"] for d in load_documents()}
+    hybrid = local_hybrid_run(queries, n_total)
 
     try:
         mapping = check_mapping(retriever, local_titles, gold_ids)
@@ -318,28 +449,28 @@ def main() -> int:
         )
         return 1
 
-    runs: dict[str, Run_] = {"hybrid": {q: hybrid[q] for q in queries}, "web": {}, "web_any": {}}
+    runs: dict[str, Run_] = {"hybrid": hybrid, **{k: {} for k in web}}
     fetched: list[str] = []
-    dropped = 0
+    dropped = fallback_used = no_terms = 0
     t0 = time.time()
     for i, (qid, text) in enumerate(queries.items(), start=1):
-        try:
-            hits = service.retrieve(text, mode="web", top_k=DEPTH)
-        except S2Error as e:
-            print(
-                f"\nStopped at claim {i}/{len(queries)}: {e}. {i - 1} responses are cached — "
-                "re-run the same command to resume."
-            )
-            return 1
-        # The response the web mode just used (cached by it): re-parsed keeping
-        # no-abstract papers, at no extra request.
-        entry = reader.get(SEARCH_PATH, search_params(text, DEPTH)) or {}
-        any_hits = parse_search(entry.get("response"), DEPTH, keep_no_abstract=True) or hits
-        runs["web"][qid] = to_run(hits)
-        runs["web_any"][qid] = to_run(any_hits)
-        dropped += len(any_hits) - len(hits)
-        if entry.get("fetched_at"):
-            fetched.append(entry["fetched_at"])
+        for key, pipeline in web.items():
+            # Through SearchService, as the API runs it (web mode, this pipeline).
+            service = SearchService(dense=_NoLocalIndex(), lexical=_NoLocalIndex(), web=pipeline)
+            try:
+                hits = service.retrieve(text, mode="web", top_k=DEPTH)
+            except S2Error as e:
+                print(
+                    f"\nStopped at claim {i}/{len(queries)} ({key}): {e}. Responses so far are "
+                    "cached — re-run the same command to resume."
+                )
+                return 1
+            runs[key][qid] = to_run(hits)
+            fetched += [e["fetched_at"] for e in pipeline.last_entries if e.get("fetched_at")]
+            if key == "web_rewrite":
+                fallback_used += len(pipeline.last_entries) > 1
+                no_terms += not query_rewrite.claim_terms(text)
+        dropped += len(runs["web_any"][qid]) - len(runs["web"][qid])
         if i % 20 == 0 or i == len(queries):
             print(f"  {i}/{len(queries)}  ({(time.time() - t0) / 60:.1f} min)", flush=True)
 
@@ -349,6 +480,7 @@ def main() -> int:
         f"BEIR/SciFact ({result['n_queries']} test claims)"
         if canonical
         else f"{settings.eval_dataset} ({result['n_queries']} claims"
+        + (f", seeded sample (seed {SEED})" if sampled else "")
         + (f", SSR_EVAL_LIMIT={limit}" if limit else "")
         + ", non-canonical)"
     )
@@ -356,6 +488,7 @@ def main() -> int:
         "title": title,
         "dataset": settings.eval_dataset,
         "n_queries": result["n_queries"],
+        "sample_seed": SEED if sampled else None,
         "depth": DEPTH,
         "fetched_from": min(fetched, default=today),
         "fetched_to": max(fetched, default=today),
@@ -363,6 +496,20 @@ def main() -> int:
         "requests_sent": retriever.requests_sent,
         "authenticated": retriever.authenticated,
         "dropped_no_abstract": dropped,
+        "rewrite": {
+            "max_terms": query_rewrite.MAX_TERMS,
+            "fallback_terms": query_rewrite.FALLBACK_TERMS,
+            "term_priority": "local-corpus IDF",
+            "fallback_used": fallback_used,
+            "no_terms": no_terms,
+        },
+        "rerank": {
+            "embedding_model": settings.embedding_model,
+            "fusion": f"RRF(k={settings.rrf_k}) of dense + BM25 over the S2 candidates",
+            "candidates_per_query": DEPTH,
+        },
+        "embeddings": {"cached": emb_cache.hits, "computed": emb_cache.misses},
+        "runtime_s": round(time.time() - t0, 1),
         "mapping": mapping,
     }
     out.mkdir(parents=True, exist_ok=True)
