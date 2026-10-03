@@ -33,7 +33,7 @@ from app.eval.rag_eval import (
     predicted_label,
     resolve_answered,
 )
-from app.generate.generator import GeneratedAnswer, split_verdict
+from app.generate.generator import GeneratedAnswer, ReaskReply, split_verdict
 from app.ingest.corpus import ClaimLabel
 
 FAKE_OPENROUTER_KEY = "sk-or-v1-FAKE-TEST-KEY-never-real-0000"
@@ -295,9 +295,25 @@ class FakeService:
         return [SearchHit("d1", 1.0, "t1"), SearchHit("d2", 0.5, "t2")]
 
 
+# The corpus behind FakeService's hits, for re-asks of resumed rows (rebuilt from it).
+CORPUS = ({"doc_id": "d1", "title": "", "text": "t1"}, {"doc_id": "d2", "title": "", "text": "t2"})
+
+
 class FakeGenerator:
-    def __init__(self, model=None, endpoint=None):
+    # The verdict-only re-ask: rag_eval runs it as its own post-step (generate() is built
+    # with reask=False). Unparseable by default, so the first-pass rows keep their labels;
+    # tests that want a re-ask verdict override REASK_REPLY. Reset per test (_patch_main).
+    REASK_REPLY = "I cannot tell from these passages."
+    reask_calls: list[tuple[str, list]] = []
+
+    def __init__(self, model=None, endpoint=None, reask=True):
         self.endpoint = endpoint
+        self.reask_enabled = reask
+
+    def reask_verdict(self, query, hits):
+        type(self).reask_calls.append((query, hits))
+        return ReaskReply(raw=self.REASK_REPLY, finish_reason="stop", completion_tokens=7,
+                          reasoning_tokens=3, cost_usd=0.0, provider="P")
 
     def generate(self, query, hits):
         text, verdict = split_verdict(REPLIES[query])  # the real parser, fake model
@@ -362,6 +378,10 @@ def _patch_main(
     # Checkpoints and non-canonical runs stay under tmp_path, never the real data/.
     monkeypatch.setattr(rag_eval, "CACHE", tmp_path / "cache")
     monkeypatch.setattr(rag_eval, "RUNS", tmp_path / "runs")
+    monkeypatch.setattr(rag_eval, "REASK_CACHE", tmp_path / "reask_cache")
+    monkeypatch.setattr(rag_eval, "load_documents", lambda: [dict(d) for d in CORPUS])
+    monkeypatch.setattr(settings, "llm_reask", True)
+    monkeypatch.setattr(FakeGenerator, "reask_calls", [])
     for var in RAG_ENV:
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr(rag_eval, "MODE", mode)
@@ -443,6 +463,7 @@ def test_rag_json_keeps_every_scored_query(rag_run):
         "evidence_quote": None,  # the fake reply quotes nothing
         "quote_passage": None,
         "quote_found": None,
+        "reask_attempted": False,  # it had a verdict: never re-asked
     }
     assert rows["2"]["abstention_class"] == "answered_without_evidence"
     # NEI + rationale-free qrels doc retrieved: the two oracles disagree on this one.
@@ -1466,7 +1487,7 @@ def test_resume_applies_the_current_parser_with_no_llm_call(rate_limited, tmp_pa
 
 def test_rag_json_records_verdict_sources_and_quote_stats(rag_run):
     _, blob, _ = rag_run
-    assert blob["verdict_sources"] == {"line": 3, "inline": 0, "stance": 0}
+    assert blob["verdict_sources"] == {"line": 3, "inline": 0, "stance": 0, "reask": 0}
     assert blob["evidence_quotes"]["no_quote"]["n"] == 5  # the fakes quote nothing
     assert all("quote_found" in r and "verdict_source" in r for r in blob["rows"])
 
@@ -1482,3 +1503,188 @@ def test_rescore_rebuilds_aggregates_and_refuses_eval_results(tmp_path, monkeypa
     monkeypatch.setattr(rag_eval, "OUT", tmp_path / "results")
     with pytest.raises(SystemExit, match="refusing"):
         rag_rescore.main(["in.json", str(tmp_path / "results" / "rag.json")])
+
+
+# --- the verdict-only re-ask post-step -----------------------------------------------------
+
+from app.eval.reply_cache import ReplyCache  # noqa: E402
+from app.generate.generator import REASK_MAX_TOKENS, REASK_NOTE, reask_prompt_hash  # noqa: E402
+from app.generate.prompts import reask_messages  # noqa: E402
+
+NO_VERDICT_CLAIMS = {"claim four", "claim five"}  # the two replies with no verdict
+
+
+def _reask_entries(tmp_path):
+    path = tmp_path / "reask_cache" / "beir-scifact-test.json"
+    return json.loads(path.read_text())["entries"] if path.exists() else {}
+
+
+def test_reask_fires_once_per_claim_without_a_verdict_and_sets_it(tmp_path, monkeypatch):
+    _patch_main(tmp_path, monkeypatch, tmp_path)
+    monkeypatch.setattr(FakeGenerator, "REASK_REPLY", "Verdict: REFUTED [1]")
+    rag_eval.main()
+    blob = json.loads((tmp_path / "rag.json").read_text())
+    rows = {r["query_id"]: r for r in blob["rows"]}
+    # Exactly one extra call per claim with no verdict, none for the three that had one.
+    assert sorted(q for q, _ in FakeGenerator.reask_calls) == sorted(NO_VERDICT_CLAIMS)
+    for qid in ("1", "2", "3"):
+        assert rows[qid]["reask_attempted"] is False and "reask" not in rows[qid]
+    r4, r5 = rows["4"], rows["5"]
+    for r in (r4, r5):
+        assert r["reask_attempted"] is True
+        assert (r["verdict"], r["verdict_source"], r["predicted_label"]) == ("REFUTED", "reask", "CONTRADICT")
+        assert r["answered"] is True and r["answered_source"] == "reask"
+        assert r["reask"]["parsed"] == "REFUTED" and r["reask"]["finish_reason"] == "stop"
+        assert r["reask"]["completion_tokens"] == 7 and r["reask"]["reasoning_tokens"] == 3
+        assert r["first_pass"]["verdict"] is None and r["first_pass"]["verdict_source"] is None
+    assert r4["first_pass"]["predicted_label"] == "NEI" and r5["first_pass"]["predicted_label"] == "NONE"
+    # Prose answers are kept as served; the judge's scores stay the first reply's.
+    assert r4["answer"] == "Nothing here settles it." and r4["faithfulness"] == 0.9
+    assert rag_eval.first_pass_row(r4)["predicted_label"] == "NEI"
+    assert blob["verdict_sources"]["reask"] == 2 and blob["reasked_answers"] == 2
+    assert blob["verdict_accuracy"] == 0.8  # q5 (CONTRADICT) is fixed, q4 (SUPPORT) is not
+    assert blob["run"]["reask"]["prompt_hash"] == reask_prompt_hash()
+    assert blob["run"]["reask_replies"] == {"cached": 0, "fetched": 2, "failed": 0}
+    assert "| Re-asked (claim with no verdict: one verdict-only call) | 2 of 5 (2 gave a verdict) |" in (
+        tmp_path / "rag.md").read_text()
+
+
+def test_reask_replies_are_cached_under_rag_secondlooks_keys(tmp_path, monkeypatch):
+    _patch_main(tmp_path, monkeypatch, tmp_path)
+    rag_eval.main()
+    hits = [SearchHit("d1", 1.0, "t1"), SearchHit("d2", 0.5, "t2")]
+    want = {
+        ReplyCache.key("reask", qid, DEFAULT_GEN_MODEL, REASK_MAX_TOKENS, reask_messages(QUERIES[qid], hits))
+        for qid in ("4", "5")
+    }
+    entries = _reask_entries(tmp_path)
+    assert set(entries) == want
+    assert all(e["kind"] == "reask" and e["max_tokens"] == REASK_MAX_TOKENS for e in entries.values())
+
+
+def test_rerun_from_a_complete_checkpoint_reasks_from_the_cache_with_no_llm_call(rate_limited, tmp_path):
+    setup, _, out = rate_limited
+    setup("generate", None, [])
+    rag_eval.main()
+    first = json.loads((out / "rag.json").read_text())
+    assert len(FakeGenerator.reask_calls) == 2
+    gen2, judge2 = setup("generate", None, [])  # resets reask_calls
+    rag_eval.main()
+    assert gen2.calls == [] and judge2.queries == [] and FakeGenerator.reask_calls == []
+    second = json.loads((out / "rag.json").read_text())
+    assert second["rows"] == first["rows"]
+    assert second["run"]["reask_replies"] == {"cached": 2, "fetched": 0, "failed": 0}
+
+
+def test_a_reply_cached_by_rag_secondlook_is_a_hit_for_a_resumed_row(rate_limited, tmp_path, capsys):
+    # A complete first-pass checkpoint (re-ask off), then a cache file written the way
+    # rag_secondlook writes it, with passages rebuilt from the corpus: the canonical
+    # re-run must take the reply from it and make no call at all.
+    setup, _, out = rate_limited
+    setup("generate", None, [])
+    settings.llm_reask = False
+    rag_eval.main()
+    assert FakeGenerator.reask_calls == []
+    gen2, judge2 = setup("generate", None, [])  # llm_reask back on
+    hits = rag_eval.reask_hits(["d1", "d2"], {d["doc_id"]: d for d in CORPUS})
+    cache = ReplyCache(tmp_path / "reask_cache" / "beir-scifact-test.json")
+    for qid in ("4", "5"):
+        msgs = reask_messages(QUERIES[qid], hits)
+        cache.put(ReplyCache.key("reask", qid, DEFAULT_GEN_MODEL, REASK_MAX_TOKENS, msgs),
+                  {"raw": "Verdict: SUPPORTED [2]", "finish_reason": "stop", "kind": "reask"})
+    capsys.readouterr()
+    rag_eval.main(["--check-quota"])  # nothing needed: no /key request either
+    printed = capsys.readouterr().out
+    assert "2 resumed claims have no verdict -> 2 replies cached" in printed
+    assert "LLM requests needed now: ~0 (0 on OpenRouter's free caps)" in printed
+    assert "no free OpenRouter requests needed" in printed
+    assert gen2.calls == [] and judge2.queries == [] and FakeGenerator.reask_calls == []
+    blob = json.loads((out / "rag.json").read_text())
+    assert {r["query_id"]: r["predicted_label"] for r in blob["rows"]}["4"] == "SUPPORT"
+    assert blob["run"]["canonical"] is True
+
+
+def test_estimate_counts_the_reasks_resumed_rows_still_need(rate_limited, tmp_path, capsys):
+    setup, _, out = rate_limited
+    setup("generate", None, [])
+    settings.llm_reask = False
+    rag_eval.main()  # first pass only: nothing cached
+    setup("generate", None, [])
+    capsys.readouterr()
+    rag_eval.main()
+    printed = capsys.readouterr().out
+    assert "2 resumed claims have no verdict -> 0 replies cached" in printed and "2 to fetch" in printed
+    assert "LLM requests needed now: ~2 (2 on OpenRouter's free caps)" in printed
+    assert len(FakeGenerator.reask_calls) == 2
+
+
+def test_reask_off_never_calls_and_is_never_canonical(tmp_path, monkeypatch):
+    _patch_main(tmp_path, monkeypatch, tmp_path)
+    monkeypatch.setattr(settings, "llm_reask", False)
+    rag_eval.main()
+    assert FakeGenerator.reask_calls == []
+    assert not (tmp_path / "rag.json").exists()
+    (run_dir,) = (tmp_path / "runs").iterdir()
+    assert run_dir.name.endswith("_noreask")
+    blob = json.loads((run_dir / "rag.json").read_text())
+    assert all(r["reask_attempted"] is False for r in blob["rows"])
+    assert blob["run"]["reask"]["enabled"] is False and blob["run"]["canonical"] is False
+
+
+def test_first_pass_generation_never_reasks_inside_generate(tmp_path, monkeypatch):
+    built = []
+
+    class Recording(FakeGenerator):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            built.append(self.reask_enabled)
+
+    _patch_main(tmp_path, monkeypatch, tmp_path, generator=Recording)
+    rag_eval.main()
+    assert built == [False]  # the post-step owns the re-ask (and its cache)
+
+
+def test_a_failed_reask_keeps_the_first_pass_and_is_retried_next_run(rate_limited, tmp_path, monkeypatch):
+    setup, _, out = rate_limited
+    setup("generate", None, [])
+
+    def boom(self, query, hits):
+        type(self).reask_calls.append((query, hits))
+        raise RuntimeError("upstream 500")
+
+    monkeypatch.setattr(FakeGenerator, "reask_verdict", boom)
+    rag_eval.main()
+    rows = {r["query_id"]: r for r in json.loads((out / "rag.json").read_text())["rows"]}
+    assert rows["4"]["reask_attempted"] and rows["4"]["reask_error"] == "RuntimeError"
+    assert rows["4"]["predicted_label"] == "NEI" and _reask_entries(tmp_path) == {}
+    monkeypatch.undo()  # back to the working fake (and fresh patches below)
+    setup("generate", None, [])
+    rag_eval.main()
+    assert len(FakeGenerator.reask_calls) == 2 and len(_reask_entries(tmp_path)) == 2
+
+
+def test_first_pass_row_undoes_the_reask():
+    row = {"query_id": "1", "verdict": None, "verdict_source": None, "predicted_label": "NEI",
+           "answered": False, "answered_source": "judge", "abstention_class": "false_abstention",
+           "abstention_class_qrels": "false_abstention", "answer": TRUNCATED_ANSWER,
+           "cited_doc_ids": [], "evidence": True, "evidence_qrels": True}
+    out = rag_eval.apply_reask(row, {"raw": "Verdict: SUPPORTED [1]", "finish_reason": "stop"})
+    assert out["verdict_source"] == "reask" and out["answer"] == REASK_NOTE
+    assert out["abstention_class"] == "answered_with_evidence"
+    assert rag_eval.first_pass_row(out) == row
+    unparsed = rag_eval.apply_reask(row, {"raw": "unsure", "finish_reason": "length"})
+    assert unparsed["reask"]["parsed"] is None and unparsed["predicted_label"] == "NEI"
+    assert rag_eval.first_pass_row(unparsed) == row
+
+
+TRUNCATED_ANSWER = "[Answer truncated: the model ran out of its token budget.]"
+
+
+def test_request_estimate_adds_reasks():
+    gen, judge_ep = _endpoints()
+    est = rag_eval.request_estimate(10, gen, judge_ep, 12.0, 0.2, reask_rate=0.1, reask_pending=3,
+                                    reask=True)
+    assert est["requests"] == 10 * 2 + 2 + 1 + 3  # gen + judge, retries, re-asks, pending
+    assert est["free_requests"] == 26 and est["free_requests_worst"] == 10 * 4 + 3
+    off = rag_eval.request_estimate(10, gen, judge_ep, 12.0, 0.2, reask_rate=0.1, reask_pending=3)
+    assert off["requests"] == 22 and off["reask_pending"] == 0

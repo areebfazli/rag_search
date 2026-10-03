@@ -33,4 +33,8 @@ class AnswerResponse(BaseModel):
     # is stripped from `answer`), or — for a claim, never a question — stated its stance
     # in its first sentence (generator.parse_verdict): SUPPORTED | REFUTED | NOT ENOUGH EVIDENCE.
     verdict: str | None = None
+    # Additive + optional: which step produced `verdict` — "line" | "inline" | "stance"
+    # (parsed from the answer), "reask" (the claim's answer had no verdict, so one
+    # verdict-only re-check of the same passages supplied it), or None with no verdict.
+    verdict_source: str | None = None
     warnings: list[str] = []

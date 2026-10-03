@@ -121,6 +121,44 @@ def test_answer_returns_502_when_the_llm_returns_no_completion(monkeypatch):
     assert r.json()["detail"] == "LLM backend returned no completion"
 
 
+def test_answer_serves_the_reask_verdict_through_the_real_generator(monkeypatch):
+    # /answer -> LLMGenerator.generate: a claim truncated to nothing gets one verdict-only
+    # re-ask; the response keeps its shape, with the verdict and its source filled in.
+    from types import SimpleNamespace
+
+    from fastapi.testclient import TestClient
+
+    from app.api import main
+    from app.core.interfaces import SearchHit
+    from app.generate.generator import REASK_NOTE, LLMGenerator
+
+    class _Service:
+        def retrieve(self, q, mode, top_k):
+            return [SearchHit("d1", 1.0, "text", {"title": "T"})]
+
+    replies = iter([("", "length"), ("", "length"), ("Verdict: REFUTED [1]", "stop")])
+    sent = []
+
+    def create(**kw):
+        sent.append(kw)
+        content, finish = next(replies)
+        return SimpleNamespace(choices=[SimpleNamespace(
+            message=SimpleNamespace(content=content), finish_reason=finish)], usage=None)
+
+    monkeypatch.setattr(settings, "llm_reask", True)
+    gen = LLMGenerator(model="m", base_url="http://localhost:1", api_key="k", reasoning_effort="")
+    gen.client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    monkeypatch.setattr(main, "resolve_endpoint", lambda role: None)
+    monkeypatch.setattr(main, "get_service", lambda: _Service())
+    monkeypatch.setattr(main, "get_generator", lambda: gen)
+    r = TestClient(main.app).get("/answer", params={"q": "Aspirin cures stroke."})
+    assert r.status_code == 200 and len(sent) == 3
+    body = r.json()
+    assert (body["verdict"], body["verdict_source"]) == ("REFUTED", "reask")
+    assert body["answer"] == REASK_NOTE and body["citations"] == []
+    assert set(body) == {"query", "answer", "citations", "hits", "verdict", "verdict_source", "warnings"}
+
+
 # --- web modes -------------------------------------------------------------------------
 
 

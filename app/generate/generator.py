@@ -10,12 +10,23 @@ On a reasoning model (gpt-oss; the default free Ling generator also reasons by d
 the hidden reasoning is billed against the same completion budget as the answer, so a
 too-small budget truncates the reply — possibly to nothing. generate() reads finish_reason, retries a truncated reply once with a
 larger budget, and flags one that is still cut off instead of passing it off as whole.
+
+If the input is a claim and the reply still carries no parseable verdict (cut off to
+nothing, or prose without a verdict line), generate() makes exactly ONE more call: the
+verdict-only re-ask (prompts.reask_messages, REASK_MAX_TOKENS; settings.llm_reask, on by
+default). Its verdict fills Answer.verdict (verdict_source "reask"); the displayed text
+stays the first reply's prose. Questions are never re-asked.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import unicodedata
+from collections.abc import Sequence
 from dataclasses import dataclass
+
+from openai import OpenAIError
 
 from openai import OpenAI
 
@@ -31,7 +42,7 @@ from app.core.llm_endpoints import (
     response_provider,
 )
 from app.core.interfaces import Answer, SearchHit, hit_passage
-from app.generate.prompts import SYSTEM, VERDICTS, build_user_prompt
+from app.generate.prompts import SYSTEM, VERDICTS, build_user_prompt, reask_messages
 
 _CITE = re.compile(r"\[(\d+)\]")
 # gpt-oss sometimes cites in its native CJK-bracket style — 【2】, occasionally with a
@@ -281,6 +292,59 @@ def check_evidence_quote(text: str, hits: list[SearchHit]) -> EvidenceQuote | No
 TRUNCATION_NOTE = "[Answer truncated: the model ran out of its token budget.]"
 TRUNCATION_RETRY_FACTOR = 2  # one retry, at twice the configured budget
 
+# --- the verdict-only re-ask --------------------------------------------------------------
+#
+# One call, no truncation retry (the budget is the retry): Ling reasons by default and the
+# replies that needed a re-ask had spent all 4,096 retry tokens reasoning; Ling's endpoint
+# allows 32,768 completion tokens. Frozen with the prompt (prompts.REASK_SYSTEM).
+REASK_MAX_TOKENS = 8192
+# Shown instead of the bare truncation note when the first reply had no prose at all and
+# the re-ask supplied the verdict: the reader gets a verdict with no explanation, and is
+# told why rather than shown "answer truncated" next to a confident verdict badge.
+REASK_NOTE = (
+    "[No explanation available: the model's answer ran out of its token budget, so this "
+    "verdict comes from a second, verdict-only check of the same passages.]"
+)
+
+
+def needs_reask(query: str, verdict: str | None) -> bool:
+    """A claim whose reply yielded no verdict. A question never is (it gets no verdict by
+    design), and a reply that did yield one — even a truncated one — is left alone."""
+    return verdict is None and not looks_like_question(query)
+
+
+def parse_reask(raw: str | None) -> tuple[str | None, str | None]:
+    """(verdict, parse source) of a re-ask reply. The prompt asks for an explicit Verdict
+    line, so the first-sentence stance fallback is off."""
+    _, verdict, source = parse_verdict(normalize_citations((raw or "").strip()), allow_stance=False)
+    return verdict, source
+
+
+def reask_display_text(text: str) -> str:
+    """The answer text to show once the re-ask supplied the verdict: the first reply's
+    prose as served (truncation note included), or REASK_NOTE if it had none."""
+    return REASK_NOTE if text.strip() in ("", TRUNCATION_NOTE) else text
+
+
+def reask_prompt_hash() -> str:
+    """sha256 of the re-ask request rendered on fixed placeholders (the value
+    rag_secondlook froze as prompt_hashes()["reask"]): a wording or layout edit moves it."""
+    ph = [SearchHit("{doc_id}", 0.0, "{text}", {"title": "{title}"})] * 2
+    blob = json.dumps(reask_messages("{claim}", ph), sort_keys=True)
+    return hashlib.sha256(blob.encode()).hexdigest()
+
+
+@dataclass(frozen=True)
+class ReaskReply:
+    """How one re-ask call ended (raw reply as returned, before parsing)."""
+
+    raw: str
+    finish_reason: str | None
+    completion_tokens: int | None
+    reasoning_tokens: int | None
+    cost_usd: float | None
+    provider: str | None
+
 
 @dataclass
 class GeneratedAnswer(Answer):
@@ -306,6 +370,13 @@ class GeneratedAnswer(Answer):
     # the reply quotes nothing. Measurements for the eval; the API does not expose them.
     verdict_source: str | None = None
     evidence_quote: EvidenceQuote | None = None
+    # The verdict-only re-ask: whether it was sent, its reply (None if not sent or if it
+    # failed), and the error type when it failed (the first answer is then served as is).
+    # finish_reason / token counts above stay the FIRST reply's; cost_usd includes the
+    # re-ask.
+    reask_attempted: bool = False
+    reask: ReaskReply | None = None
+    reask_error: str | None = None
 
 
 # Model families "auto" sends reasoning effort "medium" to (substring match on the id, so
@@ -388,6 +459,7 @@ class LLMGenerator:
         max_completion_tokens: int | None = None,
         reasoning_effort: str | None = None,
         endpoint: LLMEndpoint | None = None,
+        reask: bool | None = None,
     ):
         # Where requests go. An explicit endpoint wins; an explicit base_url builds one
         # whose provider (and default key) follows that URL; otherwise the settings
@@ -415,6 +487,9 @@ class LLMGenerator:
         self.reasoning_effort = resolve_reasoning_effort(
             self.model, settings.llm_reasoning_effort if reasoning_effort is None else reasoning_effort
         )
+        # generate() re-asks a claim with no verdict (settings.llm_reask). rag_eval turns
+        # it off here and applies the same re-ask as a cached post-step instead.
+        self.reask_enabled = settings.llm_reask if reask is None else reask
         self.client = build_client(
             endpoint,
             factory=OpenAI,
@@ -441,6 +516,24 @@ class LLMGenerator:
             messages=messages,
             max_tokens=max_tokens,
             **extra,
+        )
+
+    def reask_verdict(self, query: str, hits: Sequence[SearchHit]) -> ReaskReply:
+        """Exactly one verdict-only call (prompts.reask_messages, REASK_MAX_TOKENS) through
+        the same _complete as generation: same endpoint, spend-policy check, provider
+        routing and model-aware params (temperature / reasoning). Raises like any call
+        (EmptyCompletionError for a 200 with no completion)."""
+        resp = self._complete(reask_messages(query, hits), REASK_MAX_TOKENS)
+        cost = response_cost(resp)
+        choice = _choice_or_raise(resp, [cost])
+        completion_tokens, reasoning_tokens = _usage_counts(resp)
+        return ReaskReply(
+            raw=(choice.message.content or "").strip(),
+            finish_reason=choice.finish_reason,
+            completion_tokens=completion_tokens,
+            reasoning_tokens=reasoning_tokens,
+            cost_usd=cost,
+            provider=response_provider(resp),
         )
 
     def generate(self, query: str, hits: list[SearchHit]) -> Answer:
@@ -472,6 +565,27 @@ class LLMGenerator:
         if truncated:
             text = f"{text}\n\n{TRUNCATION_NOTE}" if text else TRUNCATION_NOTE
         completion_tokens, reasoning_tokens = _usage_counts(resp)
+        provider = response_provider(resp)
+        # A claim with no verdict gets exactly one verdict-only re-ask. A failed re-ask
+        # (provider error, empty completion) never fails the request: the first answer is
+        # served as it is, and the error type is recorded.
+        reask_attempted, reask, reask_error = False, None, None
+        if self.reask_enabled and needs_reask(query, verdict):
+            reask_attempted = True
+            try:
+                reask = self.reask_verdict(query, hits)
+            except EmptyCompletionError as e:
+                costs.append(e.cost_usd)  # the re-ask's own reported cost (None if unknown)
+                reask_error = type(e).__name__
+            except OpenAIError as e:
+                costs.append(None)  # may have been billed; unknown
+                reask_error = type(e).__name__
+            else:
+                costs.append(reask.cost_usd)
+                reask_verdict, _ = parse_reask(reask.raw)
+                if reask_verdict is not None:
+                    verdict, verdict_source = reask_verdict, "reask"
+                    text = reask_display_text(text)
         # Citations come from the displayed text, so every listed source is one the
         # reader can see referenced (a valid verdict line carries no citations anyway).
         return GeneratedAnswer(
@@ -487,7 +601,10 @@ class LLMGenerator:
             # All-or-nothing: a partly reported cost would undercount, and callers that
             # enforce a spend ceiling treat None as "unknown, assume the worst".
             cost_usd=None if any(c is None for c in costs) else sum(costs),
-            provider=response_provider(resp),
+            provider=provider,
             verdict_source=verdict_source,
             evidence_quote=check_evidence_quote(text, hits),
+            reask_attempted=reask_attempted,
+            reask=reask,
+            reask_error=reask_error,
         )

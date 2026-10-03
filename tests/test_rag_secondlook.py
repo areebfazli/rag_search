@@ -271,3 +271,24 @@ def test_choose_variant_prefers_accuracy_then_neutral():
 def test_hits_for_keeps_rank_order():
     hits = sl.hits_for(["d2", "d1"], DOCS)
     assert [h.doc_id for h in hits] == ["d2", "d1"] and isinstance(hits[0], SearchHit)
+
+
+def test_reask_prompt_and_budget_are_the_products():
+    # One source of truth: rag_secondlook measured exactly what the generator now sends.
+    from app.generate import generator, prompts
+
+    assert sl.reask_messages is prompts.reask_messages and sl.REASK_MAX_TOKENS == generator.REASK_MAX_TOKENS
+    assert sl.prompt_hashes()["reask"] == generator.reask_prompt_hash()
+
+
+def test_first_pass_blob_undoes_the_canonical_reask():
+    from app.eval import rag_eval
+
+    base = row("1", verdict=None, pred="NEI", answered=False, answer="x", cited_doc_ids=[],
+               abstention_class="false_abstention", abstention_class_qrels="false_abstention",
+               verdict_source=None, answered_source="judge")
+    after = rag_eval.apply_reask(base, {"raw": "Verdict: SUPPORTED", "finish_reason": "stop"})
+    blob = sl.first_pass_blob({"rows": [after], "run": {}})
+    assert blob["rows"] == [base] and blob["verdict_sources"]["reask"] == 0
+    untouched = {"rows": [base], "run": {}}
+    assert sl.first_pass_blob(untouched) is untouched

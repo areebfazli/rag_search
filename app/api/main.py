@@ -211,5 +211,6 @@ def answer(
         citations=ans.citations,
         hits=_to_hits(hits),
         verdict=ans.verdict,
+        verdict_source=getattr(ans, "verdict_source", None),  # GeneratedAnswer side channel
         warnings=warnings,
     )

@@ -166,13 +166,17 @@ class _FakeCompletions:
         )
 
 
-def _generator(reply, model="m", reasoning_effort="", max_completion_tokens=None, **fake_kw):
+def _generator(reply, model="m", reasoning_effort="", max_completion_tokens=None, reask=False,
+               **fake_kw):
+    # reask=False: these tests pin the first generation's behaviour; the verdict-only
+    # re-ask (on by default) has its own tests below.
     gen = LLMGenerator(
         model=model,
         base_url="http://localhost:1",
         api_key="k",
         max_completion_tokens=max_completion_tokens,
         reasoning_effort=reasoning_effort,
+        reask=reask,
     )
     gen.client = SimpleNamespace(chat=SimpleNamespace(completions=_FakeCompletions(reply, **fake_kw)))
     return gen
@@ -579,3 +583,124 @@ def test_injected_passage_verdict_echoed_in_reply_is_still_not_a_verdict():
     # The echoed line is not the last one, and it is a "verdict:" mention, so even the
     # stance path ("The context does not address it" is not the first sentence) stays off.
     assert parse_verdict(reply) == (reply, None, None)
+
+
+# --- the verdict-only re-ask -----------------------------------------------------------------
+
+from openai import APITimeoutError  # noqa: E402
+
+from app.generate.generator import (  # noqa: E402
+    REASK_MAX_TOKENS,
+    REASK_NOTE,
+    needs_reask,
+    reask_display_text,
+    reask_prompt_hash,
+)
+from app.generate.prompts import REASK_SYSTEM, reask_messages  # noqa: E402
+
+# The re-ask prompt as rag_secondlook froze and measured it (test 0.7767 -> 0.8000): an
+# edit must be deliberate, since it invalidates the frozen record and every cached reply.
+FROZEN_REASK_HASH = "a54c51382d6abf1b3689dd3587c732ca18216c91badad3d6983d264354176717"
+
+
+def _reasker(replies, **kw):
+    return _generator(replies, reask=True, **kw)
+
+
+def test_reask_after_an_empty_truncated_claim_reply_is_exactly_one_call():
+    gen = _reasker([("", "length"), ("", "length"), ("Verdict: REFUTED [2]", "stop")],
+                   max_completion_tokens=500)
+    hits = _hits(3)
+    ans = gen.generate("Aspirin cures stroke.", hits)
+    reqs = gen.client.chat.completions.requests
+    assert [r["max_tokens"] for r in reqs] == [500, 1000, REASK_MAX_TOKENS]  # gen, retry, re-ask
+    assert reqs[2]["messages"] == reask_messages("Aspirin cures stroke.", hits)
+    assert (ans.verdict, ans.verdict_source) == ("REFUTED", "reask")
+    assert ans.text == REASK_NOTE and ans.citations == []  # no prose to keep: say why
+    assert ans.reask_attempted and ans.reask.finish_reason == "stop" and ans.reask_error is None
+    assert ans.truncated and ans.finish_reason == "length" and ans.attempts == 2  # first reply's
+
+
+def test_reask_after_prose_without_a_verdict_keeps_the_prose():
+    gen = _reasker([("Passage [1] reports the opposite finding.", "stop"),
+                    ("**Verdict: NOT ENOUGH EVIDENCE**", "stop")])
+    ans = gen.generate("Drug X lowers blood pressure.", _hits(2))
+    assert gen.client.chat.completions.calls == 2
+    assert (ans.verdict, ans.verdict_source) == ("NOT ENOUGH EVIDENCE", "reask")
+    assert ans.text == "Passage [1] reports the opposite finding." and ans.citations == ["doc0"]
+
+
+def test_reask_keeps_a_truncated_prose_answer_and_its_note():
+    gen = _reasker([("It reduces risk [1] but", "length")] * 2 + [("Verdict: SUPPORTED", "stop")])
+    ans = gen.generate("claim", _hits(2))
+    assert gen.client.chat.completions.calls == 3
+    assert ans.text == f"It reduces risk [1] but\n\n{TRUNCATION_NOTE}" and ans.verdict == "SUPPORTED"
+
+
+def test_reask_never_fires_for_a_question():
+    gen = _reasker([("", "length"), ("", "length"), ("Verdict: SUPPORTED", "stop")])
+    ans = gen.generate("Does aspirin help after stroke?", _hits(2))
+    assert gen.client.chat.completions.calls == 2  # generation + retry only
+    assert ans.verdict is None and not ans.reask_attempted and ans.text == TRUNCATION_NOTE
+
+
+def test_reask_never_fires_when_the_reply_has_a_verdict():
+    for reply in ("Refuted [2].\nVerdict: REFUTED", "The passages support the claim [1]."):
+        gen = _reasker([(reply, "stop"), ("Verdict: NOT ENOUGH EVIDENCE", "stop")])
+        ans = gen.generate("Aspirin is useful after stroke.", _hits(2))
+        assert gen.client.chat.completions.calls == 1 and not ans.reask_attempted
+        assert ans.verdict_source in ("line", "stance")
+
+
+def test_an_unparseable_reask_reply_changes_nothing_but_is_recorded():
+    gen = _reasker([("No idea.", "stop"), ("I think it is supported by [1].", "stop")])
+    ans = gen.generate("claim", _hits(2))
+    assert gen.client.chat.completions.calls == 2
+    assert ans.verdict is None and ans.verdict_source is None and ans.text == "No idea."
+    assert ans.reask_attempted and ans.reask.raw == "I think it is supported by [1]."
+
+
+def test_a_failed_reask_serves_the_first_answer():
+    class Failing(_FakeCompletions):
+        def create(self, **kw):
+            if self.calls == 1:
+                self.calls += 1
+                raise APITimeoutError(request=None)
+            return super().create(**kw)
+
+    gen = _reasker("unused")
+    gen.client = SimpleNamespace(chat=SimpleNamespace(completions=Failing([("No idea.", "stop")])))
+    ans = gen.generate("claim", _hits(2))
+    assert ans.text == "No idea." and ans.verdict is None
+    assert ans.reask_attempted and ans.reask is None and ans.reask_error == "APITimeoutError"
+    assert ans.cost_usd is None  # the failed call may have been billed: unknown
+
+
+def test_reask_follows_the_setting_by_default(monkeypatch):
+    from app.core.config import settings
+
+    for on in (True, False):
+        monkeypatch.setattr(settings, "llm_reask", on)
+        gen = LLMGenerator(model="m", base_url="http://localhost:1", api_key="k", reasoning_effort="")
+        gen.client = SimpleNamespace(chat=SimpleNamespace(completions=_FakeCompletions(
+            [("No idea.", "stop"), ("Verdict: SUPPORTED", "stop")])))
+        ans = gen.generate("claim", _hits(1))
+        assert gen.client.chat.completions.calls == (2 if on else 1)
+        assert ans.verdict == ("SUPPORTED" if on else None)
+
+
+def test_needs_reask_and_display_text():
+    assert needs_reask("Aspirin cures stroke.", None)
+    assert not needs_reask("Does aspirin cure stroke?", None)
+    assert not needs_reask("Aspirin cures stroke.", "SUPPORTED")
+    assert reask_display_text(TRUNCATION_NOTE) == REASK_NOTE == reask_display_text("  ")
+    assert reask_display_text("Some prose [1].") == "Some prose [1]."
+
+
+def test_reask_prompt_is_the_frozen_one_and_shares_the_product_context_layout():
+    assert reask_prompt_hash() == FROZEN_REASK_HASH
+    hits = [SearchHit("d", 1.0, "body", {"title": "T"})]
+    msgs = reask_messages('x """y"""\nz', hits)
+    assert msgs[0] == {"role": "system", "content": REASK_SYSTEM}
+    assert "[1] T\nbody" in msgs[1]["content"] and "[1] T\nbody" in build_user_prompt("q", hits)
+    assert msgs[1]["content"].count('"""') == 2  # the claim is sanitised like a question

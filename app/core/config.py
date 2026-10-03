@@ -209,6 +209,14 @@ class Settings(BaseSettings):
     # and verdict compliance is scored. Medium's longer reasoning (~900 tokens seen) is
     # why the budget grew from the old 400 (now 2048 with a one-shot 2x retry).
     llm_reasoning_effort: str = "auto"
+    # SSR_LLM_REASK: when a CLAIM's reply has no parseable verdict (cut off to nothing
+    # after the retry, or prose without a verdict line), make exactly one extra
+    # verdict-only call (prompts.reask_messages, generator.REASK_MAX_TOKENS) and take its
+    # verdict. Never for a question. Measured on the 300 test claims (app.eval.
+    # rag_secondlook, frozen on train): verdict accuracy 0.7767 -> 0.8000, 7 fixed /
+    # 0 broken, p=0.016; it fired on 15 of 300. With a paid generator it costs one more
+    # paid call on those replies. A rag_eval run with it off is never canonical.
+    llm_reask: bool = True
     # RAG-eval judge on the "groq" provider (openrouter_judge_model is the same model's
     # free OpenRouter variant). Deliberately a different model FAMILY from the generator,
     # not just a smaller size: same-family judging compounds shared preferences.

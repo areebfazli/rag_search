@@ -78,8 +78,22 @@ line / inline / stance / None) and, when the reply quotes its evidence, whether 
 really occurs in the cited passage (``quote_found``; measured only, never a verdict flip).
 ``python -m app.eval.rag_rescore`` applies the same re-read to a finished rag.json.
 
+Verdict-only re-ask (the product's, SSR_LLM_REASK, default on): a claim whose reply still
+has no verdict gets ONE more call (generator.LLMGenerator.reask_verdict, the prompt and
+budget rag_secondlook froze and measured). The eval applies it as a post-step over the
+finished first-pass rows, never inside the checkpointed generation: the checkpoint keeps
+first-pass rows and its signature does not include the re-ask, so an existing checkpoint
+resumes as-is. Each reply is cached in ``data/eval_cache/secondlook/<dataset>.json`` under
+rag_secondlook's own keys (kind, claim, sha of [model, budget, exact messages]): a reply
+either one fetched is a hit for the other, and a re-run re-asks from the cache with no
+LLM call (whether a reply came from the cache is counted in ``run.reask_replies``, not in
+the rows, so a resumed run's rows equal a fresh one's). SSR_EVAL_REFRESH ignores the row
+checkpoint only, never this cache: its entries include the replies behind the measured
+result. A run with SSR_LLM_REASK=false is never canonical (``..._noreask``).
+
 Before any LLM call the run prints the requests still needed (remaining rows x (1
-generation + the expected truncation-retry rate + 1 judge)) and the wall-clock estimate.
+generation + the expected truncation-retry rate + the expected re-ask rate + 1 judge),
+plus the re-asks resumed rows still miss in the cache) and the wall-clock estimate.
 ``--check-quota`` (or ``SSR_RAG_CHECK_QUOTA=1``) also reads the OpenRouter key's remaining
 free requests for today (GET /api/v1/key, which is not an LLM call and is not counted
 against the quota) and aborts before any LLM call if they are fewer than needed.
@@ -125,21 +139,28 @@ from app.core.llm_endpoints import (
 )
 from app.core.interfaces import SearchHit, hit_passage
 from app.generate.generator import (
+    REASK_MAX_TOKENS,
     TRUNCATION_NOTE,
     LLMGenerator,
     generation_temperature,
     looks_like_question,
     map_citations,
+    needs_reask,
+    parse_reask,
     parse_verdict,
+    reask_display_text,
+    reask_prompt_hash,
     resolve_reasoning_effort,
 )
-from app.generate.prompts import SYSTEM, VERDICTS, build_user_prompt
+from app.generate.prompts import SYSTEM, VERDICTS, build_user_prompt, reask_messages
 from app.ingest.corpus import (
     ClaimLabel,
     load_claim_labels,
+    load_documents,
     load_queries_qrels,
     scifact_source_zip,
 )
+from app.eval.reply_cache import ReplyCache
 from app.eval.retrieval_eval import CANONICAL_DATASET, _index_fingerprint
 from app.retrieve.service import SearchService
 
@@ -272,6 +293,12 @@ def typical_generation_cost(gen: LLMEndpoint) -> float:
 OUT = Path("eval/results")  # canonical run only — the committed artifact
 RUNS = Path("data/eval_runs")  # every other run (gitignored)
 CACHE = Path("data/eval_cache/rag")  # per-row resume checkpoints (gitignored)
+# Re-ask replies (one file per dataset), in rag_secondlook's ReplyCache format and keys:
+# the replies its measured post-hoc re-ask fetched are cache hits here, and vice versa.
+REASK_CACHE = Path("data/eval_cache/secondlook")
+# Expected share of claims the re-ask fires on, for the up-front request estimate only:
+# 15 of 300 on the committed test run. A checkpoint's own rate wins once it is big enough.
+EXPECTED_REASK_RATE = 0.05
 
 # Expected share of generations that need the truncation retry, for the up-front request
 # estimate only: 12 of 50 on the committed free-Ling run (retried_answers in rag.json).
@@ -501,6 +528,82 @@ def reparse_row(row: dict, query: str) -> dict:
     }
 
 
+# --- the verdict-only re-ask, applied to a finished first-pass row -----------------------
+#
+# The product re-asks inside LLMGenerator.generate(). The eval keeps first-pass rows (what
+# the checkpoint stores, so its signature and every stored row are untouched by the
+# re-ask) and applies the SAME re-ask — same trigger (generator.needs_reask), same request
+# (prompts.reask_messages, REASK_MAX_TOKENS, sent by LLMGenerator.reask_verdict), same
+# parse and display rule — as a post-step over the rows, with each reply cached in
+# REASK_CACHE. A resumed or re-run eval therefore re-asks from the cache, never twice.
+
+# The fields the re-ask may overwrite; their first-pass values are kept in "first_pass".
+FIRST_PASS_KEYS = (
+    "verdict", "verdict_source", "predicted_label", "answered", "answered_source",
+    "abstention_class", "abstention_class_qrels", "answer", "cited_doc_ids",
+)
+
+
+def reask_cache_path(dataset: str) -> Path:
+    return REASK_CACHE / f"{dataset.replace('/', '-')}.json"
+
+
+def reask_hits(doc_ids: Sequence[str], docs: Mapping[str, Mapping]) -> list[SearchHit]:
+    """The passages exactly as the generator got them: corpus title + text, rank order
+    (SearchService hits carry the same corpus text and title)."""
+    return [SearchHit(d, 0.0, docs[d]["text"], {"title": docs[d]["title"]}) for d in doc_ids]
+
+
+def reask_key(qid: str, model: str, messages: Sequence[Mapping]) -> str:
+    return ReplyCache.key("reask", qid, model, REASK_MAX_TOKENS, messages)
+
+
+def apply_reask(row: Mapping, rec: Mapping | None, error: str | None = None) -> dict:
+    """The row after the re-ask: every row it fired on records the reply (or the error);
+    a parsed verdict replaces the first-pass one (verdict_source "reask", answered
+    decided by it), with the displayed text per generator.reask_display_text and the
+    first-pass values of every changed field under "first_pass". The judge's scores
+    stay those of the first reply (not re-judged)."""
+    out = {**row, "reask_attempted": True}
+    if rec is None:
+        out.update(reask=None, reask_error=error)
+        return out
+    verdict, how = parse_reask(rec.get("raw"))
+    out["reask"] = {
+        "raw": rec.get("raw"), "parsed": verdict, "parse_source": how,
+        "finish_reason": rec.get("finish_reason"),
+        "completion_tokens": rec.get("completion_tokens"),
+        "reasoning_tokens": rec.get("reasoning_tokens"),
+        "cost_usd": rec.get("cost_usd"), "provider": rec.get("provider"),
+    }
+    if verdict is None:
+        return out
+    answered = verdict != "NOT ENOUGH EVIDENCE"
+    text = reask_display_text(row.get("answer") or "")
+    out.update(
+        first_pass={k: row.get(k) for k in FIRST_PASS_KEYS},
+        verdict=verdict,
+        verdict_source="reask",
+        predicted_label=predicted_label(verdict, answered),
+        answered=answered,
+        answered_source="reask",
+        abstention_class=_abstention_class(answered, row["evidence"]),
+        abstention_class_qrels=_abstention_class(answered, row["evidence_qrels"]),
+        answer=text,
+        cited_doc_ids=row.get("cited_doc_ids") if text == row.get("answer") else [],
+    )
+    return out
+
+
+def first_pass_row(row: Mapping) -> dict:
+    """A row as the first pass left it (the re-ask undone): what the checkpoint stores and
+    what experiments built on the pre-re-ask answers (rag_secondlook) read."""
+    out = {k: v for k, v in row.items() if k not in ("first_pass", "reask", "reask_attempted",
+                                                     "reask_error")}
+    out.update(row.get("first_pass") or {})
+    return out
+
+
 def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
@@ -606,6 +709,13 @@ def run_metadata(
             "verdict line when parsed (answered = verdict != NOT ENOUGH EVIDENCE); the "
             "judge's `answered` field only when no verdict line was parsed"
         ),
+        "reask": {
+            "enabled": settings.llm_reask,
+            "prompt_hash": reask_prompt_hash(),
+            "max_tokens": REASK_MAX_TOKENS,
+            "trigger": "a claim (not a question) whose reply has no parseable verdict",
+            "judged": "not re-judged: faithfulness / context relevance are the first reply's",
+        },
     }
 
 
@@ -700,8 +810,11 @@ def aggregate(
         # with verdict accuracy on each side of that split.
         "verdict_sources": {
             src: sum(r.get("verdict_source") == src for r in rows)
-            for src in ("line", "inline", "stance")
+            for src in ("line", "inline", "stance", "reask")
         },
+        # The verdict-only re-ask: claims it fired on, and how many it gave a verdict.
+        "reasked_answers": sum(bool(r.get("reask_attempted")) for r in rows),
+        "reask_verdicts": sum(r.get("verdict_source") == "reask" for r in rows),
         "evidence_quotes": _quote_stats(rows),
         "judge_verdict_agreement": _rate(
             sum(r["judge_answered"] == r["answered"] for r in with_verdict), len(with_verdict)
@@ -801,7 +914,10 @@ def _markdown(agg: dict, skipped: int, parse_failures: int, dataset: str | None 
         f"| 3-class verdict accuracy | {_fmt(agg['verdict_accuracy'])} |\n"
         f"| Verdict line parsed | {_fmt(agg['verdict_parsed_rate'])} |\n"
         f"| Truncated answers (hit the token budget after 1 retry) | "
-        f"{agg['truncated_answers']} of {agg['n']} |\n\n"
+        f"{agg['truncated_answers']} of {agg['n']} |\n"
+        f"| Re-asked (claim with no verdict: one verdict-only call) | "
+        f"{agg.get('reasked_answers', 0)} of {agg['n']} "
+        f"({agg.get('reask_verdicts', 0)} gave a verdict) |\n\n"
         f"| Gold \\ predicted | " + " | ".join(cols) + " |\n|---|" + "---|" * len(cols) + "\n"
         f"{confusion}\n"
         f"## Abstention — rationale oracle (headline)\n\n"
@@ -930,6 +1046,7 @@ def output_dir(
     phash: str,
     gen: LLMEndpoint | None = None,
     judge_ep: LLMEndpoint | None = None,
+    reask: bool = True,
 ) -> tuple[Path, bool]:
     """Where this run's rag.{md,json} go, and whether it is the canonical run.
 
@@ -940,16 +1057,20 @@ def output_dir(
     data/eval_runs/rag_<dataset-slug>_<n>_<prompt-hash8>[_<generator-slug>]
     [_judge-<judge-slug>]/, so experiments under different prompts or models don't
     collide and can never overwrite the committed free-model artifact. (gen/judge_ep
-    None = the defaults, for callers that only vary the sample.)
+    None = the defaults, for callers that only vary the sample.) A run with the re-ask
+    off (SSR_LLM_REASK=false) is not what the product serves: never canonical either,
+    and its directory ends in ``_noreask``.
     """
     changed = non_default_roles(gen, judge_ep) if gen and judge_ep else []
-    if not limit and dataset == CANONICAL_DATASET and not changed:
+    if not limit and dataset == CANONICAL_DATASET and not changed and reask:
         return OUT, True
     name = f"rag_{_slug(dataset)}_{n_sample}_{phash[:8]}"
     if changed:
         name += f"_{_slug(gen.model)}"
         if "judge" in changed:
             name += f"_judge-{_slug(judge_ep.model)}"
+    if not reask:
+        name += "_noreask"
     return RUNS / name, False
 
 
@@ -1117,14 +1238,19 @@ def observed_retry_rate(rows: Sequence[Mapping]) -> float | None:
 
 
 def request_estimate(
-    remaining: int, gen: LLMEndpoint, judge_ep: LLMEndpoint, throttle: float, retry_rate: float
+    remaining: int, gen: LLMEndpoint, judge_ep: LLMEndpoint, throttle: float, retry_rate: float,
+    reask_rate: float = 0.0, reask_pending: int = 0, reask: bool = False,
 ) -> dict:
     """Requests the remaining rows need: per claim, 1 generation + the expected retry
-    rate + 1 judge call (all providers), and the share of those on OpenRouter's free
-    caps (expected, and worst case with every generation retrying)."""
+    rate + 1 judge call (all providers), plus — with the re-ask on — the expected re-ask
+    rate per new claim and the re-asks resumed rows still need (`reask_pending`: their
+    exact count of cache misses); and the share of those on OpenRouter's free caps
+    (expected, and worst case with every generation retrying and re-asking)."""
     gen_free = int(gen.provider == "openrouter" and not gen.paid)
     judge_free = int(judge_ep.provider == "openrouter" and not judge_ep.paid)
     _, worst = free_requests_per_query(gen, judge_ep)
+    reask_rate = reask_rate if reask else 0.0
+    reask_pending = reask_pending if reask else 0
 
     def up(x: float) -> int:  # ceil, without float noise turning 672.0000001 into 673
         return math.ceil(round(x, 6))
@@ -1132,10 +1258,16 @@ def request_estimate(
     return {
         "rows": remaining,
         "retry_rate": retry_rate,
-        "requests": up(remaining * (2 + retry_rate)),
-        "free_requests": up(remaining * (gen_free * (1 + retry_rate) + judge_free)),
-        "free_requests_worst": remaining * worst,
-        "seconds": remaining * (throttle + EST_QUERY_LATENCY_S),
+        "reask_rate": reask_rate,
+        "reask_pending": reask_pending,
+        "requests": up(remaining * (2 + retry_rate + reask_rate) + reask_pending),
+        "free_requests": up(
+            remaining * (gen_free * (1 + retry_rate + reask_rate) + judge_free)
+            + gen_free * reask_pending
+        ),
+        "free_requests_worst": remaining * (worst + gen_free * int(reask))
+        + gen_free * reask_pending,
+        "seconds": remaining * (throttle + EST_QUERY_LATENCY_S) + reask_pending * throttle,
     }
 
 
@@ -1260,9 +1392,13 @@ def main(argv: Sequence[str] = ()) -> None:
         qids = qids[:limit]
     labels = load_claim_labels(dataset=dataset, query_ids=set(queries))
     phash = prompt_hash()
-    out, canonical = output_dir(dataset, limit, len(qids), phash, gen_ep, judge_ep)
+    reask_on = settings.llm_reask
+    out, canonical = output_dir(dataset, limit, len(qids), phash, gen_ep, judge_ep, reask=reask_on)
     if changed := non_default_roles(gen_ep, judge_ep):
         print(_non_default_notice(changed, gen_ep, judge_ep), flush=True)
+    if not reask_on:
+        print(f"SSR_LLM_REASK is off: no verdict-only re-ask, so this run never writes {OUT}",
+              flush=True)
     n_label = "all" if n_req is None else n_req
     print(
         f"Sample: {len(qids)} claims from {dataset} (SSR_RAG_N={n_label}, seed={SEED}"
@@ -1339,16 +1475,56 @@ def main(argv: Sequence[str] = ()) -> None:
         flush=True,
     )
 
+    # The re-ask post-step's work, known before any LLM call: resumed rows with no
+    # verdict either have their reply in the re-ask cache or still need one call.
+    reask_cache = ReplyCache(reask_cache_path(dataset))
+    corpus: dict[str, dict] = {}
+
+    def passages(qid: str) -> list[SearchHit]:
+        if qid in retrieved:  # this session's retrieval: exactly what the generator saw
+            return retrieved[qid]
+        if not corpus:
+            corpus.update({d["doc_id"]: d for d in load_documents()})
+        return reask_hits(done[qid]["retrieved_doc_ids"], corpus)
+
+    def reask_request(qid: str) -> tuple[list[dict], str]:
+        msgs = reask_messages(queries[qid], passages(qid))
+        return msgs, reask_key(qid, gen_ep.model, msgs)
+
+    reask_done = [q for q in qids if q in done and needs_reask(queries[q], done[q]["verdict"])]
+    reask_missing = (
+        [q for q in reask_done if reask_cache.get(reask_request(q)[1]) is None] if reask_on else []
+    )
+    if len(done) >= MIN_ROWS_FOR_OBSERVED_RETRY:
+        reask_rate = len(reask_done) / len(done)
+    else:
+        reask_rate = EXPECTED_REASK_RATE
+
     print(_estimate_line(len(retrieved), gen_ep, judge_ep, throttle), flush=True)
     observed = observed_retry_rate(list(done.values()))
     retry_rate = EXPECTED_RETRY_RATE if observed is None else observed
     retry_src = "committed-run rate" if observed is None else f"observed on {len(done)} rows"
-    est = request_estimate(len(retrieved), gen_ep, judge_ep, throttle, retry_rate)
+    est = request_estimate(
+        len(retrieved), gen_ep, judge_ep, throttle, retry_rate,
+        reask_rate=reask_rate, reask_pending=len(reask_missing), reask=reask_on,
+    )
     print(_request_line(est, len(qids), len(done), throttle, retry_src), flush=True)
+    if reask_on:
+        print(
+            f"  re-ask (SSR_LLM_REASK): {len(reask_done)} resumed claims have no verdict -> "
+            f"{len(reask_done) - len(reask_missing)} replies cached in "
+            f"{reask_cache_path(dataset)}, {len(reask_missing)} to fetch; "
+            f"~{reask_rate:.2f} re-asks expected per new claim",
+            flush=True,
+        )
+    print(f"LLM requests needed now: ~{est['requests']} "
+          f"({est['free_requests']} on OpenRouter's free caps)", flush=True)
     if want_quota:
         check_quota(est, gen_ep, judge_ep, fetch=fetch_key_info)  # SystemExit if short
 
-    generator = LLMGenerator(endpoint=gen_ep)
+    # The first pass never re-asks inside generate(): the re-ask runs as the cached
+    # post-step below, so checkpointed rows stay first-pass rows.
+    generator = LLMGenerator(endpoint=gen_ep, reask=False)
     judge_client = build_client(judge_ep, factory=OpenAI, timeout=60.0)  # Nemotron Ultra: rare 20-27 s calls
 
     # Spend accounting. `reported` is what OpenRouter billed per its usage.cost; `counted`
@@ -1356,17 +1532,20 @@ def main(argv: Sequence[str] = ()) -> None:
     # is what the ceiling is enforced on — an unknown is never counted as zero. Resumed
     # rows count too: the ceiling is per run, however many sessions it takes.
     worst_q = worst_case_generation_cost(gen_ep)
+    worst_reask = (
+        cost_upper_bound(MAX_GEN_PROMPT_TOKENS, REASK_MAX_TOKENS, gen_ep.model) if gen_ep.paid else 0.0
+    )
     reported = counted = 0.0
     unreported_paid = 0
 
-    def account(cost: float | None) -> None:
+    def account(cost: float | None, worst: float | None = None) -> None:
         nonlocal reported, counted, unreported_paid
         if cost is not None:
             reported += cost
             counted += cost
         elif gen_ep.paid:
             unreported_paid += 1
-            counted += worst_q
+            counted += worst_q if worst is None else worst
 
     for r in done.values():
         account(r.get("generation_cost_usd"))
@@ -1390,6 +1569,26 @@ def main(argv: Sequence[str] = ()) -> None:
             if done else "no rows completed yet"
         )
 
+    def with_rate_limit_retries(call, n, qid):
+        # An HTTP 200 with no completion (EmptyCompletionError: OpenRouter's upstream
+        # failed after accepting the request) is as transient as a per-minute 429,
+        # and takes the same path — unless its body names the daily cap.
+        for attempt in range(RATE_LIMIT_RETRIES + 1):
+            try:
+                return call()
+            except (RateLimitError, EmptyCompletionError) as e:
+                if _is_daily_cap(e):
+                    raise DailyTokenBudgetExhausted(str(e)) from e
+                if attempt == RATE_LIMIT_RETRIES:
+                    raise
+                why = "rate-limited" if isinstance(e, RateLimitError) else "empty completion"
+                print(
+                    f"  [{n}/{len(qids)}] q{qid:>4} {why}; waiting "
+                    f"{RATE_LIMIT_WAIT_S:.0f}s (retry {attempt + 1}/{RATE_LIMIT_RETRIES})",
+                    flush=True,
+                )
+                time.sleep(RATE_LIMIT_WAIT_S)
+
     # Pass 2 — generate + judge. The judge is called once per query for faithfulness
     # and context relevance (neither has a gold label); its `answered` field is used
     # only where the reply carries no parseable verdict line.
@@ -1398,26 +1597,6 @@ def main(argv: Sequence[str] = ()) -> None:
             continue
         n = position[qid]
         q, hits, label = queries[qid], retrieved[qid], labels[qid]
-
-        def with_rate_limit_retries(call, n=n, qid=qid):
-            # An HTTP 200 with no completion (EmptyCompletionError: OpenRouter's upstream
-            # failed after accepting the request) is as transient as a per-minute 429,
-            # and takes the same path — unless its body names the daily cap.
-            for attempt in range(RATE_LIMIT_RETRIES + 1):
-                try:
-                    return call()
-                except (RateLimitError, EmptyCompletionError) as e:
-                    if _is_daily_cap(e):
-                        raise DailyTokenBudgetExhausted(str(e)) from e
-                    if attempt == RATE_LIMIT_RETRIES:
-                        raise
-                    why = "rate-limited" if isinstance(e, RateLimitError) else "empty completion"
-                    print(
-                        f"  [{n}/{len(qids)}] q{qid:>4} {why}; waiting "
-                        f"{RATE_LIMIT_WAIT_S:.0f}s (retry {attempt + 1}/{RATE_LIMIT_RETRIES})",
-                        flush=True,
-                    )
-                    time.sleep(RATE_LIMIT_WAIT_S)
 
         def generate_once(q=q, hits=hits):
             # Checked BEFORE every attempt, retries included: the next attempt's worst
@@ -1438,7 +1617,7 @@ def main(argv: Sequence[str] = ()) -> None:
         try:
             # Generation and judging retry SEPARATELY: a judge 429 or empty completion
             # must not re-run (and re-pay for) a generation that already succeeded.
-            ans = with_rate_limit_retries(generate_once)
+            ans = with_rate_limit_retries(generate_once, n, qid)
             account(getattr(ans, "cost_usd", None))
             if spent() > ceiling:
                 raise SpendCeilingReached(
@@ -1450,7 +1629,8 @@ def main(argv: Sequence[str] = ()) -> None:
             s = with_rate_limit_retries(
                 lambda q=q, hits=hits, ans=ans: judge(
                     judge_client, judge_ep.model, q, [hit_passage(h) for h in hits], ans.text
-                )
+                ),
+                n, qid,
             )
         except DailyTokenBudgetExhausted as e:
             remaining = len(qids) - len(done)
@@ -1537,7 +1717,76 @@ def main(argv: Sequence[str] = ()) -> None:
         )
         time.sleep(throttle)
 
-    rows = [done[q] for q in qids if q in done]  # sample order, resumed rows included
+    # Pass 3 — the verdict-only re-ask, over every finished row (resumed ones included)
+    # whose claim got no verdict: the reply comes from the re-ask cache when it is there
+    # (no LLM call), else from ONE call that is then cached at once. Same retries, spend
+    # ceiling and daily-cap stop as pass 2; nothing is written until every row is done.
+    final: dict[str, dict] = {}
+    reask_stats = {"cached": 0, "fetched": 0, "failed": 0}
+    for qid in qids if reask_on else ():
+        r = done.get(qid)
+        if r is None or not needs_reask(queries[qid], r["verdict"]):
+            continue
+        msgs, key = reask_request(qid)
+        rec = reask_cache.get(key)
+        if rec is not None:
+            reask_stats["cached"] += 1
+            account(rec.get("cost_usd"), worst_reask)
+            final[qid] = apply_reask(r, rec)
+            continue
+        n = position[qid]
+
+        def reask_once(q=queries[qid], hits=passages(qid)):
+            if spent() + worst_reask > ceiling:
+                raise SpendCeilingReached(
+                    f"spent ${spent():.4f} so far and the next re-ask could cost up to "
+                    f"${worst_reask:.4f}, over SSR_RAG_MAX_SPEND_USD=${ceiling:.2f}"
+                )
+            try:
+                return generator.reask_verdict(q, hits)
+            except EmptyCompletionError as e:
+                account(e.cost_usd, worst_reask)
+                raise
+
+        try:
+            reply = with_rate_limit_retries(reask_once, n, qid)
+        except (DailyTokenBudgetExhausted, SpendCeilingReached) as e:
+            raise SystemExit(
+                f"\nStopped in the re-ask pass at query {n}/{len(qids)}: {str(e)[:300]}\n"
+                f"Nothing was written to {out}; {kept()}; re-ask replies so far are cached "
+                f"in {reask_cache_path(dataset)}. Re-run the same command to resume."
+            ) from None
+        except Exception as e:
+            if _is_fatal(e):
+                raise SystemExit(
+                    f"\nStopped in the re-ask pass at query {n}/{len(qids)}: "
+                    f"{type(e).__name__}: {str(e)[:300]}\nNothing was written to {out}; {kept()}."
+                ) from None
+            # Not cached: a re-run retries it. The row keeps its first-pass verdict.
+            reask_stats["failed"] += 1
+            print(f"  [{n}/{len(qids)}] q{qid:>4} RE-ASK FAILED ({type(e).__name__})", flush=True)
+            final[qid] = apply_reask(r, None, error=type(e).__name__)
+            time.sleep(throttle)
+            continue
+        account(reply.cost_usd, worst_reask)
+        rec = {
+            "raw": reply.raw, "finish_reason": reply.finish_reason,
+            "completion_tokens": reply.completion_tokens, "reasoning_tokens": reply.reasoning_tokens,
+            "provider": reply.provider, "cost_usd": reply.cost_usd, "requests": 1,
+            "kind": "reask", "query_id": qid, "model": gen_ep.model,
+            "max_tokens": REASK_MAX_TOKENS, "source": "rag_eval",
+            "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        reask_cache.put(key, rec)  # persisted at once, like a checkpointed row
+        reask_stats["fetched"] += 1
+        final[qid] = apply_reask(r, rec)
+        x = final[qid]
+        print(f"  [{n}/{len(qids)}] q{qid:>4} re-ask -> {x['reask']['parsed']} "
+              f"({reply.finish_reason}, {reply.completion_tokens} tokens)", flush=True)
+        time.sleep(throttle)
+
+    # Sample order, resumed rows included; every row says whether the re-ask fired.
+    rows = [final.get(q) or {**done[q], "reask_attempted": False} for q in qids if q in done]
     agg = aggregate(rows, gen_ep.model, judge_ep.model, gen_ep.provider, judge_ep.provider)
     out.mkdir(parents=True, exist_ok=True)
     (out / "rag.json").write_text(
@@ -1567,6 +1816,8 @@ def main(argv: Sequence[str] = ()) -> None:
                     "canonical": canonical,
                     "checkpoint_signature": sig,
                     "throttle_s": throttle,
+                    "reask_cache": str(reask_cache_path(dataset)) if reask_on else None,
+                    "reask_replies": reask_stats,
                 },
                 "rows": rows,
             },
@@ -1582,6 +1833,9 @@ def main(argv: Sequence[str] = ()) -> None:
         f"faithfulness={agg['faithfulness_answered']}  ctx={agg['context_relevance']}  "
         f"judge_answered_fallbacks={agg['judge_answered_fallbacks']}  "
         f"truncated={agg['truncated_answers']} (retried {agg['retried_answers']})  "
+        f"reasked={agg['reasked_answers']} ({agg['reask_verdicts']} verdicts; "
+        f"{reask_stats['cached']} cached, {reask_stats['fetched']} fetched, "
+        f"{reask_stats['failed']} failed)  "
         f"cost=${reported:.4f} reported (${counted:.4f} counted)"
     )
     if missing := len(qids) - len(rows):

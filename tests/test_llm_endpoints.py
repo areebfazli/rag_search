@@ -23,7 +23,8 @@ from app.core.llm_endpoints import (
     resolve_endpoint,
 )
 from app.core.interfaces import SearchHit
-from app.generate.generator import LLMGenerator
+from app.generate.generator import REASK_MAX_TOKENS, LLMGenerator
+from app.generate.prompts import REASK_SYSTEM
 
 OR_KEY = "sk-or-v1-FAKE-openrouter-0000"
 GROQ_KEY = "gsk_FAKE-groq-1111"
@@ -310,10 +311,11 @@ def _hits(n):
     return [SearchHit(f"doc{i}", 1.0, f"text {i}", {"title": f"T{i}"}) for i in range(n)]
 
 
-def _or_generator(monkeypatch, model=PAID, **fake_kw):
+def _or_generator(monkeypatch, model=PAID, reask=False, **fake_kw):
+    # reask=False: these pin the first generation's requests; the re-ask has its own test.
     monkeypatch.setattr(le.settings, "openrouter_paid_model_allowlist", (PAID, LUNA))
     ep = resolve_endpoint("generator", _settings(openrouter_llm_model=model))
-    gen = LLMGenerator(endpoint=ep, reasoning_effort="auto")
+    gen = LLMGenerator(endpoint=ep, reasoning_effort="auto", reask=reask)
     fake = _FakeOpenAI(**fake_kw)
     gen.client = GuardedClient(fake, ep)
     return gen, fake
@@ -481,6 +483,23 @@ def test_luna_truncation_retry_keeps_its_params(monkeypatch):
     assert all("temperature" not in r for r in fake.requests)
     assert all(r["extra_body"]["provider"] == LUNA_ROUTING for r in fake.requests)
     assert ans.attempts == 2 and ans.cost_usd == pytest.approx(0.002)
+
+
+@pytest.mark.parametrize("model", [PAID, FREE_GEN, LUNA])
+def test_reask_goes_through_the_same_spend_policy_routing_and_params(monkeypatch, model):
+    # A claim truncated to "ok" twice: the re-ask is the third request, and it carries
+    # exactly the first request's routing (pinned paid provider / $0 free routing) and
+    # model-aware params (no temperature for Luna, reasoning object per model).
+    gen, fake = _or_generator(monkeypatch, model=model, cost=0.0001, finish="length", reask=True)
+    ans = gen.generate("claim", _hits(2))
+    assert len(fake.requests) == 3
+    first, reask = fake.requests[0], fake.requests[2]
+    assert reask["max_tokens"] == REASK_MAX_TOKENS and reask["model"] == first["model"]
+    assert reask["extra_body"] == first["extra_body"]
+    assert reask.get("temperature") == first.get("temperature")
+    assert ("temperature" in reask) == (model != LUNA)
+    assert reask["messages"][0]["content"] == REASK_SYSTEM
+    assert ans.reask_attempted and ans.cost_usd == pytest.approx(0.0003)  # all 3 billed
 
 
 @pytest.mark.parametrize("model", [PAID, FREE_GEN])
