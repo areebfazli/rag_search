@@ -21,6 +21,9 @@ BEIR/SciFact, 300 test queries, gold qrels. Bold is best per column.
 | Hybrid + rerank (MS-MARCO MiniLM) | 0.6975 | **0.9650** |
 | Hybrid + rerank (bge-reranker-base) | **0.7242** | **0.9650** |
 
+RAG answers (Ling 3.0 Flash Sante, free, 300 test claims): **verdict accuracy 0.80** (95% CI
+0.751–0.841), faithfulness 0.97, abstention precision 0.83; see [Grounded answers](#grounded-answers-rag).
+
 MRR@10, MAP@100 and the per-comparison significance tests are in
 [`eval/results/retrieval.md`](eval/results/retrieval.md); what the numbers mean is in
 [Findings](#evaluation-headline-artifact) below.
@@ -48,7 +51,7 @@ Measured below, and on this corpus it does not improve ranking, so it is off by 
 | Reranker | `cross-encoder/ms-marco-MiniLM-L-6-v2` and `BAAI/bge-reranker-base` (both evaluated; swappable via `SSR_RERANKER_MODEL`) |
 | API | FastAPI + slowapi rate limiting |
 | Retrieval eval | `ranx` on BEIR/SciFact gold qrels, with paired significance tests |
-| RAG eval | Verdicts + abstention scored against SciFact rationale labels; free Nemotron 3 Ultra judge for faithfulness, with a judge-consistency harness (`app/eval/rag_eval.py`, `app/eval/judge_agreement.py`) |
+| RAG eval | Verdicts (with a one-call verdict re-ask) + abstention scored against SciFact rationale labels, plus a label-audit sensitivity check; free Nemotron 3 Ultra judge for faithfulness, with a judge-consistency harness (`app/eval/rag_eval.py`, `app/eval/judge_agreement.py`) |
 | LLM | OpenRouter free models by default ($0): `inclusionai/ling-3.0-flash-sante:free` (Ling 3.0 Flash Sante) generator and `nvidia/nemotron-3-ultra-550b-a55b:free` (Nemotron 3 Ultra) judge, from different model families so the generator never grades its own output. Paid `openai/gpt-oss-120b` is an optional generator override via `SSR_OPENROUTER_LLM_MODEL` (pinned to a bf16 provider, no fallbacks, price-capped; [`app/core/llm_endpoints.py`](app/core/llm_endpoints.py)). Groq, Ollama or any OpenAI-compatible endpoint via `SSR_LLM_PROVIDER=groq` + `SSR_LLM_BASE_URL` |
 
 ## Evaluation (headline artifact)
@@ -123,7 +126,7 @@ with `SSR_RERANK_CANDIDATES=100 uv run python -m app.eval.retrieval_eval`.
 
 ## Grounded answers (RAG)
 
-`GET /answer?q=...` runs the hybrid retrieval, then generates a grounded answer with an OpenAI-compatible LLM (the free `inclusionai/ling-3.0-flash-sante:free` on OpenRouter by default; paid `openai/gpt-oss-120b` via `SSR_OPENROUTER_LLM_MODEL`, or Groq, Ollama or another endpoint via `SSR_LLM_PROVIDER=groq` and `SSR_LLM_BASE_URL`). Answers cite sources as `[n]` mapped back to document ids, and the model is instructed to **abstain when the retrieved context lacks the evidence** rather than hallucinate.
+`GET /answer?q=...` runs the hybrid retrieval, then generates a grounded answer with an OpenAI-compatible LLM (the free `inclusionai/ling-3.0-flash-sante:free` on OpenRouter by default; paid `openai/gpt-oss-120b` via `SSR_OPENROUTER_LLM_MODEL`, or Groq, Ollama or another endpoint via `SSR_LLM_PROVIDER=groq` and `SSR_LLM_BASE_URL`). Answers cite sources as `[n]` mapped back to document ids, and the model is instructed to **abstain when the retrieved context lacks the evidence** rather than hallucinate. When the input is a claim and the reply has no parseable verdict (truncated, or prose without a `Verdict:` line), the generator makes one verdict-only follow-up call (`SSR_LLM_REASK`, on by default; the response's `verdict_source` says where the verdict came from).
 
 For example, `/answer?q=Can aspirin reduce the risk of colorectal cancer?`:
 > "Aspirin has been shown to reduce the risk of colorectal cancer [1][2][3] … a pooled analysis of four randomized trials showed a 34% reduction in 20-year colorectal cancer mortality [3]."
@@ -132,29 +135,39 @@ For example, `/answer?q=Can aspirin reduce the risk of colorectal cancer?`:
 (supported / refuted / not enough evidence) and its answer/abstain decision **against SciFact's
 labels rather than assuming them correct**; an LLM judge scores only faithfulness and context
 relevance. Generator = Ling 3.0 Flash Sante (`inclusionai/ling-3.0-flash-sante:free`), a free
-health/medicine-tuned model on OpenRouter, with a 2048-token budget and one retry at 2x on
+health/medicine-tuned model, with a 2048-token budget and one retry at 2x on
 `finish_reason=length`. Judge = Nemotron 3 Ultra (`nvidia/nemotron-3-ultra-550b-a55b:free`), a
-different model family, so the generator isn't grading its own output. It was picked from a bench
-of 10 free OpenRouter models because the previous judge's free variant (`qwen/qwen3.8-27b:free`)
-served 0 of 4 calls (upstream 429s), while Nemotron served 22 of 22 and matched the previous judge
-on answered rows. **All 300 SciFact test claims** (in seeded order, seed 13, so the first 50 are
-the earlier 50-claim sample), all 300 scored and 0 skipped, top-5 context; full tables in
-[`eval/results/rag.md`](eval/results/rag.md). **A full run costs $0 on the default free models**
-(OpenRouter reported $0.00 for the committed run). The run spanned two days: it hit OpenRouter's
-free-tier cap of 1,000 requests/day (account-wide) partway through and resumed from its per-row
-checkpoint the next day, and 2 claims that had received empty provider responses were
-retried after the fix in commit 481e623 (retry an empty completion instead of skipping the claim).
+different model family, so the generator isn't grading its own output (picked from a bench of 10
+free models; the previous judge's free variant served 0 of 4 calls). **All 300 SciFact test
+claims** (seed 13, so the first 50 are the earlier 50-claim sample), 0 skipped, top-5 context;
+full tables in [`eval/results/rag.md`](eval/results/rag.md). **A full run costs $0 on the default
+free models.** The first-pass answers span two days (OpenRouter's 1,000 requests/day free cap hit
+mid-run, resumed from the per-row checkpoint).
 
-**Verdict accuracy is 0.7767 (233 of 300), 95% Wilson CI 0.726–0.820.** Per label: SUPPORT 0.774
-(96 of 124), CONTRADICT 0.859 (55 of 64), NEI 0.732 (82 of 112).
+**Verdict accuracy is 0.80 (240 of 300), 95% Wilson CI 0.751–0.841.**
 
-**What changed (0.73 → 0.78).** Same 300 stored Ling answers, zero new LLM calls: a
-verdict-recovery parser — developed and frozen on 100 SciFact *train* claims, then applied as-is
-to the test answers — reads a verdict restated in the prose when the final `Verdict:` line is
-missing (inline recovery), or falls back to a stance-inference rule. Paired exact McNemar against
-the previous committed run (`make rag-compare`): verdict correctness moves 14 claims from wrong to
-right and 0 from right to wrong (p ≈ 0.0001); abstention (+0.01, p = 0.25) and citation rate
-(+0.00, p = 1.00) don't move, as expected since the underlying answers are unchanged.
+| Gold label | n | Verdict accuracy | Answered (not abstained) |
+|---|---|---|---|
+| SUPPORT | 124 | 0.815 (101) | 107 |
+| CONTRADICT | 64 | 0.891 (57) | 58 |
+| NEI | 112 | 0.732 (82) | 30 |
+
+**What changed.** Two post-processing steps on the same Ling answers, each developed on SciFact
+*train* claims and then measured once on the 300 test claims; paired exact McNemar via
+`make rag-compare` (b = earlier run right and this run wrong, c = the reverse):
+
+| Step | Verdict accuracy | b | c | p |
+|---|---|---|---|---|
+| Strict `Verdict:` line only | 0.73 | | | |
+| + verdict-recovery parser (verdict restated in prose, or a stance rule; commits ec465ef, b3de17b) | 0.7767 | 0 | 14 | 0.0001 |
+| **+ verdict re-ask** (one verdict-only call for a claim with no verdict; commits e367318, 3dcc1a3) | **0.8000** | **0** | **7** | **0.016** |
+
+The re-ask fired on 15 of 300 claims (10 answers truncated at the token budget, 5 prose replies
+without a verdict line), produced a verdict for 14 (12 correct), and broke nothing. Abstention
+(+0.01, p = 0.25) and citation rate (0.94, unchanged) don't move significantly. Faithfulness
+moved 0.98 → 0.97 only because three answers that were truncated to nothing now count as
+answered. Verdict sources over the 300 rows: `line` 257, `inline` 10, `stance` 18, `reask` 14,
+none 1 (still truncated after the re-ask, scored as an abstention).
 
 Abstention is scored against a **rationale oracle**: the context has evidence when a document the
 annotators cited *with rationale sentences* is in the top-5. NEI claims have no rationale
@@ -162,98 +175,98 @@ document, so abstaining on them is the correct action.
 
 | Metric | Score |
 |---|---|
-| Faithfulness (over answered, LLM judge) | 0.98 |
+| Faithfulness (over answered, LLM judge) | 0.97 |
 | Context relevance (all, LLM judge) | 0.72 |
-| **3-class verdict accuracy** (vs gold label, no judge) | **0.78** (0.7767; 95% CI 0.726–0.820) |
-| Verdict line parsed (incl. recovered) | 0.95 |
+| **3-class verdict accuracy** (vs gold label, no judge) | **0.80** (240/300) |
+| Verdict parsed (incl. recovered and re-asked) | 299 of 300 |
 | Truncated answers (hit the token budget after 1 retry) | 11 of 300 |
-| Answers that needed the retry | 63 of 300 |
+| Answers that needed the length retry | 63 of 300 |
 | Replies citing at least one passage | 282 of 300 |
-| Bare `Verdict:`-only replies | 0 of 300 |
 | Evidence retrieved (rationale doc in top-5) | 0.58 |
-| Answered (model attempted an answer) | 0.64 |
-| **Abstention precision** (abstained & no evidence) | **0.81** |
+| Answered (model attempted an answer) | 0.65 |
+| **Abstention precision** (abstained & no evidence) | **0.83** |
 | Abstention recall (no evidence & abstained) | 0.70 |
-| False abstention (had evidence, abstained anyway) | 0.12 |
-| Answered without evidence, as a share of answers given (hallucination risk) | 0.20 |
+| False abstention (had evidence, abstained anyway) | 0.10 |
+| Answered without evidence, as a share of answers given (hallucination risk) | 0.19 |
 
 |  | evidence retrieved (175) | no evidence (125) |
 |---|---|---|
-| **answered** (192) | 154 answered with evidence | 38 answered with nothing to go on |
-| **abstained** (108) | 21 declined despite having the evidence | 87 correct |
+| **answered** (195) | 157 answered with evidence | 38 answered with nothing to go on |
+| **abstained** (105) | 18 declined despite having the evidence | 87 correct |
 
-Verdicts against the gold label (`NONE` = answered with no parseable/recoverable verdict line,
-always wrong):
+Verdicts against the gold label (`NONE` = answered with no verdict, always wrong):
 
 | Gold \ predicted | SUPPORT | CONTRADICT | NEI | NONE |
 |---|---|---|---|---|
-| **SUPPORT** (124) | 96 | 6 | 19 | 3 |
-| **CONTRADICT** (64) | 1 | 55 | 7 | 1 |
+| **SUPPORT** (124) | 101 | 6 | 17 | 0 |
+| **CONTRADICT** (64) | 1 | 57 | 6 | 0 |
 | **NEI** (112) | 17 | 13 | 82 | 0 |
 
-**Paired comparisons with the earlier runs.** The sample nests, so the first 50 of these 300
-claims are exactly the claims both earlier 50-claim runs scored, with the same retrieval,
-generator prompt, judge model, judge prompt and scoring: the previous committed Ling run (commit
-1bcdb33, run at c91d5dc) and the paid `openai/gpt-oss-120b` run before it (commit 9e6b2ea, run at
-133e9c7, 1024-token budget). `make rag-compare` pairs them claim by claim with an exact two-sided
-McNemar test (b = earlier run right and this run wrong, c = the reverse). **These numbers all
-predate the verdict-recovery parser** — they're scored with the old strict parser (a bare
-`Verdict:` line only), not re-run against it, so read them as "on the old parser," not against the
-0.78 headline above:
+**Remaining failure modes.** 60 of 300 verdicts are wrong, and almost all are an evidence
+*judgement* error, not a format one:
 
-| On the 50 shared claims | Earlier run | This run | b | c | p |
+- **NEI claims answered anyway: 30 of 112** (17 SUPPORTED, 13 REFUTED), the largest group. The
+  model is over-eager: it infers a verdict from weak or tangential context. They account for most
+  of the 38 answers given without evidence.
+- **SUPPORT/CONTRADICT claims abstained on: 23** (17 SUPPORT, 6 CONTRADICT). For 14 of the 17
+  SUPPORT claims the rationale doc is in the context: the model reads the passage too literally.
+- Smaller: 6 SUPPORT claims answered REFUTED and 1 CONTRADICT answered SUPPORTED.
+
+**The oracle decides whether abstention looks broken.** Scored the legacy way, against BEIR qrels
+(which mark a cited abstract relevant for NEI claims too), the *same answers* give abstention
+precision 0.41 and 62 "false" abstentions (rate 0.26); under the rationale oracle only 18 are
+false and precision is 0.83.
+
+**Paired comparison with the paid gpt-oss-120b run** (50 shared claims; both predate the
+verdict-recovery parser, so they use the old strict parser and are not comparable to the 0.80
+headline). Accuracy is indistinguishable and citations are the one significant difference:
+
+| On the 50 shared claims | gpt-oss-120b (paid) | Ling | b | c | p |
 |---|---|---|---|---|---|
-| *Ling (earlier 50-claim run) vs Ling (this run)* | | | | | |
-| Verdict correct | 0.74 | 0.76 | 3 | 4 | 1.00 |
-| Abstention correct (rationale oracle) | 0.80 | 0.78 | 3 | 2 | 1.00 |
-| Cites at least one passage | 0.94 | 0.94 | 2 | 2 | 1.00 |
-| *gpt-oss-120b (paid) vs Ling (this run)* | | | | | |
 | Verdict correct | 0.78 | 0.76 | 2 | 1 | 1.00 |
 | Abstention correct (rationale oracle) | 0.84 | 0.78 | 3 | 0 | 0.25 |
 | **Cites at least one passage** | **0.42** | **0.94** | **1** | **27** | **< 0.0001** |
 
-The Ling-vs-Ling pair is the noise floor: the same model and settings on the same 50 claims flip
-7 verdicts (3 one way, 4 the other), p = 1.00. Against it, **gpt-oss and Ling are
-indistinguishable on accuracy** (0.78 vs 0.76, 3 discordant claims, p = 1.00), and the abstention
-gap is not significant either (p = 0.25). **Citations are the one significant difference**: 27 of
-the 50 claims cite a passage only under Ling, 1 only under gpt-oss. On the same claims 28 gpt-oss
-replies were a bare `Verdict:` line against 0 for Ling, and the gpt-oss run cost $0.0049 against
-$0.
+On those claims 28 gpt-oss replies were a bare `Verdict:` line against 0 for Ling, and the run
+cost $0.0049 against $0. Same-model Ling-vs-Ling repeats flip 7 of 50 verdicts (p = 1.00), the
+noise floor for 50 claims.
 
-**Remaining failure modes.** 67 of 300 verdicts are wrong (down from 81 before the parser fix).
-From the confusion matrix:
+### Label audit
 
-- **NEI claims answered anyway (30 of 112)**, still the largest group: 17 SUPPORTED and 13
-  REFUTED, all now resolved to an explicit predicted label (0 scored `NONE` for NEI, down from 6
-  answered-in-prose before the parser). They account for most of the 38 answers given without
-  evidence; the other 8 are correct verdicts (6 CONTRADICT, 2 SUPPORT) whose rationale doc wasn't
-  retrieved.
-- **SUPPORT claims abstained on (19 of 124)**, unchanged by the parser fix — this failure mode is
-  about the model choosing to abstain, not about parsing its reply. 16 of the 19 have the
-  rationale doc in the context (3 of those 16 were truncated at the token budget).
-- **Unparseable replies are down to 15 of 300** (was 43). The recovery parser resolves 28 of the
-  previously-unparsed replies straight from the prose — 10 by finding a verdict restated inline,
-  18 by a stance-inference rule — leaving 15 truly unparseable. Of those, the judge marks 11 as
-  abstentions (scored `NEI`, exactly the 11 truncated-at-budget answers) and 4 as answered anyway
-  (scored `NONE`, always wrong: 3 SUPPORT, 1 CONTRADICT).
-- Smaller: 6 SUPPORT claims answered REFUTED, 7 CONTRADICT claims abstained on, and 1 CONTRADICT
-  claim answered SUPPORTED.
+SciFact's labels contain errors. Sylvestre, *Gold Label Errors in the SciFact Benchmark: An
+LLM-Assisted Annotation Audit* ([BioNLP 2026](https://aclanthology.org/2026.bionlp-1.9/); data
+[Kefez/scifact-audit-bionlp2026](https://github.com/Kefez/scifact-audit-bionlp2026) at pinned
+commit `5711f3f`, CC BY 4.0) corrected 11 of our 300 claims' labels and marked 8 more debatable.
+Re-scoring the same stored answers offline ([`eval/results/rag_label_audit.md`](eval/results/rag_label_audit.md)):
 
-**Finding: the oracle decides whether abstention looks broken.** Scored the legacy way, against
-BEIR qrels (which mark a cited abstract relevant for NEI claims too), the *same answers* give
-abstention precision 0.40 and 65 "false" abstentions (false-abstention rate 0.28). Under the
-rationale oracle, 44 of those 65 are NEI claims where refusing was the right call, and precision
-is 0.81.
+| Labels | n | Verdict accuracy |
+|---|---|---|
+| Original SciFact labels (headline) | 300 | 0.8000 |
+| Corrected (the 11 confirmed errors) | 300 | 0.8367 |
+| Corrected, 8 debatable claims excluded | 292 | 0.8425 |
 
-**Earlier runs.** Before the OpenRouter move, a Groq-hosted `openai/gpt-oss-120b` run with a
-`qwen/qwen3.8-27b` judge scored verdict accuracy 0.70 with 0.86 of verdict lines parsed. Two fixes took gpt-oss to
-0.78 / 0.94 (both 50-claim runs): a larger token budget (the old cap of 400 cut 7 of 50 answers
-off before their verdict line, because gpt-oss spends hidden reasoning
-tokens from the same budget), with one retry at 2x on `finish_reason=length`; and a parser that
-accepts trailing `[n]` markers after the verdict (`Verdict: REFUTED[1]`), which it had scored as
-`NONE`. Verdict accuracy and abstention are judge-free and comparable across all these runs.
-Faithfulness and context relevance from the Qwen-judged run are **not** comparable to the
-Nemotron-judged runs.
+**The headline stays on the original labels.** Caveats: the corrections come from a single
+annotator, 8 of the 11 were first flagged by an LLM (so an LLM generator agreeing with them is
+partly expected), and only the 188 evidence-bearing claims were audited, never the NEI ones. The
+predictions are identical across rows, so this measures the labels, not the pipeline. To compare
+two runs under the corrected key: `make rag-compare A=... B=... ARGS=--labels=audit`.
+
+### Tried and measured, not adopted
+
+All on the 300 test claims unless noted; paired exact McNemar.
+
+| Experiment | Verdict accuracy | Result |
+|---|---|---|
+| Paid GPT-6 Luna as generator ($0.0985) | 0.66 vs 0.80 | worse (57 broken, 14 fixed, p < 0.0001); cites on every reply, but 27 replies have no parseable verdict and 56 SUPPORT/CONTRADICT claims get NEI |
+| Off-the-shelf DeBERTa-v3 NLI verifier (tuned on 809 train claims) | 0.64 vs 0.80 | worse (70 broken, 21 fixed, p < 0.0001); weakest on CONTRADICT (0.56) |
+| Fine-tuned PubMedBERT verifier (Kaggle; HealthVer + PubMedQA, then SciFact train) | alone 0.66; combined with Ling via rule R3 0.787 vs 0.777 (before the re-ask) | no gain (11 fixed, 8 broken, p = 0.65); R3 won on its 99 tuning claims (0.859 vs 0.828) and didn't transfer |
+| Evidence-first prompt (quote the finding sentence first) | 0.847 vs 0.837 on 100 *train* claims | no gain (p = 1.0); only 64 of 98 replies followed the format |
+| Disagreement-triggered second look (Ling vs the verifier) | 0.8033 vs 0.7767 (before the re-ask) | not significant alone (p = 0.057), adds nothing on top of the re-ask (0.8067 vs 0.80, p = 0.75), and costs citations (0.94 → 0.92) |
+
+Verdict accuracy and abstention are judge-free and comparable across all runs, including the
+oldest Groq/Qwen-judged gpt-oss run (0.70 → 0.78 on 50 claims after a larger token budget and a
+`Verdict: REFUTED[1]` parser fix); its faithfulness and context-relevance numbers are **not**
+comparable to the Nemotron-judged runs.
 
 ### Judge reliability
 
@@ -284,43 +297,57 @@ order: a head slice, not a sample. The harness now takes a seeded random sample 
 ## Web search (Semantic Scholar)
 
 An optional, networked retrieval source, **off the default path**: `hybrid` over the local
-index stays the default and the measured headline. Two extra modes, on `/search`, `/answer`
-and the UI's mode selector:
+index stays the default and the measured headline. Two extra modes on `/search`, `/answer` and
+the UI's mode selector (`GET /search?q=...&mode=web` or `mode=hybrid_web`):
 
-- `web`: [Semantic Scholar](https://www.semanticscholar.org/product/api) paper relevance search
-  alone (`GET /graph/v1/paper/search`, top ≤ 100 per request, S2's maximum page size).
+- `web`: [Semantic Scholar](https://www.semanticscholar.org/product/api) paper search alone
+  (`GET /graph/v1/paper/search`, ≤ 100 results per request).
 - `hybrid_web`: the local hybrid list and the S2 list fused with the same hand-rolled RRF.
-  SciFact doc ids are S2ORC/S2 corpus ids, so a paper in both appears once (local text, S2 URL
-  and year). If S2 fails, `hybrid_web` returns the local results plus a `warnings` entry, never
-  an error; `web` has nothing to fall back to and returns 503.
+  SciFact doc ids are S2 corpus ids, so a paper in both appears once (local text, S2 URL and
+  year). If S2 fails, `hybrid_web` returns local results plus a `warnings` entry; `web` has
+  nothing to fall back to and returns 503.
+
+Both modes now run a **deterministic, LLM-free pipeline** by default
+([`app/retrieve/web_search.py`](app/retrieve/web_search.py)): the claim is rewritten into a
+≤ 6-term keyword query (plus a 3-term fallback query, results pooled) because S2 search handles a
+whole sentence badly, then the pooled S2 candidates are re-ranked locally by RRF of bge-small
+similarity to the original claim and BM25 over the candidates. Switch either step off with
+`SSR_S2_QUERY_REWRITE=false` / `SSR_S2_RERANK=false`.
+
+**Measured** (`make web-eval`, 300 test claims, gold-paper retrieval; rewrite rules chosen on 100
+train claims and frozen before the test run;
+[`eval/results/web_retrieval.md`](eval/results/web_retrieval.md)):
+
+| Config | Recall@5 | Recall@100 | nDCG@10 |
+|---|---|---|---|
+| S2, raw claim as query (the earlier `web`) | 0.040 | 0.056 | 0.035 |
+| S2, raw claim + local rerank | 0.040 | 0.056 | 0.040 |
+| S2, keyword rewrite | 0.102 | 0.236 | 0.089 |
+| **S2, keyword rewrite + local rerank (now the default)** | **0.185** | **0.244** | **0.159** |
+| Local hybrid (RRF, 5,183 docs), for scale | 0.766 | 0.965 | 0.724 |
+
+Rewrite + rerank vs the raw claim: 45 claims better, 1 worse at Recall@5 (p < 0.0001), and every
+rewrite comparison is significant. Reranking alone changes nothing (Recall@5 p = 1.0): the
+rewrite is what gives it candidates worth reordering. The rerank stays within S2's own page, so
+it can lift Recall@5/10 and nDCG but barely Recall@100. Web search still trails local hybrid on
+every metric (p < 0.0001, e.g. Recall@5 0.185 vs 0.766), which is expected: S2 searches ~200M
+papers against our 5,183, so this asks whether open-web retrieval can find the gold paper at all,
+not which ranker is better. The id mapping holds (256 of 283 gold titles match S2 corpus ids; the
+eval stops if under 90%). S2's index also changes, so responses are cached with their fetch date.
 
 Web hits carry `source: "semantic_scholar"`, `url` (http/https only, checked server- and
-client-side) and `year`. Their titles and abstracts are untrusted third-party text: they are
-flattened to one line with quote runs and control characters removed, so they cannot forge
-the grounded prompt's structure, and `/answer` passes them to the generator under the same
-prompt as local passages.
+client-side) and `year`. Titles and abstracts are untrusted third-party text, flattened to one
+line with quote runs and control characters removed so they cannot forge the grounded prompt's
+structure.
 
-**Key and limits.** No key is required, but unauthenticated requests share S2's public pool
-("1000 requests per second shared among all unauthenticated users", "further throttled during
-periods of heavy use"), which returns 429 often in practice. A free key
-([request form](https://www.semanticscholar.org/product/api#api-key-form)) goes in `.env` as
-`SSR_S2_API_KEY` and is sent as the `x-api-key` header only when set; its introductory limit is
-1 request/s. A process-wide limiter spaces every S2 request, retries included, to
-`SSR_S2_RATE_PER_S` (default 1), so the unauthenticated public API can't be used to hammer S2
-or burn the key. Retries (429/5xx/network) are bounded and honour `Retry-After`. API requests
-wait at most `SSR_S2_MAX_WAIT_S` (default 5 s) for a slot, then degrade. Raw responses are
-cached under `data/s2_cache/`: always for the eval, and for the API only with
-`SSR_S2_API_CACHE=true` (off by default, because arbitrary public queries would grow the cache
-without bound).
-
-**Eval.** `make web-eval` searches S2 for all 300 test claims (one request each, ≈ 5 min at
-1 req/s) and scores `web` against the committed local `hybrid` run on the same gold qrels
-(nDCG@10, Recall@10, Recall@100, paired t-test) into `eval/results/web_retrieval.{md,json}`.
-It first confirms the id mapping with a single `paper/batch` title lookup of the gold docs, and
-stops before any search if it fails. S2 searches ~200M papers against our 5,183, so the eval
-asks whether open-web retrieval can find the gold paper at all; it is not a like-for-like ranker
-comparison. S2's index also changes, so responses are cached with their fetch date and the
-report records it. `SSR_EVAL_LIMIT=2 make web-eval` is a 3-request smoke run.
+**Key and limits.** No key is required, but unauthenticated requests share S2's public pool and
+often get 429. A free key ([request form](https://www.semanticscholar.org/product/api#api-key-form))
+goes in `.env` as `SSR_S2_API_KEY` (sent as `x-api-key` only when set; 1 request/s). A
+process-wide limiter spaces every request, retries included, to `SSR_S2_RATE_PER_S` (default 1);
+API requests wait at most `SSR_S2_MAX_WAIT_S` (5 s), then degrade. Raw responses cache under
+`data/s2_cache/`: always for the eval, and for the API only with `SSR_S2_API_CACHE=true`.
+`make web-eval` makes ~300 requests (≈ 5 min at 1 req/s; `SSR_EVAL_LIMIT=2` is a 3-request
+smoke run).
 
 ## Limitations
 
@@ -333,15 +360,21 @@ report records it. `SSR_EVAL_LIMIT=2 make web-eval` is a 3-request smoke run.
 - **NEI labelling.** For the 112 NEI claims, BEIR's qrels mark the cited abstract relevant even
   though annotators found no rationale in it, and the whole hybrid-vs-dense recall gain sits on
   that stratum (Finding 1).
-- **300 claims still leave a ~5-point interval on RAG accuracy.** The eval now covers every
-  SciFact test claim, and the 95% Wilson interval on verdict accuracy is 0.726–0.820 (0.78 ± 0.05,
-  width 0.09), so a gap of a few points between two runs' headline rates means nothing on its
-  own; compare runs claim by claim with `make rag-compare` instead.
-- **Paired comparisons with older runs cover only 50 claims.** The gpt-oss and earlier Ling runs
-  scored only the first 50 claims, so the McNemar tests above rest on those 50 shared claims, not
-  the full 300. At that size only large effects, like the citation gap, can reach significance.
-  Those tables also predate the verdict-recovery parser, so they're on the old strict parser, not
-  comparable to the 0.78 headline above.
+- **300 claims still leave a ~5-point interval on RAG accuracy.** The eval covers every SciFact
+  test claim, and the 95% Wilson interval on verdict accuracy is 0.751–0.841 (0.80 ± 0.045), so a
+  gap of a few points between two runs' headline rates means nothing on its own; compare runs
+  claim by claim with `make rag-compare`. The re-ask gain (+7 claims, p = 0.016) is real but
+  small, and rests on 15 re-asked claims.
+- **Paired comparisons with the gpt-oss run cover only 50 claims**, scored with the old strict
+  parser, so only large effects (the citation gap) can reach significance.
+- **The label audit is a sensitivity check, not a new key.** One annotator, mostly LLM-flagged, no
+  NEI claims audited; the 0.8367 corrected figure is an upper-side reading.
+- **Remaining errors are evidence-judgement errors.** 30 of 112 NEI claims are answered anyway
+  (over-eager) and 17 of 124 SUPPORT claims are abstained on (too literal); format and parsing
+  failures are now ≤ 1 of 300.
+- **Web search is far below local retrieval on SciFact.** Even with rewrite + rerank, Recall@5 is
+  0.185 against 0.766, and the S2 results move with S2's index; it is an optional source, not a
+  replacement.
 - **One judge model.** Faithfulness and context relevance come from a single judge (Nemotron 3
   Ultra), with no second model or human labels to check it against. It is from a different model
   family than the generator to avoid self-evaluation bias, but a single LLM judge still carries
@@ -359,21 +392,17 @@ report records it. `SSR_EVAL_LIMIT=2 make web-eval` is a 3-request smoke run.
 
 ## What I'd do next
 
-- **A small verifier trained on SciFact train hard negatives** ("is this sentence actual
-  evidence?"), building on the NLI baseline already measured (`app/verify/nli.py`,
-  DeBERTa-v3-base-mnli-fever-anli, tuned only on the 809 SciFact train claims: 0.637 verdict
-  accuracy on test vs 0.73 for the Ling LLM at the time, weakest on CONTRADICT at 0.56 — not
-  adopted as the verdict source, kept as a starting point). The target is the two error modes the
-  confusion matrix still shows after the parser fix: 30 of 112 NEI claims answered anyway
-  (over-inference from weak or tangential context) and 19 of 124 SUPPORT claims abstained on
-  despite having the rationale doc (too-literal a read of the passage). A stricter, evidence-first
-  NEI prompt (quote the finding sentence before the verdict) was tried on 100 SciFact train claims
-  and wasn't clearly better than baseline plus the parser (0.847 vs 0.837 verdict accuracy,
-  McNemar p = 1.0), and only 64 of 98 replies followed the required format — so a trained verifier
-  is the next lever, not another prompt rewrite.
+- **Attack the two remaining error modes directly.** Over-eager answers on NEI claims (30 of 112)
+  and too-literal abstentions on SUPPORT claims (17 of 124) are what is left. A stricter prompt
+  (evidence-first), an off-the-shelf NLI verifier, a fine-tuned verifier and a second-look check
+  have all been measured and not adopted ([above](#tried-and-measured-not-adopted)), so the next
+  lever is better supervision, such as SciFact-train hard negatives for NEI, or a stronger
+  generator that keeps Ling's citation behavior (paid GPT-6 Luna did not).
+- **Close the web-search gap** (Recall@5 0.185 vs 0.766 local): the rewrite is rule-based and was
+  tuned on 100 claims; a learned or LLM query rewrite, or scoring candidates against more of S2's
+  graph, is untested.
 - **Re-run the judge-consistency study on the 300 Ling answers**, and human spot-check faithfulness
-  on the rows where judge repeats disagree, since faithfulness is the judge's least stable score
-  (alpha 0.51 at T = 0.7).
+  on the rows where judge repeats disagree (faithfulness alpha 0.51 at T = 0.7).
 - **Stratified reporting as the default**: report every retrieval comparison by claim label, not
   only as a follow-up analysis.
 
