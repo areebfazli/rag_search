@@ -71,3 +71,29 @@ def test_rewrite_queries_primary_and_shorter_fallback():
     assert rewrite_queries("Charcoal treats paraquat.") == ["Charcoal treats paraquat"]
     assert rewrite_queries("It may be the case that it is.") == []
     assert rewrite_queries("") == []
+
+
+def test_split_terms_at_the_first_relational_word():
+    from app.retrieve.query_rewrite import split_terms
+
+    assert split_terms("A deficiency of vitamin B12 increases blood levels of homocysteine.") == (
+        ["deficiency", "vitamin", "B12"], ["blood", "homocysteine"]
+    )
+    assert split_terms("HAND2 methylation in endometrial carcinogenesis.") == (
+        ["HAND2", "methylation", "endometrial", "carcinogenesis"], []
+    )
+    assert split_terms("") == ([], [])
+
+
+def test_multi_queries_are_distinct_from_the_rewrite_and_each_other():
+    from app.retrieve.query_rewrite import _norm_q, multi_queries
+
+    claim = "Increased diastolic blood pressure (DBP) is associated with abdominal aortic aneurysm."
+    extra = multi_queries(claim, n=5)
+    base = {_norm_q(q) for q in rewrite_queries(claim)}
+    assert extra and len(extra) <= 5
+    assert len({_norm_q(q) for q in extra}) == len(extra)
+    assert not base & {_norm_q(q) for q in extra}
+    assert all(len(q.split()) >= 2 for q in extra)
+    assert multi_queries(claim, n=1) == extra[:1]  # deterministic, best first
+    assert multi_queries("Charcoal.") == [] and multi_queries("") == []

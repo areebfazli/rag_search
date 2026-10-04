@@ -290,3 +290,84 @@ def rewrite_queries(
     primary = " ".join(top_terms(terms, max_terms, rarity))
     fallback = " ".join(top_terms(terms, fallback_terms, rarity))
     return [primary] if fallback == primary else [primary, fallback]
+
+
+# --- Extra deterministic queries for a wider S2 candidate pool (multi-query) ---------
+#
+# rewrite_queries' two queries share their rarest terms, so under S2's near-AND matching
+# they miss a gold paper that does not use one of those words. These variants each drop a
+# different part of the claim. The split is at the first generic relational word
+# ("increases", "is associated with", "regulates", ...) that follows a content term: in a
+# claim that word separates what is acted on/exposed (subject) from the outcome (object).
+
+_RELATIONAL = frozenset(f for root in _GENERIC_ROOTS for f in _inflect(root)) - STOPWORDS
+
+
+def split_terms(claim: str) -> tuple[list[str], list[str]]:
+    """(subject terms, object terms): content terms before / after the first generic
+    relational word that follows at least one content term. ([], terms) is never
+    returned — no split means (terms, [])."""
+    tokens = _strip_abbreviations(_TOKEN.findall(claim or ""))
+    head: list[str] = []
+    tail: list[str] = []
+    seen: set[str] = set()
+    split = False
+    for tok in tokens:
+        word = _clean(tok).lower()
+        if not split and head and word in _RELATIONAL:
+            split = True
+            continue
+        for part in _content_parts(tok):
+            key = _stem_key(part)
+            if key in seen:
+                continue
+            seen.add(key)
+            (tail if split else head).append(part)
+    return head, tail
+
+
+def multi_queries(claim: str, rarity: TermRarity | None = None, n: int = 3) -> list[str]:
+    """Up to `n` extra keyword queries, distinct from rewrite_queries(claim) and from
+    each other, best-first:
+
+      1. subject + object: the top-2 terms of each side of the relational split;
+      2. entity-focused: entity-like terms (codes, genes, drugs, acronyms) plus the
+         rarest other terms, 3 in all;
+      3. the rarest pair of terms;
+      4. object side alone (top 3);
+      5. subject side alone (top 3).
+
+    Empty when the claim has fewer than 2 content terms."""
+    terms = claim_terms(claim)
+    if len(terms) < 2:
+        return []
+    head, tail = split_terms(claim)
+    entities = [t for t in terms if _is_entity(t)]
+    others = [t for t in terms if not _is_entity(t)]
+    candidates: list[list[str]] = []
+    if head and tail:
+        candidates.append(top_terms(head, 2, rarity) + top_terms(tail, 2, rarity))
+    if entities:
+        ent = top_terms(entities, 3, rarity)
+        rest = top_terms(others, max(0, 3 - len(ent)), rarity)
+        candidates.append([t for t in terms if t in ent or t in rest])
+    candidates.append(top_terms(terms, 2, rarity))
+    if len(tail) >= 2:
+        candidates.append(top_terms(tail, 3, rarity))
+    if len(head) >= 2:
+        candidates.append(top_terms(head, 3, rarity))
+    taken = {_norm_q(q) for q in rewrite_queries(claim, rarity)}
+    out: list[str] = []
+    for c in candidates:
+        q = " ".join(c)
+        if len(c) < 2 or _norm_q(q) in taken:
+            continue
+        taken.add(_norm_q(q))
+        out.append(q)
+        if len(out) >= n:
+            break
+    return out
+
+
+def _norm_q(q: str) -> str:
+    return " ".join(sorted(_stem_key(w) for w in q.split()))

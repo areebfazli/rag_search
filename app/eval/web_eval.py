@@ -45,6 +45,7 @@ from pathlib import Path
 
 from app.core.config import Settings, settings
 from app.core.interfaces import SearchHit
+from app.retrieve.web_sources import SourceError
 from app.retrieve.semantic_scholar import (
     S2_BATCH_MAX_IDS,
     S2_MAX_LIMIT,
@@ -92,14 +93,47 @@ LABELS = {
     "web_rerank": "S2, raw claim + local rerank",
     "web_rewrite_rerank": "S2, keyword rewrite + local rerank",
 }
+# Multi-source candidate pools (WebSearch.search_pooled), rewrite + rerank on. Chosen on
+# the seeded 100-claim train sample with app/eval/web_pool_eval.py, then frozen:
+#   web_pool_live    — the latency-bounded choice: S2 rewrite + S2 snippet search (claim)
+#                      + PubMed Best Match (rewrite and claim), dense rerank of the top 50
+#                      (train: R@5 .285 / R@100 .453 vs .208 / .218 for rewrite+rerank)
+#   web_pool_offline — the recall-first choice: + 3 extra S2 keyword queries + snippet
+#                      search on the rewrite too, dense rerank of the top 100
+#                      (train: R@5 .285 / R@100 .473; best train R@100 of the served pools)
+# Served view only (no `_any` twin): each extra pooled view is another ~100 embeddings per
+# claim; train's _any numbers are in data/eval_runs/web_pool_*.
+POOL_VARIANTS = {
+    "web_pool_live": {
+        "pubmed_queries": ("rewrite", "claim"), "snippet_queries": ("claim",),
+        "multi_query": 0, "dense_cap": 50,
+    },
+    "web_pool_offline": {
+        "pubmed_queries": ("rewrite", "claim"), "snippet_queries": ("claim", "rewrite"),
+        "multi_query": 3, "dense_cap": 100,
+    },
+}
+POOL_LABELS = {
+    "web_pool_live": "Pooled: S2 rewrite + S2 snippets + PubMed, dense rerank of top 50 (live)",
+    "web_pool_offline": "Pooled: + 3 extra S2 queries + rewrite snippets, dense rerank of top 100 (offline)",
+}
 # (key, label) of the rows in the report; "hybrid" is the committed local run.
 ROWS = [("hybrid", "Local hybrid (RRF, 5,183 docs)")]
 for _key, _label in LABELS.items():
     ROWS += [(_key, _label), (f"{_key}_any", f"{_label}, incl. no-abstract papers")]
-# Every web row vs the local hybrid; every new variant vs raw S2 in the same view.
+ROWS += list(POOL_LABELS.items())
+# Every web row vs the local hybrid; every new variant vs raw S2 in the same view; every
+# pooled variant vs the previous best (rewrite + rerank) in the same view.
 PAIRS = [(k, "hybrid") for k, _ in ROWS[1:]] + [
     (f"{k}{view}", f"web{view}") for k in VARIANTS if k != "web" for view in ("", "_any")
-]
+] + [
+    (k, "web_rewrite_rerank") for k in POOL_VARIANTS
+] + [("web_pool_offline", "web_pool_live")]
+
+
+def pool_enabled() -> bool:
+    """SSR_WEB_EVAL_POOL=0 skips the pooled rows (no PubMed / snippet requests)."""
+    return os.environ.get("SSR_WEB_EVAL_POOL", "1").strip() not in ("0", "", "false")
 
 Run_ = dict[str, dict[str, float]]
 
@@ -238,6 +272,15 @@ def to_markdown(result: dict, meta: dict) -> str:
         "claim and BM25 over the candidates. Rewrite rules were chosen on a seeded 100-claim "
         "beir/scifact/train sample and frozen before the test run.",
         "",
+        "*Pooled* rows (app/retrieve/web_search.py `search_pooled`) widen CANDIDATE "
+        "GENERATION: the rewrite's S2 results are pooled with S2 snippet search "
+        "(app/retrieve/s2_extra.py; papers quoting the claim verbatim or mentioning SciFact "
+        "are excluded) and PubMed Best Match (app/retrieve/pubmed.py), external ids "
+        "resolved to S2 corpus ids with S2 paper/batch, deduped, and re-ranked by the same "
+        "local RRF — with only the top N of a BM25 pre-rank embedded (latency bound). "
+        "Sources and settings chosen on the train sample with app/eval/web_pool_eval.py "
+        "and frozen before this run.",
+        "",
         "| Config | " + " | ".join(PRETTY[m] for m in METRICS) + " |",
         "|" + "---|" * (len(METRICS) + 1),
     ]
@@ -275,7 +318,8 @@ def to_markdown(result: dict, meta: dict) -> str:
         f"abstract: {meta['dropped_no_abstract']} · rewrite fallback query sent for "
         f"{rw['fallback_used']}/{meta['n_queries']} claims · rewritten claims with no content "
         f"terms (sent raw): {rw['no_terms']} · candidate embeddings cached/computed this run: "
-        f"{meta['embeddings']['cached']}/{meta['embeddings']['computed']}.",
+        f"{meta['embeddings']['cached']}/{meta['embeddings']['computed']} · PubMed requests "
+        f"this run: {meta.get('pubmed_requests_sent', 0)}.",
         "",
     ]
     return "\n".join(lines)
@@ -321,7 +365,7 @@ def local_hybrid_run(queries: dict[str, str], n_total: int) -> Run_:
     return {q: run[q] for q in queries}
 
 
-def pipelines(retriever, embedder_factory, rarity, emb_cache) -> dict:
+def pipelines(retriever, embedder_factory, rarity, emb_cache, extras=None) -> dict:
     """One WebSearch per row key, sharing the retriever, embedder, rarity and caches.
     strict: a failed fallback request stops the run instead of scoring a thinner pool."""
     from app.retrieve.web_search import WebSearch
@@ -346,7 +390,41 @@ def pipelines(retriever, embedder_factory, rarity, emb_cache) -> dict:
                 keep_no_abstract=keep,
                 strict=True,
             )
+    if extras is not None:  # {"pubmed": PubMedSource, "resolver": S2IdResolver}
+        for key, kw in POOL_VARIANTS.items():
+            for view, keep in (("", False),):
+                out[key + view] = WebSearch(
+                    retriever,
+                    rewrite=True,
+                    rerank=True,
+                    embedder=shared_embedder,
+                    rarity=rarity,
+                    emb_cache=emb_cache,
+                    keep_no_abstract=keep,
+                    strict=True,
+                    snippets=True,
+                    pubmed=extras["pubmed"],
+                    resolver=extras["resolver"],
+                    **kw,
+                )
     return out
+
+
+def make_extras(retriever):
+    """PubMed source + S2 id resolver for the pooled rows: cached on disk (data/), long
+    backoff like the S2 retriever here, keyless."""
+    from app.retrieve.pubmed import PubMedSource
+    from app.retrieve.s2_extra import S2IdResolver
+
+    return {
+        "pubmed": PubMedSource(
+            cache=ResponseCache(Path(settings.s2_cache_dir).parent / "web_cache"),
+            rate=settings.pubmed_rate_per_s,
+            max_retries=max(3, settings.s2_max_retries),
+            max_backoff_s=180.0,
+        ),
+        "resolver": S2IdResolver(retriever, Path(settings.s2_cache_dir) / "ids"),
+    }
 
 
 def estimate_requests(web: dict, queries: dict[str, str], reader: ResponseCache, refresh: bool):
@@ -407,7 +485,8 @@ def main() -> int:
     docs = load_documents()
     local_titles = {d["doc_id"]: d["title"] for d in docs}
     emb_cache = EmbeddingCache(Path(settings.s2_cache_dir) / "emb")
-    web = pipelines(retriever, make_embedder, load_rarity(docs), emb_cache)
+    extras = make_extras(retriever) if pool_enabled() else None
+    web = pipelines(retriever, make_embedder, load_rarity(docs), emb_cache, extras)
 
     # Up-front cost: uncached searches + the mapping batch (if uncached).
     gold_ids = sorted({d for v in qrels_dict.values() for d in v}, key=int)
@@ -459,7 +538,7 @@ def main() -> int:
             service = SearchService(dense=_NoLocalIndex(), lexical=_NoLocalIndex(), web=pipeline)
             try:
                 hits = service.retrieve(text, mode="web", top_k=DEPTH)
-            except S2Error as e:
+            except (S2Error, SourceError) as e:
                 print(
                     f"\nStopped at claim {i}/{len(queries)} ({key}): {e}. Responses so far are "
                     "cached — re-run the same command to resume."
@@ -494,6 +573,8 @@ def main() -> int:
         "fetched_to": max(fetched, default=today),
         "scored_on": today,
         "requests_sent": retriever.requests_sent,
+        "pubmed_requests_sent": extras["pubmed"].requests_sent if extras else 0,
+        "pool": {k: {**v, "pubmed": True, "snippets": True} for k, v in POOL_VARIANTS.items()} if extras else None,
         "authenticated": retriever.authenticated,
         "dropped_no_abstract": dropped,
         "rewrite": {

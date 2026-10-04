@@ -123,6 +123,32 @@ class Settings(BaseSettings):
     # p<0.0001). Rerank alone does nothing (p=1.0); the rewrite is what lets it work.
     s2_query_rewrite: bool = True
     s2_rerank: bool = True
+    # Extra web CANDIDATE sources (web_search.WebSearch.search_pooled), pooled with the S2
+    # rewrite results and re-ranked together by the same local RRF. Chosen on 100 train
+    # claims (app/eval/web_pool_eval.py), frozen, then measured once on the 300 test claims
+    # (eval/results/web_retrieval.md, "Pooled ... (live)"): vs rewrite+rerank, Recall@5
+    # 0.185 -> 0.228 (p=0.012), Recall@100 0.244 -> 0.384 (46 better / 0 worse, p<0.0001),
+    # nDCG@10 0.159 -> 0.203 (p=0.002). Hence ON by default:
+    #   web_pubmed: PubMed E-utilities Best Match (app/retrieve/pubmed.py; keyless — NCBI
+    #     allows 3 req/s per IP; `tool` param only, no email), on web_pubmed_queries
+    #   web_snippets: S2 snippet search (app/retrieve/s2_extra.py) on web_snippet_queries;
+    #     papers quoting the claim verbatim or mentioning SciFact are excluded
+    #   web_dense_cap: embed/re-rank only the top N of a cheap BM25 pre-rank (0 = all) —
+    #     embedding is ~60 ms per candidate on CPU, the main latency cost of a big pool
+    # Off by default (more S2 requests for no significant gain):
+    #   s2_multi_query: extra deterministic S2 keyword queries (query_rewrite.multi_queries);
+    #     the "offline" test row (3 of them + rewrite snippets) vs live: R@100 +0.013, p=0.17
+    #   web_citation_seeds: references+citations of the top-N pre-ranked S2 hits (train
+    #     only: +0 Recall@100 on top of the live pool, ~2-3 extra S2 requests)
+    s2_multi_query: int = Field(default=0, ge=0, le=5)
+    web_pubmed: bool = True
+    web_pubmed_queries: str = "rewrite,claim"  # comma list of "rewrite" / "claim"
+    web_snippets: bool = True
+    web_snippet_queries: str = "claim"
+    web_citation_seeds: int = Field(default=0, ge=0, le=10)
+    web_citation_cap: int = Field(default=30, ge=1, le=1000)
+    web_dense_cap: int = Field(default=50, ge=0)
+    pubmed_rate_per_s: float = Field(default=2.0, gt=0, le=3.0)
 
     # --- LLM providers (generator and RAG-eval judge) ---
     # Each role picks a provider; the PROVIDER decides the base URL, the API key and

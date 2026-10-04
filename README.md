@@ -7,7 +7,7 @@ multiple sclerosis"*. The tool finds the research papers most relevant to it, re
 says whether they **support** the claim, **refute** it, or **don't contain enough evidence**,
 citing the exact papers it relied on. It searches a built-in collection of 5,183 biomedical
 paper abstracts (the SciFact benchmark) and can optionally search the web through Semantic
-Scholar. It runs on free AI models, so it costs nothing to use. Every number below is measured
+Scholar and PubMed. It runs on free AI models, so it costs nothing to use. Every number below is measured
 against answers written by expert annotators, not estimated.
 
 ![Search UI: results for "Vitamin D deficiency is associated with increased risk of multiple sclerosis" over 5,183 SciFact abstracts](docs/ui.png)
@@ -44,7 +44,7 @@ All on the 300 SciFact test claims, default settings.
 | Answers that stick to the papers (faithfulness, LLM judge) | 0.97 | [`rag.md`](eval/results/rag.md) |
 | Search time per query (laptop CPU) | 0.124 s | [`latency.md`](eval/results/latency.md) |
 | Cost of a full 300-claim evaluation run | $0 | [`rag.json`](eval/results/rag.json) (`cost`) |
-| Web search (Semantic Scholar): right paper in top 5 | 0.185 (local search: 0.766) | [`web_retrieval.md`](eval/results/web_retrieval.md) |
+| Web search (Semantic Scholar + PubMed): right paper in top 5 / top 100 | 0.228 / 0.384 (local search: 0.766 / 0.965) | [`web_retrieval.md`](eval/results/web_retrieval.md) |
 
 **Key findings**
 
@@ -93,7 +93,7 @@ allows one process.
 | `SSR_RAG_N=all make eval-rag` | Full answer-quality run on 300 claims → `eval/results/rag.md`; ~670 free requests, about 1.5 hours. Add `SSR_RAG_CHECK_QUOTA=1` to stop up front if today's free quota is short |
 | `make rag-compare A=a/rag.json B=b/rag.json` | Claim-by-claim significance test between two answer runs |
 | `make rag-audit` | Re-score answers under the published label corrections (offline, no LLM) |
-| `make web-eval` | Semantic Scholar web search vs local search (a few hundred requests at 1 per second; set the S2 key) |
+| `make web-eval` | Web search (Semantic Scholar + PubMed) vs local search (a few thousand requests at 1 per second; set the S2 key) |
 | `make latency` | Per-query search speed for every configuration |
 | `make test` / `make lint` | Unit tests / ruff |
 

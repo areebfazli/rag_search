@@ -45,6 +45,41 @@ def _demote(tail: list[SearchHit], head: list[SearchHit]) -> list[SearchHit]:
     ]
 
 
+def _kinds(value: str) -> tuple[str, ...]:
+    return tuple(k.strip() for k in value.split(",") if k.strip()) or ("rewrite",)
+
+
+def web_extras(s2) -> dict:
+    """WebSearch kwargs for the extra candidate sources enabled in settings (API path:
+    short waits and at most one retry, like SemanticScholarRetriever.for_api; caches
+    only with SSR_S2_API_CACHE)."""
+    kw: dict = {
+        "multi_query": settings.s2_multi_query,
+        "snippets": settings.web_snippets,
+        "citation_seeds": settings.web_citation_seeds,
+        "citation_cap": settings.web_citation_cap,
+        "dense_cap": settings.web_dense_cap or None,
+        "pubmed_queries": _kinds(settings.web_pubmed_queries),
+        "snippet_queries": _kinds(settings.web_snippet_queries),
+    }
+    if settings.web_pubmed:
+        from app.retrieve.pubmed import PubMedSource
+        from app.retrieve.semantic_scholar import ResponseCache
+
+        kw["pubmed"] = PubMedSource(
+            cache=ResponseCache(Path(settings.s2_cache_dir).parent / "web_cache") if settings.s2_api_cache else None,
+            rate=settings.pubmed_rate_per_s,
+            max_retries=1,
+            max_wait_s=settings.s2_max_wait_s,
+            max_backoff_s=settings.s2_max_wait_s,
+        )
+    if settings.web_pubmed or settings.web_snippets or settings.web_citation_seeds:
+        from app.retrieve.s2_extra import S2IdResolver
+
+        kw["resolver"] = S2IdResolver(s2, Path(settings.s2_cache_dir) / "ids" if settings.s2_api_cache else None)
+    return kw
+
+
 class SearchService:
     def __init__(self, dense=None, lexical=None, reranker=None, web=None):
         # Components may be injected (used by tests); otherwise they are built from
@@ -76,8 +111,9 @@ class SearchService:
                     from app.retrieve.semantic_scholar import SemanticScholarRetriever
                     from app.retrieve.web_search import EmbeddingCache
 
+                    s2 = SemanticScholarRetriever.for_api()
                     self._web = WebSearch(
-                        SemanticScholarRetriever.for_api(),
+                        s2,
                         rewrite=settings.s2_query_rewrite,
                         rerank=settings.s2_rerank,
                         embedder=self._web_embedder,
@@ -89,6 +125,7 @@ class SearchService:
                             if settings.s2_api_cache
                             else None
                         ),
+                        **web_extras(s2),
                     )
         return self._web
 

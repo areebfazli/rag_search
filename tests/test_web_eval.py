@@ -122,6 +122,7 @@ def _fake_s2(requests):
 
 
 def _patch_main(monkeypatch, tmp_path, requests):
+    monkeypatch.setenv("SSR_WEB_EVAL_POOL", "0")  # pooled rows: tests/test_web_search.py
     queries = {"1": CLAIM_ONE, "2": CLAIM_TWO}
     qrels = {"1": {"11": 1}, "2": {"22": 1}}
     monkeypatch.setattr("app.ingest.corpus.load_queries_qrels", lambda: (queries, qrels))
@@ -237,3 +238,19 @@ def test_rows_and_pairs_cover_every_variant_in_both_views():
     for _, label in web_eval.ROWS:
         assert f"| {label} |" in md
     assert "Recall@5" in md and "web_rewrite_rerank_any vs web_any" in md
+
+
+def test_pooled_rows_are_compared_with_the_previous_best_and_built_on_request():
+    assert ("web_pool_live", "web_rewrite_rerank") in web_eval.PAIRS
+    assert ("web_pool_offline", "web_pool_live") in web_eval.PAIRS
+    keys = [k for k, _ in web_eval.ROWS]
+    assert {"web_pool_live", "web_pool_offline"} <= set(keys) and "web_pool_live_any" not in keys
+
+    class R:  # resolver/pubmed stand-ins: construction only, never called
+        pass
+
+    out = web_eval.pipelines(object(), lambda: None, None, None, {"pubmed": R(), "resolver": R()})
+    live = out["web_pool_live"]
+    assert live.pooled and live.strict and live.dense_cap == 50 and live.snippet_queries == ("claim",)
+    assert not live.keep_no_abstract and out["web_pool_offline"].multi_query == 3
+    assert "web_pool_live" not in web_eval.pipelines(object(), lambda: None, None, None)
