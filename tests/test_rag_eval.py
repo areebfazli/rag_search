@@ -264,11 +264,11 @@ def test_verdict_accuracy_and_confusion():
 # --- end-to-end main() over fakes: rows, provenance, judge scope -----------
 
 QUERIES = {
-    "1": "claim one",
-    "2": "claim two",
-    "3": "claim three",
-    "4": "claim four",
-    "5": "claim five",
+    "1": "One claim holds.",
+    "2": "Two claim holds.",
+    "3": "Three claim holds.",
+    "4": "Four claim holds.",
+    "5": "Five claim holds.",
 }
 # Every claim has a qrels doc (as in BEIR, NEI included); retrieval always returns d1, d2.
 QRELS = {"1": {"d1": 1}, "2": {"d9": 1}, "3": {"d1": 1}, "4": {"d2": 1, "d5": 1}, "5": {"d1": 1}}
@@ -280,13 +280,13 @@ CLAIM_LABELS = {
     "5": ClaimLabel("CONTRADICT", {"d1"}),  # no verdict line; judge: answered
 }
 REPLIES = {
-    "claim one": "Supported [1].\nVerdict: SUPPORTED",
-    "claim two": "Refuted [2].\nVerdict: REFUTED",
-    "claim three": "The context does not say.\nVerdict: NOT ENOUGH EVIDENCE",
+    "One claim holds.": "Supported [1].\nVerdict: SUPPORTED",
+    "Two claim holds.": "Refuted [2].\nVerdict: REFUTED",
+    "Three claim holds.": "The context does not say.\nVerdict: NOT ENOUGH EVIDENCE",
     # q4/q5 carry no verdict in any form (no line, no inline field, no first-sentence
     # stance), so they stay the judge-fallback cases under generator.parse_verdict too.
-    "claim four": "Nothing here settles it.",
-    "claim five": "Passage [1] reports the opposite finding.",
+    "Four claim holds.": "Nothing here settles it.",
+    "Five claim holds.": "Passage [1] reports the opposite finding.",
 }
 
 
@@ -317,10 +317,10 @@ class FakeGenerator:
 
     def generate(self, query, hits):
         text, verdict = split_verdict(REPLIES[query])  # the real parser, fake model
-        if query == "claim five":  # a plain Answer: another Generator, no side channel
+        if query == "Five claim holds.":  # a plain Answer: another Generator, no side channel
             return Answer(text=text, citations=["d1"], hits=hits, verdict=verdict)
         # q4 is the reply still cut off after the retry (no verdict line, as observed).
-        truncated = query == "claim four"
+        truncated = query == "Four claim holds."
         return GeneratedAnswer(
             text=text,
             citations=["d1"],
@@ -347,7 +347,7 @@ class FakeJudge:
         self.calls += 1
         # The judge calls q3 "answered" — the verdict must override it (the
         # ambiguity this change removes). Only q4/q5 should use its answer.
-        return {"answered": q != "claim four", "faithfulness": 0.9, "context_relevance": 0.5}
+        return {"answered": q != "Four claim holds.", "faithfulness": 0.9, "context_relevance": 0.5}
 
 
 DEFAULT_GEN_MODEL = Settings.model_fields["openrouter_llm_model"].default
@@ -381,6 +381,8 @@ def _patch_main(
     monkeypatch.setattr(rag_eval, "REASK_CACHE", tmp_path / "reask_cache")
     monkeypatch.setattr(rag_eval, "load_documents", lambda: [dict(d) for d in CORPUS])
     monkeypatch.setattr(settings, "llm_reask", True)
+    # The code default: the re-ask cache's legacy-key migration depends on it.
+    monkeypatch.setattr(settings, "llm_reasoning_effort", "auto")
     monkeypatch.setattr(FakeGenerator, "reask_calls", [])
     for var in RAG_ENV:
         monkeypatch.delenv(var, raising=False)
@@ -686,7 +688,7 @@ def test_daily_token_budget_exhausted_is_not_a_rate_limit_error():
 @pytest.mark.parametrize("source", ["generate", "judge"])
 def test_daily_cap_stops_the_run_without_retry_or_writing(rate_limited, source):
     setup, sleeps, out = rate_limited
-    gen, fake_judge = setup(source, "claim three", [rate_limit_error(TPD_MESSAGE)])
+    gen, fake_judge = setup(source, "Three claim holds.", [rate_limit_error(TPD_MESSAGE)])
     with pytest.raises(SystemExit) as exc:
         rag_eval.main()
     msg = str(exc.value.code)
@@ -694,8 +696,8 @@ def test_daily_cap_stops_the_run_without_retry_or_writing(rate_limited, source):
     assert "tokens per day (TPD)" in msg
     # No retry: no rate-limit wait, and the failing query was attempted exactly once.
     assert WAIT_S not in sleeps
-    assert [q for q, _ in gen.calls].count("claim three") == 1
-    assert fake_judge.queries.count("claim three") == (1 if source == "judge" else 0)
+    assert [q for q, _ in gen.calls].count("Three claim holds.") == 1
+    assert fake_judge.queries.count("Three claim holds.") == (1 if source == "judge" else 0)
     # A partial run never overwrites the committed artifact.
     assert not (out / "rag.json").exists()
     assert not (out / "rag.md").exists()
@@ -706,15 +708,15 @@ def test_daily_cap_stops_the_run_without_retry_or_writing(rate_limited, source):
 def test_per_minute_rate_limit_retries_the_same_query(rate_limited, source):
     setup, sleeps, out = rate_limited
     fails = rag_eval.RATE_LIMIT_RETRIES - 1  # succeeds on the last allowed attempt
-    gen, fake_judge = setup(source, "claim two", [rate_limit_error(TPM_MESSAGE)] * fails)
+    gen, fake_judge = setup(source, "Two claim holds.", [rate_limit_error(TPM_MESSAGE)] * fails)
     rag_eval.main()  # completes: no SystemExit
     assert sleeps.count(WAIT_S) == fails
     # Only the rate-limited step retries, for the SAME query with the same hits: a judge
     # 429 must not re-run (and, on a paid generator, re-pay for) a finished generation.
-    tries = [hits for q, hits in gen.calls if q == "claim two"]
+    tries = [hits for q, hits in gen.calls if q == "Two claim holds."]
     assert len(tries) == (fails + 1 if source == "generate" else 1)
     assert all(h == tries[0] for h in tries)
-    judge_tries = fake_judge.queries.count("claim two")
+    judge_tries = fake_judge.queries.count("Two claim holds.")
     assert judge_tries == (fails + 1 if source == "judge" else 1)
     # Every other query ran once, and the retried one is scored, not skipped.
     assert len(gen.calls) == len(QUERIES) + (fails if source == "generate" else 0)
@@ -728,10 +730,10 @@ def test_per_minute_rate_limit_retries_the_same_query(rate_limited, source):
 def test_per_minute_rate_limit_skips_the_query_once_retries_are_exhausted(rate_limited):
     setup, sleeps, out = rate_limited
     attempts = rag_eval.RATE_LIMIT_RETRIES + 1
-    gen, _ = setup("generate", "claim two", [rate_limit_error(TPM_MESSAGE)] * (attempts + 1))
+    gen, _ = setup("generate", "Two claim holds.", [rate_limit_error(TPM_MESSAGE)] * (attempts + 1))
     rag_eval.main()  # the run survives: the query is skipped, not fatal
     assert sleeps.count(WAIT_S) == rag_eval.RATE_LIMIT_RETRIES
-    assert [q for q, _ in gen.calls].count("claim two") == attempts
+    assert [q for q, _ in gen.calls].count("Two claim holds.") == attempts
     blob = json.loads((out / "rag.json").read_text())
     assert blob["skipped"] == 1 and blob["skip_reasons"] == {"RateLimitError": 1}
     assert {r["query_id"] for r in blob["rows"]} == set(QUERIES) - {"2"}
@@ -874,7 +876,7 @@ def test_auth_or_credit_errors_stop_the_run_instead_of_skipping(rate_limited, st
     request = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
     response = httpx.Response(status, request=request, json={"error": {"message": "nope"}})
     err = openai.APIStatusError("nope", response=response, body=None)
-    setup("generate", "claim two", [err])
+    setup("generate", "Two claim holds.", [err])
     with pytest.raises(SystemExit) as exc:
         rag_eval.main()
     assert "Nothing was written" in str(exc.value.code)
@@ -1056,7 +1058,7 @@ def test_resumed_output_matches_an_uninterrupted_run(rate_limited, tmp_path, mon
 
 def test_skipped_rows_are_not_checkpointed_and_are_retried(rate_limited, tmp_path):
     setup, _, out = rate_limited
-    gen, _ = setup("generate", "claim two", [RuntimeError("upstream 500")])
+    gen, _ = setup("generate", "Two claim holds.", [RuntimeError("upstream 500")])
     rag_eval.main()  # completes with the row skipped
     blob = json.loads((out / "rag.json").read_text())
     assert blob["skipped"] == 1 and "2" not in {r["query_id"] for r in blob["rows"]}
@@ -1064,20 +1066,20 @@ def test_skipped_rows_are_not_checkpointed_and_are_retried(rate_limited, tmp_pat
     assert "2" not in json.loads(ckpt.read_text())["rows"]
     gen2, _ = setup("generate", None, [])
     rag_eval.main()
-    assert [q for q, _ in gen2.calls] == ["claim two"]  # only the skipped row re-runs
+    assert [q for q, _ in gen2.calls] == ["Two claim holds."]  # only the skipped row re-runs
     blob = json.loads((out / "rag.json").read_text())
     assert blob["n"] == 5 and blob["skipped"] == 0
 
 
 def test_unparseable_judge_rows_are_not_checkpointed(rate_limited, tmp_path):
     setup, _, out = rate_limited
-    setup("judge", "claim four", [JudgeParseError("garbage")])
+    setup("judge", "Four claim holds.", [JudgeParseError("garbage")])
     rag_eval.main()
     (ckpt,) = _checkpoint_files(tmp_path)
     assert "4" not in json.loads(ckpt.read_text())["rows"]
     gen2, _ = setup("generate", None, [])
     rag_eval.main()
-    assert [q for q, _ in gen2.calls] == ["claim four"]
+    assert [q for q, _ in gen2.calls] == ["Four claim holds."]
 
 
 @pytest.mark.parametrize(
@@ -1259,14 +1261,14 @@ def test_judge_raises_empty_completion_on_null_or_empty_choices(choices):
 def test_empty_completion_retries_the_same_query(rate_limited, source):
     setup, sleeps, out = rate_limited
     fails = rag_eval.RATE_LIMIT_RETRIES - 1
-    gen, fake_judge = setup(source, "claim two", [_empty()] * fails)
+    gen, fake_judge = setup(source, "Two claim holds.", [_empty()] * fails)
     rag_eval.main()
     assert sleeps.count(WAIT_S) == fails
     # A judge-side empty completion retries only the judge: the finished generation
     # is not re-run (or re-paid for).
-    gen_tries = [q for q, _ in gen.calls].count("claim two")
+    gen_tries = [q for q, _ in gen.calls].count("Two claim holds.")
     assert gen_tries == (fails + 1 if source == "generate" else 1)
-    assert fake_judge.queries.count("claim two") == (fails + 1 if source == "judge" else 1)
+    assert fake_judge.queries.count("Two claim holds.") == (fails + 1 if source == "judge" else 1)
     blob = json.loads((out / "rag.json").read_text())
     assert blob["skipped"] == 0 and blob["n"] == len(QUERIES)
 
@@ -1277,26 +1279,26 @@ def test_empty_completion_skips_uncheckpointed_once_retries_are_exhausted(
 ):
     setup, sleeps, out = rate_limited
     attempts = rag_eval.RATE_LIMIT_RETRIES + 1
-    gen, fake_judge = setup(source, "claim two", [_empty()] * (attempts + 1))
+    gen, fake_judge = setup(source, "Two claim holds.", [_empty()] * (attempts + 1))
     rag_eval.main()  # survives: the row is skipped
     assert sleeps.count(WAIT_S) == rag_eval.RATE_LIMIT_RETRIES
     if source == "judge":
-        assert [q for q, _ in gen.calls].count("claim two") == 1
-        assert fake_judge.queries.count("claim two") == attempts
+        assert [q for q, _ in gen.calls].count("Two claim holds.") == 1
+        assert fake_judge.queries.count("Two claim holds.") == attempts
     else:
-        assert [q for q, _ in gen.calls].count("claim two") == attempts
+        assert [q for q, _ in gen.calls].count("Two claim holds.") == attempts
     blob = json.loads((out / "rag.json").read_text())
     assert blob["skipped"] == 1 and blob["skip_reasons"] == {"EmptyCompletionError": 1}
     (ckpt,) = _checkpoint_files(tmp_path)
     assert "2" not in json.loads(ckpt.read_text())["rows"]  # a re-run retries it
     gen2, _ = setup("generate", None, [])
     rag_eval.main()
-    assert [q for q, _ in gen2.calls] == ["claim two"]
+    assert [q for q, _ in gen2.calls] == ["Two claim holds."]
 
 
 def test_empty_completion_naming_the_daily_cap_stops_the_run(rate_limited):
     setup, sleeps, out = rate_limited
-    gen, _ = setup("judge", "claim three",
+    gen, _ = setup("judge", "Three claim holds.",
                    [_empty("code 429 Rate limit exceeded: free-models-per-day")])
     with pytest.raises(SystemExit) as exc:
         rag_eval.main()
@@ -1431,7 +1433,7 @@ def _stored(answer, verdict=None, judge_answered=True, truncated=False, gold="CO
 
 
 def test_reparse_row_recovers_an_inline_verdict_and_rederives_everything():
-    r = rag_eval.reparse_row(_stored("Opposite effect [2]. Verdict: REFUTED [3]"), "a claim")
+    r = rag_eval.reparse_row(_stored("Opposite effect [2]. Verdict: REFUTED [3]"), "Statins lower LDL cholesterol.")
     assert (r["verdict"], r["verdict_source"], r["predicted_label"]) == ("REFUTED", "inline", "CONTRADICT")
     assert r["answered"] is True and r["answered_source"] == "verdict"
     assert r["abstention_class"] == "answered_with_evidence"
@@ -1440,7 +1442,7 @@ def test_reparse_row_recovers_an_inline_verdict_and_rederives_everything():
 
 def test_reparse_row_stance_overrides_the_judge_and_keeps_the_text():
     text = "The provided context does not discuss this. Passage [1] is about mice."
-    r = rag_eval.reparse_row(_stored(text, judge_answered=True, gold="NEI"), "a claim")
+    r = rag_eval.reparse_row(_stored(text, judge_answered=True, gold="NEI"), "Statins lower LDL cholesterol.")
     assert (r["verdict"], r["verdict_source"], r["predicted_label"]) == (
         "NOT ENOUGH EVIDENCE", "stance", "NEI")
     assert r["answered"] is False and r["abstention_class"] == "false_abstention"
@@ -1460,10 +1462,10 @@ def test_reparse_row_leaves_parsed_and_unrecoverable_rows_alone():
 def test_reparse_row_handles_the_truncation_note():
     note = rag_eval.TRUNCATION_NOTE
     cut = _stored(f"The context directly contradicts the claim [1]. It then\n\n{note}", truncated=True)
-    r = rag_eval.reparse_row(cut, "a claim")
+    r = rag_eval.reparse_row(cut, "Statins lower LDL cholesterol.")
     assert r["verdict"] == "REFUTED" and r["answer"].endswith(note)
     empty = _stored(note, truncated=True)
-    assert rag_eval.reparse_row(empty, "a claim")["verdict"] is None
+    assert rag_eval.reparse_row(empty, "Statins lower LDL cholesterol.")["verdict"] is None
 
 
 def test_resume_applies_the_current_parser_with_no_llm_call(rate_limited, tmp_path):
@@ -1472,7 +1474,7 @@ def test_resume_applies_the_current_parser_with_no_llm_call(rate_limited, tmp_pa
     rag_eval.main()
     (ckpt,) = _checkpoint_files(tmp_path)
     blob = json.loads(ckpt.read_text())
-    qid = next(q for q, r in blob["rows"].items() if r["answer"] == REPLIES["claim five"])
+    qid = next(q for q, r in blob["rows"].items() if r["answer"] == REPLIES["Five claim holds."])
     # A row checkpointed by an older parser: no verdict, reply ending "... Verdict: X".
     blob["rows"][qid].update(answer="Passage [1] reports the opposite [1]. Verdict: REFUTED",
                              verdict=None, predicted_label="NONE", answered_source="judge")
@@ -1511,7 +1513,7 @@ from app.eval.reply_cache import ReplyCache  # noqa: E402
 from app.generate.generator import REASK_MAX_TOKENS, REASK_NOTE, reask_prompt_hash  # noqa: E402
 from app.generate.prompts import reask_messages  # noqa: E402
 
-NO_VERDICT_CLAIMS = {"claim four", "claim five"}  # the two replies with no verdict
+NO_VERDICT_CLAIMS = {"Four claim holds.", "Five claim holds."}  # the two replies with no verdict
 
 
 def _reask_entries(tmp_path):
@@ -1549,17 +1551,193 @@ def test_reask_fires_once_per_claim_without_a_verdict_and_sets_it(tmp_path, monk
         tmp_path / "rag.md").read_text()
 
 
-def test_reask_replies_are_cached_under_rag_secondlooks_keys(tmp_path, monkeypatch):
+def test_reask_replies_are_written_under_v2_keys_only(tmp_path, monkeypatch):
     _patch_main(tmp_path, monkeypatch, tmp_path)
     rag_eval.main()
+    gen_ep = rag_eval.resolve_endpoint("generator", require_key=False)
     hits = [SearchHit("d1", 1.0, "t1"), SearchHit("d2", 0.5, "t2")]
-    want = {
-        ReplyCache.key("reask", qid, DEFAULT_GEN_MODEL, REASK_MAX_TOKENS, reask_messages(QUERIES[qid], hits))
-        for qid in ("4", "5")
-    }
+    msgs = {qid: reask_messages(QUERIES[qid], hits) for qid in ("4", "5")}
     entries = _reask_entries(tmp_path)
-    assert set(entries) == want
-    assert all(e["kind"] == "reask" and e["max_tokens"] == REASK_MAX_TOKENS for e in entries.values())
+    assert set(entries) == {rag_eval.reask_key_v2(qid, gen_ep, m) for qid, m in msgs.items()}
+    assert not {rag_eval.reask_key(qid, gen_ep.model, m) for qid, m in msgs.items()} & set(entries)
+    assert all(k.startswith("reask|v2|") for k in entries)
+    fp = rag_eval.reask_request_fingerprint(gen_ep)
+    assert all(e["kind"] == "reask" and e["max_tokens"] == REASK_MAX_TOKENS
+               and e["key_version"] == 2 and e["request"] == fp for e in entries.values())
+
+
+# --- re-ask cache keys: v2 (endpoint fingerprint) + the legacy-key migration ---------------
+
+CANON_GEN_MODEL = rag_eval.default_endpoints()[0][1]
+GROQ_URL = "https://api.groq.com/openai/v1"
+REASK_MSGS = [{"role": "system", "content": "s"}, {"role": "user", "content": "claim"}]
+
+
+def _canon_ep(model=CANON_GEN_MODEL):
+    return LLMEndpoint("generator", "openrouter", "https://openrouter.ai/api/v1", model)
+
+
+@pytest.fixture()
+def auto_effort(monkeypatch):
+    monkeypatch.setattr(settings, "llm_reasoning_effort", "auto")
+
+
+def test_reask_lookup_takes_a_legacy_entry_only_for_the_canonical_endpoint(tmp_path, auto_effort):
+    cache = ReplyCache(tmp_path / "c.json")
+    cache.put(rag_eval.reask_key("7", CANON_GEN_MODEL, REASK_MSGS), {"raw": "Verdict: SUPPORTED"})
+    canon = _canon_ep()
+    assert rag_eval.is_legacy_reask_endpoint(canon)
+    assert rag_eval.reask_lookup(cache, "7", canon, REASK_MSGS)["raw"] == "Verdict: SUPPORTED"
+    # Same model id + messages on another provider: the legacy key would collide, so the
+    # migration never reads it there.
+    groq = LLMEndpoint("generator", "groq", GROQ_URL, CANON_GEN_MODEL)
+    assert not rag_eval.is_legacy_reask_endpoint(groq)
+    assert rag_eval.reask_lookup(cache, "7", groq, REASK_MSGS) is None
+    assert rag_eval.reask_lookup(cache, "8", canon, REASK_MSGS) is None  # other claim
+
+
+def test_reask_lookup_v2_hits_and_is_endpoint_specific(tmp_path, auto_effort):
+    cache = ReplyCache(tmp_path / "c.json")
+    groq = LLMEndpoint("generator", "groq", GROQ_URL, CANON_GEN_MODEL)
+    cache.put(rag_eval.reask_key_v2("7", groq, REASK_MSGS), {"raw": "Verdict: REFUTED"})
+    assert rag_eval.reask_lookup(cache, "7", groq, REASK_MSGS)["raw"] == "Verdict: REFUTED"
+    assert rag_eval.reask_lookup(cache, "7", _canon_ep(), REASK_MSGS) is None
+    other_url = LLMEndpoint("generator", "groq", "http://localhost:11434/v1", CANON_GEN_MODEL)
+    assert rag_eval.reask_lookup(cache, "7", other_url, REASK_MSGS) is None
+    # v2 wins over a legacy entry for the same request on the canonical endpoint.
+    canon = _canon_ep()
+    cache.put(rag_eval.reask_key("7", CANON_GEN_MODEL, REASK_MSGS), {"raw": "legacy"})
+    cache.put(rag_eval.reask_key_v2("7", canon, REASK_MSGS), {"raw": "v2"})
+    assert rag_eval.reask_lookup(cache, "7", canon, REASK_MSGS)["raw"] == "v2"
+
+
+def test_v2_key_covers_reasoning_effort_temperature_and_routing(monkeypatch, auto_effort):
+    canon = _canon_ep()
+    base = rag_eval.reask_key_v2("7", canon, REASK_MSGS)
+    fp = rag_eval.reask_request_fingerprint(canon)
+    assert fp == {
+        "provider": "openrouter", "base_url": "https://openrouter.ai/api/v1",
+        "model": CANON_GEN_MODEL, "reasoning_effort": None, "temperature": 0.1,
+        "extra_body": rag_eval.LEGACY_REASK_EXTRA_BODY,
+    }
+    monkeypatch.setattr(settings, "llm_reasoning_effort", "high")
+    assert rag_eval.reask_key_v2("7", canon, REASK_MSGS) != base
+    assert not rag_eval.is_legacy_reask_endpoint(canon)  # an explicit effort: no migration
+    monkeypatch.setattr(settings, "llm_reasoning_effort", "auto")
+    monkeypatch.setattr(rag_eval, "generation_temperature", lambda m: None)
+    assert rag_eval.reask_key_v2("7", canon, REASK_MSGS) != base
+    assert not rag_eval.is_legacy_reask_endpoint(canon)
+    monkeypatch.undo()
+    monkeypatch.setattr(settings, "llm_reasoning_effort", "auto")
+    monkeypatch.setattr(LLMEndpoint, "extra_body", lambda self: {"provider": {"sort": "price"}})
+    assert rag_eval.reask_key_v2("7", canon, REASK_MSGS) != base
+    assert not rag_eval.is_legacy_reask_endpoint(canon)
+
+
+def test_main_off_the_canonical_endpoint_ignores_legacy_entries_and_writes_v2(
+    rate_limited, tmp_path, monkeypatch
+):
+    # Legacy entries the canonical endpoint would hit; with the endpoint treated as
+    # non-canonical (as a Groq / re-routed one is) main must fetch fresh, under v2 keys.
+    setup, _, out = rate_limited
+    setup("generate", None, [])
+    settings.llm_reask = False
+    rag_eval.main()
+    setup("generate", None, [])
+    hits = rag_eval.reask_hits(["d1", "d2"], {d["doc_id"]: d for d in CORPUS})
+    cache = ReplyCache(tmp_path / "reask_cache" / "beir-scifact-test.json")
+    for qid in ("4", "5"):
+        msgs = reask_messages(QUERIES[qid], hits)
+        cache.put(rag_eval.reask_key(qid, DEFAULT_GEN_MODEL, msgs),
+                  {"raw": "Verdict: SUPPORTED [2]", "finish_reason": "stop", "kind": "reask"})
+    monkeypatch.setattr(rag_eval, "is_legacy_reask_endpoint", lambda ep: False)
+    rag_eval.main()
+    assert len(FakeGenerator.reask_calls) == 2  # the legacy entries were not taken
+    entries = _reask_entries(tmp_path)
+    assert sum(k.startswith("reask|v2|") for k in entries) == 2
+
+
+# --- faithfulness: re-ask-only answers whose first reply was a placeholder -----------------
+
+
+def _reask_row(first_answer, faith=0.0, answered=True, flag=None, display=None):
+    r = {**row(answered=answered, evidence=True, faith=faith), "verdict_source": "reask",
+         "answer": display if display is not None else REASK_NOTE,
+         "first_pass": {"answer": first_answer}}
+    if flag is not None:
+        r["judge_scored_placeholder"] = flag
+    return r
+
+
+def test_faithfulness_leaves_out_reask_answers_judged_on_a_placeholder():
+    rows = [
+        row(answered=True, evidence=True, faith=0.9),
+        _reask_row(TRUNCATED_ANSWER, flag=True),             # flagged (fresh run)
+        _reask_row(TRUNCATED_ANSWER),                         # committed rows: no flag
+        _reask_row("", display="Verdict-stripped text"),     # detected via first_pass
+        _reask_row("Real prose [1].", faith=0.7, display="Real prose [1]."),  # judged
+        _reask_row(TRUNCATED_ANSWER, answered=False),         # abstained: not in the mean
+    ]
+    agg = aggregate(rows)
+    assert agg["faithfulness_answered"] == 0.8
+    assert agg["faithfulness_n"] == 2 and agg["faithfulness_unjudged_reask"] == 3
+    assert agg["context_relevance"] == 1.0  # over ALL rows, placeholders included
+    # The cause is read from the rows: 2 first replies hit the token budget, 1 was empty.
+    md = rag_eval._markdown(agg, 0, 0, rows=rows)
+    assert ("| Faithfulness (over answered, n=2; 3 answered only via the re-ask excluded — the "
+            "first reply hit the token budget with no text left (2) or was empty (1), so the "
+            "judge saw no answer text) | 0.80 |") in md
+    only_cut = rows[:3] + rows[4:]  # the empty-first-reply row dropped
+    agg_cut = aggregate(only_cut)
+    assert ("2 answered only via the re-ask excluded — the first reply hit the token budget "
+            "with no text left, so the judge saw no answer text") in rag_eval._markdown(
+                agg_cut, 0, 0, rows=only_cut)
+    # Without the rows the writer names no cause it cannot see.
+    assert "the first reply had no judgeable text" in rag_eval._markdown(agg, 0, 0)
+    clean = aggregate([row(answered=True, evidence=True, faith=0.9)])
+    assert clean["faithfulness_unjudged_reask"] == 0 and clean["faithfulness_n"] == 1
+    assert "| Faithfulness (over answered) | 0.90 |" in rag_eval._markdown(clean, 0, 0)
+
+
+def test_apply_reask_flags_a_placeholder_and_recomputes_citations():
+    base = {"query_id": "1", "verdict": None, "verdict_source": None, "predicted_label": "NEI",
+            "answered": False, "answered_source": "judge", "abstention_class": "false_abstention",
+            "abstention_class_qrels": "false_abstention", "evidence": True, "evidence_qrels": True,
+            "retrieved_doc_ids": ["d1", "d2"]}
+    rec = {"raw": "Verdict: SUPPORTED [1]", "finish_reason": "stop"}
+    empty = rag_eval.apply_reask({**base, "answer": TRUNCATED_ANSWER, "cited_doc_ids": []}, rec)
+    assert empty["judge_scored_placeholder"] is True and empty["cited_doc_ids"] == []
+    assert rag_eval.judge_scored_placeholder(empty)
+    prose = rag_eval.apply_reask({**base, "answer": "Passage [2] says so.", "cited_doc_ids": []}, rec)
+    assert prose["judge_scored_placeholder"] is False and prose["cited_doc_ids"] == ["d2"]
+    assert not rag_eval.judge_scored_placeholder(prose)
+    assert "judge_scored_placeholder" not in rag_eval.first_pass_row(prose)
+
+
+def test_quote_stats_count_rows_without_the_key_as_unknown():
+    rows = [{**row(answered=True, evidence=True), "quote_found": True},
+            {**row(answered=True, evidence=True), "quote_found": None},
+            {**row(answered=True, evidence=True, pred="NEI"), "quote_found": None},
+            row(answered=True, evidence=True)]  # legacy / resumed row: no key at all
+    q = rag_eval._quote_stats(rows)
+    assert {k: v["n"] for k, v in q.items()} == {"found": 1, "not_found": 0, "no_quote": 2, "unknown": 1}
+    assert q["no_quote"]["verdict_accuracy"] == 0.5 and q["unknown"]["verdict_accuracy"] == 1.0
+
+
+def test_rescore_refuses_any_path_under_eval_results(tmp_path, monkeypatch):
+    from app.eval import rag_rescore
+
+    results = tmp_path / "results"
+    (results / "sub").mkdir(parents=True)
+    monkeypatch.setattr(rag_eval, "OUT", results)
+    link = tmp_path / "innocent"
+    link.symlink_to(results, target_is_directory=True)
+    for dst in (results / "rag.json", results / "sub" / "deep" / "rag.json",
+                tmp_path / "elsewhere" / ".." / "results" / "x.json", link / "rag.json", results):
+        with pytest.raises(SystemExit, match="refusing"):
+            rag_rescore.main(["in.json", str(dst)])
+    assert not rag_rescore.is_under_results(tmp_path / "results_other" / "rag.json")
+    assert not rag_rescore.is_under_results(tmp_path / "runs" / "rag.json")
 
 
 def test_rerun_from_a_complete_checkpoint_reasks_from_the_cache_with_no_llm_call(rate_limited, tmp_path):
@@ -1688,3 +1866,62 @@ def test_request_estimate_adds_reasks():
     assert est["free_requests"] == 26 and est["free_requests_worst"] == 10 * 4 + 3
     off = rag_eval.request_estimate(10, gen, judge_ep, 12.0, 0.2, reask_rate=0.1, reask_pending=3)
     assert off["requests"] == 22 and off["reask_pending"] == 0
+
+
+def test_reparse_row_reads_no_stance_for_a_keyword_query():
+    # Same gate as generate(): a keyword query or an instruction is not a claim to judge.
+    text = "The passages support the claim [1]."
+    assert rag_eval.reparse_row(_stored(text), "Statins lower LDL cholesterol.")["verdict"] == "SUPPORTED"
+    for q in ("BRCA1 breast cancer risk", "Explain how statins lower LDL"):
+        assert rag_eval.reparse_row(_stored(text), q)["verdict"] is None
+
+
+# --- rag.md notes derived from the rows, and the offline re-render ---------------------------
+
+
+def test_truncation_note_breaks_the_count_down_from_the_rows():
+    cut = {"truncated": True}
+    rows = [
+        {**row(True, True), **cut, "verdict_source": "reask"},
+        {**row(True, True), **cut, "verdict_source": "reask"},
+        {**row(True, True), **cut, "verdict_source": "stance"},
+        {**row(False, True, verdict=None, pred="NEI"), **cut, "verdict_source": None},
+        row(True, True),  # not truncated: not counted
+    ]
+    agg = aggregate(rows)
+    assert agg["truncated_answers"] == 4
+    md = rag_eval._markdown(agg, 0, 0, rows=rows)
+    assert ("4 answers truncated at the token budget (of those, 2 got a verdict from the "
+            "verdict-only re-ask, 1 kept a verdict parsed from the text before the cut-off, 1 "
+            "was scored with no verdict).") in md
+    only_none = [rows[3]]
+    assert ("1 answer truncated at the token budget (of those, 1 was scored with no verdict)."
+            in rag_eval._markdown(aggregate(only_none), 0, 0, rows=only_none))
+    # Without the rows: the count only, no claim about verdicts it cannot see.
+    assert "4 answers truncated at the token budget.\n" in rag_eval._markdown(agg, 0, 0)
+    assert "scored as written" not in md
+
+
+def test_render_md_rewrites_only_the_markdown_from_the_stored_json(tmp_path, capsys):
+    rows = [{**row(True, True), "truncated": True, "verdict_source": "reask"}, row(False, False)]
+    agg = aggregate(rows, "gen-m", "judge-m", "openrouter", "openrouter")
+    blob = {**agg, "skipped": 0, "judge_parse_failures": 0,
+            "run": {"dataset": "beir/scifact/test"}, "rows": rows}
+    src = tmp_path / "rag.json"
+    src.write_text(json.dumps(blob, indent=2))
+    before = src.read_bytes()
+    rag_eval.main(["--render-md", str(src)])  # no endpoint, no retrieval, no LLM
+    assert src.read_bytes() == before
+    md = (tmp_path / "rag.md").read_text()
+    assert md == rag_eval._markdown(agg, 0, 0, "beir/scifact/test", rows)
+    assert "1 answer truncated at the token budget (of those, 1 got a verdict" in md
+    assert "Wrote" in capsys.readouterr().out
+
+
+def test_committed_rag_md_is_the_render_of_the_committed_json():
+    path = rag_eval.OUT / "rag.json"
+    if not path.exists():
+        pytest.skip("no committed rag.json")
+    md = (rag_eval.OUT / "rag.md").read_text()
+    assert rag_eval.markdown_from_json(json.loads(path.read_text())) == md
+    assert "empty first reply" not in md and "scored as written" not in md

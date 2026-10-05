@@ -395,7 +395,7 @@ def test_pubmed_papers_join_the_pool_and_lend_missing_abstracts():
     keep = WebSearch(FakeS2(dict(s2.by_query)), pubmed=FakePubMed(pm.papers), resolver=FakeResolver(),
                      keep_no_abstract=True)
     assert {h.doc_id for h in keep.search("alpha", 10)} == {"1", "2", "3", "pmid:99"}
-    assert web.last_errors == []
+    assert web.run("alpha", 10).errors == []
 
 
 def test_pooled_search_ranks_papers_found_by_both_sources_first_and_cuts_to_top_k():
@@ -413,13 +413,14 @@ def test_multi_query_sends_extra_keyword_queries_to_s2():
     assert extras and not set(extras) & set(rewrites)
     s2 = FakeS2({extras[0]: [paper(7, "Extra hit", "extra abstract")], rewrites[0]: [paper(1, "Base", "base")]})
     web = WebSearch(s2, rewrite=True, multi_query=2)
-    out = web.search(CLAIM, 10)
+    res = web.run(CLAIM, 10)
+    out = res.hits
     sent = [q for q, _ in s2.calls]
     assert sent[: len(rewrites)] == rewrites and sent[len(rewrites):] == extras
     assert all(limit == 100 for _, limit in s2.calls)
     assert {h.doc_id for h in out} == {"1", "7"}
     assert {h.doc_id: h.metadata["sources"] for h in out} == {"1": ["s2"], "7": ["s2_multi"]}
-    assert len(web.last_entries) == len(sent)
+    assert len(res.entries) == len(sent)
     # Without rewrite there are no extra keyword queries: only the claim goes out.
     s2 = FakeS2({CLAIM: [paper(1, "Base", "base")]})
     WebSearch(s2, multi_query=2).search(CLAIM, 10)
@@ -454,17 +455,16 @@ def test_a_failing_extra_source_is_skipped_unless_strict(source, monkeypatch):
         return WebSearch(s2, **kw)
 
     web = build(strict=False)
-    out = web.search(CLAIM, 10)
-    assert [h.doc_id for h in out] == ["1"]  # the S2 base results still come back
-    assert len(web.last_errors) >= 1 and web.last_errors[0].split(":")[0] in {
+    res = web.run(CLAIM, 10)
+    assert [h.doc_id for h in res.hits] == ["1"]  # the S2 base results still come back
+    assert len(res.errors) >= 1 and res.errors[0].split(":")[0] in {
         "s2_multi", "pubmed", "snippets", "resolve", "citations"}
     with pytest.raises((S2Error, SourceError)):
         build(strict=True).search(CLAIM, 10)
-    # last_errors is per search: a later clean search clears it.
+    # Errors belong to the request that hit them: a later clean search reports none.
     if source == "pubmed":
         web.pubmed.error = None
-        web.search(CLAIM, 10)
-        assert web.last_errors == []
+        assert web.run(CLAIM, 10).errors == []
 
 
 def test_a_failing_base_s2_query_always_raises_even_with_extra_sources():
@@ -472,7 +472,9 @@ def test_a_failing_base_s2_query_always_raises_even_with_extra_sources():
     web = WebSearch(FakeS2(error_on={CLAIM}), pubmed=pm, resolver=FakeResolver())  # strict=False
     with pytest.raises(S2Error):
         web.search(CLAIM, 10)
-    assert pm.calls  # the PubMed worker was started, and joined before the error surfaced
+    # The PubMed worker is never joined (test_web_concurrency): one not yet started is
+    # cancelled, one already running finishes its single call. Never more than that.
+    assert len(pm.calls) <= 1
     with pytest.raises(S2Error):
         WebSearch(FakeS2(error_on={CLAIM}), multi_query=1, strict=True).search(CLAIM, 10)
 
@@ -480,8 +482,9 @@ def test_a_failing_base_s2_query_always_raises_even_with_extra_sources():
 def test_snippet_papers_are_resolved_into_the_pool(monkeypatch):
     seen = {}
 
-    def fake_snippets(s2, query, limit, cache):
+    def fake_snippets(s2, query, limit, cache, **kw):
         seen["args"] = (s2, query, limit, cache)
+        seen["kw"] = kw
         return [_pm(0, "Snip", "snippet abstract", corpus_id="42", source="s2_snippet")]
 
     monkeypatch.setattr(s2_extra, "snippet_search", fake_snippets)
@@ -559,7 +562,8 @@ def test_web_extras_defaults_add_nothing(monkeypatch):
     from app.retrieve.service import web_extras
 
     for name, value in [("s2_multi_query", 0), ("web_pubmed", False), ("web_snippets", False),
-                        ("web_citation_seeds", 0), ("web_citation_cap", 30), ("web_dense_cap", 0)]:
+                        ("web_citation_seeds", 0), ("web_citation_cap", 30), ("web_dense_cap", 0),
+                        ("web_api_dense_cap", 0)]:
         monkeypatch.setattr(settings, name, value)
     kw = web_extras(_offline_s2())
     assert kw["multi_query"] == 0 and kw["snippets"] is False and kw["citation_seeds"] == 0
@@ -576,7 +580,8 @@ def test_web_extras_builds_pubmed_and_resolver_from_settings(monkeypatch):
 
     for name, value in [("s2_multi_query", 2), ("web_pubmed", True), ("web_snippets", True),
                         ("web_citation_seeds", 3), ("web_citation_cap", 12), ("web_dense_cap", 40),
-                        ("s2_api_cache", False)]:
+                        ("web_api_dense_cap", 0), ("s2_api_cache", False),
+                        ("web_snippet_dataset_filter", False)]:
         monkeypatch.setattr(settings, name, value)
     s2 = _offline_s2()
     kw = web_extras(s2)

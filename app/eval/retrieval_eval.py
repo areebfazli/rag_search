@@ -31,6 +31,7 @@ import time
 from pathlib import Path
 
 from app.core.config import Settings, settings
+from app.core.paths import RESULTS, assert_outside
 from app.ingest.build_index import MANIFEST_PATH
 from app.ingest.corpus import load_queries_qrels
 from app.retrieve.service import SearchService
@@ -60,7 +61,7 @@ DEPTH = 100  # first-stage candidate depth = result depth (enough for Recall@100
 MAX_P = 0.05  # significance threshold for the paired tests
 CHECKPOINT_EVERY = 20  # persist partial progress this often (cross-encoders are slow)
 
-OUT = Path("eval/results")  # canonical run only — the committed artifact
+OUT = RESULTS  # canonical run only — the committed artifact (repo-anchored, not cwd)
 RUNS = Path("data/eval_runs")  # every other run (gitignored)
 CACHE = Path("data/eval_cache")
 # Only a full run on this split may write to OUT. Read off the Settings field default
@@ -135,7 +136,7 @@ def _output_dir(limit: int, n_queries: int) -> tuple[Path, bool]:
     if not limit and settings.eval_dataset == CANONICAL_DATASET:
         return OUT, True
     slug = "".join(c if c.isalnum() else "-" for c in settings.eval_dataset).strip("-")
-    return RUNS / f"{slug}_{n_queries}", False
+    return assert_outside(RUNS / f"{slug}_{n_queries}"), False
 
 
 def cached_run(

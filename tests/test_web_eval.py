@@ -79,9 +79,26 @@ def test_to_run_is_rank_derived():
 
 def test_output_dir_guards_the_committed_artifact(monkeypatch):
     monkeypatch.setattr(settings, "eval_dataset", web_eval.CANONICAL_DATASET)
+    monkeypatch.delenv("SSR_WEB_EVAL_POOL", raising=False)
+    monkeypatch.delenv("SSR_WEB_EVAL_ALLOW_UNMAPPED", raising=False)
     assert web_eval.output_dir(0, 300) == (web_eval.OUT, True)
     out, canonical = web_eval.output_dir(2, 2)
     assert not canonical and out.parent == web_eval.RUNS and out.name.startswith("web_")
+
+
+@pytest.mark.parametrize("env,suffix", [
+    ({"SSR_WEB_EVAL_POOL": "0"}, "_nopool"),
+    ({"SSR_WEB_EVAL_ALLOW_UNMAPPED": "1"}, "_unmapped"),
+    ({"SSR_WEB_EVAL_POOL": "0", "SSR_WEB_EVAL_ALLOW_UNMAPPED": "1"}, "_nopool_unmapped"),
+])
+def test_output_dir_refuses_the_committed_artifact_without_pool_or_with_unmapped_ids(monkeypatch, env, suffix):
+    monkeypatch.setattr(settings, "eval_dataset", web_eval.CANONICAL_DATASET)
+    monkeypatch.delenv("SSR_WEB_EVAL_POOL", raising=False)
+    monkeypatch.delenv("SSR_WEB_EVAL_ALLOW_UNMAPPED", raising=False)
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    out, canonical = web_eval.output_dir(0, 300)
+    assert not canonical and out == web_eval.RUNS / f"web_beir-scifact-test_300{suffix}"
 
 
 CLAIM_ONE = "Zeta kinase activates macrophages via lysosomal cathepsin."
@@ -153,17 +170,23 @@ def _patch_main(monkeypatch, tmp_path, requests):
     return embedders
 
 
+def _nopool_dir(tmp_path):
+    return tmp_path / "runs" / "web_beir-scifact-test_2_nopool"
+
+
 def test_main_end_to_end_on_fakes_and_resumes_from_cache(monkeypatch, tmp_path):
     requests: list = []
     embedders = _patch_main(monkeypatch, tmp_path, requests)
     assert web_eval.main() == 0
+    # SSR_WEB_EVAL_POOL=0 lacks the pooled rows: never the committed eval/results/.
+    assert not (tmp_path / "results").exists()
     sent = [r.url.params.get("query") for r in requests if r.url.path.endswith("/search")]
     # 1 mapping batch + 2 raw claims + 2 rewrite primaries + 2 pooled fallbacks (neither
     # primary filled the page). The rerank rows reuse these responses: no extra requests.
     assert len(requests) == 7 and len(sent) == 6
     assert CLAIM_ONE in sent and CLAIM_TWO in sent
     assert "Zeta kinase activates macrophages lysosomal cathepsin" in sent
-    blob = json.loads((tmp_path / "results" / "web_retrieval.json").read_text())
+    blob = json.loads((_nopool_dir(tmp_path) / "web_retrieval.json").read_text())
     assert blob["mapping"]["confirmed"] and blob["n_queries"] == 2
     assert blob["scores"]["web"]["recall@10"] == 0.5  # claim two's paper has no abstract
     assert blob["scores"]["web_any"]["recall@10"] == 1.0  # ...but S2 did find it
@@ -174,14 +197,14 @@ def test_main_end_to_end_on_fakes_and_resumes_from_cache(monkeypatch, tmp_path):
     assert blob["dropped_no_abstract"] == 1 and blob["fetched_from"]
     assert blob["rewrite"]["fallback_used"] == 2 and blob["rewrite"]["max_terms"] == MAX_TERMS
     assert blob["embeddings"]["computed"] > 0
-    assert "~200M papers" in (tmp_path / "results" / "web_retrieval.md").read_text()
+    assert "~200M papers" in (_nopool_dir(tmp_path) / "web_retrieval.md").read_text()
     assert len(embedders) == 1  # one embedder shared by every rerank row
 
     # A re-run is served entirely from the on-disk caches: zero requests, zero embeddings.
     assert web_eval.main() == 0
     assert len(requests) == 7
     assert embedders[-1].documents == []
-    blob = json.loads((tmp_path / "results" / "web_retrieval.json").read_text())
+    blob = json.loads((_nopool_dir(tmp_path) / "web_retrieval.json").read_text())
     assert blob["embeddings"]["computed"] == 0 and blob["embeddings"]["cached"] > 0
 
 
@@ -206,7 +229,7 @@ def test_sampled_run_is_never_canonical(monkeypatch, tmp_path):
     (run_dir,) = (tmp_path / "runs").iterdir()
     blob = json.loads((run_dir / "web_retrieval.json").read_text())
     assert blob["n_queries"] == 2 and blob["sample_seed"] == web_eval.SEED
-    assert run_dir.name == "web_beir-scifact-test_2"
+    assert run_dir.name == "web_beir-scifact-test_2_nopool"
 
 
 @pytest.mark.filterwarnings("ignore::RuntimeWarning")  # identical toy runs: zero-variance t-tests

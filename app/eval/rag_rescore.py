@@ -18,6 +18,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+from app.core.paths import is_within
 from app.eval import rag_eval
 from app.ingest.corpus import load_queries_qrels
 
@@ -43,6 +44,14 @@ def rescore(blob: dict, queries: dict[str, str]) -> dict:
     }
 
 
+def is_under_results(dst: Path) -> bool:
+    """True if `dst` lands anywhere under eval/results/ (rag_eval.OUT, anchored to the repo
+    root — not the cwd) — directly or in a nested subdir — once resolved, so absolute
+    paths, `..` segments, symlinked directories or files (dangling ones too) and other
+    aliases of the same directory are all caught (app.core.paths.is_within)."""
+    return is_within(dst, rag_eval.OUT)
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     ap = argparse.ArgumentParser(prog="python -m app.eval.rag_rescore",
                                  description=__doc__.split("\n")[0])
@@ -50,7 +59,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     ap.add_argument("dst", help="where to write the re-scored rag.json (never eval/results/)")
     args = ap.parse_args(sys.argv[1:] if argv is None else list(argv))
     src, dst = Path(args.src), Path(args.dst)
-    if dst.resolve().parent == rag_eval.OUT.resolve():
+    if is_under_results(dst):
         raise SystemExit(f"rag_rescore: refusing to write into {rag_eval.OUT}/ (the committed artifact)")
     blob = json.loads(src.read_text())
     queries, _ = load_queries_qrels(blob["run"]["dataset"])

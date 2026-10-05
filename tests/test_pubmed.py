@@ -477,3 +477,68 @@ def test_injected_fetcher_must_target_eutils():
                        default_params={"db": "pubmed", "tool": "rag_search"})
     src = PubMedSource(fetcher=mine)
     assert src.esearch("q") == ["9"] and src.requests_sent == 1
+
+
+# --- review fixes: optional NCBI email / api_key; efetch errors are not cached ---------
+
+
+def test_email_and_api_key_are_sent_only_when_set_and_never_cached(tmp_path, monkeypatch):
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "ncbi_email", "")
+    monkeypatch.setattr(settings, "ncbi_api_key", "")
+    fake = FakeEutils(esearch=[ok_search(1)], efetch=[ok_fetch(article(1))])
+    make(fake).search("vitamin b12")
+    assert all("email" not in r.url.params and "api_key" not in r.url.params for r in fake.requests)
+
+    cache = ResponseCache(tmp_path)
+    fake = FakeEutils(esearch=[ok_search(1)], efetch=[ok_fetch(article(1))])
+    src = make(fake, cache=cache, email=" dev@example.org ", api_key="ncbi-sekrit")
+    assert src.authenticated
+    src.search("vitamin b12")
+    assert all(r.url.params["email"] == "dev@example.org" and r.url.params["api_key"] == "ncbi-sekrit"
+               and r.url.params["tool"] == "rag_search" for r in fake.requests)
+    blob = "".join(p.read_text() for p in tmp_path.iterdir())
+    assert "ncbi-sekrit" not in blob and "dev@example.org" not in blob
+    # Same cache keys as a keyless source: the committed caches keep hitting.
+    offline = make(FakeEutils(esearch=[httpx.Response(500)], efetch=[httpx.Response(500)]), cache=cache,
+                   email="", api_key="")
+    assert [p.pmid for p in offline.search("vitamin b12")] == ["1"]
+
+
+def test_settings_supply_the_email_and_a_malformed_one_is_not_sent(monkeypatch):
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "ncbi_email", "dev@example.org")
+    monkeypatch.setattr(settings, "ncbi_api_key", "")
+    fake = FakeEutils(esearch=[ok_search()])
+    make(fake).search("x y")
+    assert fake.requests[0].url.params["email"] == "dev@example.org"
+    for bad in ("not an email", "a@b", "x @example.org", "a\n@b.c", "a@b@c.org"):
+        fake = FakeEutils(esearch=[ok_search()])
+        make(fake, email=bad).search("x y")
+        assert "email" not in fake.requests[0].url.params, bad
+
+
+def test_the_rate_cap_is_three_without_a_key_and_ten_with_one(monkeypatch):
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "ncbi_api_key", "")
+    with pytest.raises(ValueError):
+        PubMedSource(rate=5.0)
+    PubMedSource(rate=5.0, api_key="k", limiter=NoWaitLimiter())
+    with pytest.raises(ValueError):
+        PubMedSource(rate=11.0, api_key="k")
+
+
+def test_an_efetch_error_reply_is_not_cached(tmp_path):
+    cache = ResponseCache(tmp_path)
+    err = httpx.Response(200, text="<eFetchResult><ERROR>temporary backend failure</ERROR></eFetchResult>")
+    fake = FakeEutils(esearch=[ok_search(123)], efetch=[err])
+    src = make(fake, cache=cache, max_retries=0)
+    for _ in range(2):
+        with pytest.raises(SourceError):
+            src.search("vitamin b12")
+    assert sum(r.url.path.endswith("/efetch.fcgi") for r in fake.requests) == 2  # re-fetched
+    fake.efetch = [ok_fetch(article(123))]
+    assert [p.pmid for p in src.search("vitamin b12")] == ["123"]

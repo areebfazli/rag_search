@@ -61,7 +61,12 @@ query; "What Do Claim Verification Datasets Actually Test?" prints a claim follo
 ``exclude_quoting`` (default on) drops every paper that has a BODY snippet containing the
 whole normalised query, or that mentions "SciFact" in a snippet or its title. Body-only
 on purpose: a gold abstract may legitimately share a sentence with a claim. Passing
-``fields_of_study="Medicine,Biology"`` also removed the CS paper in the probe.
+``fields_of_study="Medicine,Biology"`` also removed the CS paper in the probe. A fuzzier
+second guard, ``DatasetSnippetFilter`` (``dataset_filter=``; on in the API), also drops a
+paper whose snippet carries dataset-dump formatting ("Claim: ...", "Evidence: ...",
+"Ground Truth: ...") where the text after such a label overlaps a SciFact claim (or the
+query) with token Jaccard >= 0.6 — a lightly reworded or re-cased claim printed as a
+dataset example, which the verbatim check misses.
 
 All S2 text is untrusted and goes through semantic_scholar.clean_untrusted.
 """
@@ -71,7 +76,7 @@ import json
 import re
 import sqlite3
 import threading
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -86,7 +91,9 @@ from app.retrieve.semantic_scholar import (
     S2Error,
     SemanticScholarRetriever,
     clean_untrusted,
+    is_error_body,
     normalize_query,
+    payload_error,
     safe_http_url,
 )
 from app.retrieve.web_sources import ExternalPaper, normalize_doi, normalize_pmid
@@ -112,6 +119,7 @@ NESTED_REFS_MAX_IDS = 100
 RESOLVE_FIELDS = "corpusId,title,abstract,url,year,externalIds"
 _ID_CACHE_FILE = "s2_ids.sqlite3"
 MAX_MEM_IDS = 50_000  # in-memory id cache cap (cleared when exceeded)
+_UNRESOLVED = object()  # _batch_split marker: lookup failed (persistent 400), not "unknown"
 
 _NON_ALNUM = re.compile(r"[^0-9a-z]+")
 _QUOTE_MIN_TOKENS = 4  # a verbatim match of a 1-3 word query says nothing
@@ -132,15 +140,29 @@ def _cached_request(
     params: dict,
     body: dict | None,
     cache: ResponseCache | None,
+    validate: Callable[[object], bool] | None = None,
 ) -> object:
-    """s2._request through a ResponseCache keyed by endpoint + params (+ JSON body)."""
+    """s2._request through a ResponseCache keyed by endpoint + params (+ JSON body).
+    With `validate`, a fresh payload that fails it raises S2Error BEFORE it is cached (a
+    wrong-shaped 200 must not be replayed forever), and a cached one that fails it is
+    treated as a miss."""
     key_params = {**params, **({"body": body} if body is not None else {})}
     if cache is not None and (hit := cache.get(path, key_params)) is not None:
-        return hit["response"]
+        if validate is None or validate(hit["response"]):
+            return hit["response"]
     payload = s2._request(method, path, params, body)
+    if validate is not None and not validate(payload):
+        raise S2Error(payload_error(payload))
     if cache is not None:
         cache.put(path, key_params, payload)
     return payload
+
+
+def _data_list(payload: object) -> bool:
+    """{"data": [...]} — the snippet search / citations page shape. A body without a
+    "data" list (e.g. an {"error": ...} object served with HTTP 200) is refused, so it
+    is never cached or read as "no results"."""
+    return isinstance(payload, dict) and not is_error_body(payload) and isinstance(payload.get("data"), list)
 
 
 def _batch(
@@ -148,10 +170,10 @@ def _batch(
 ) -> list:
     if len(ids) > S2_BATCH_MAX_IDS:
         raise ValueError(f"paper/batch takes at most {S2_BATCH_MAX_IDS} ids")
-    payload = _cached_request(s2, "POST", BATCH_PATH, {"fields": fields}, {"ids": list(ids)}, cache)
-    if not isinstance(payload, list) or len(payload) != len(ids):
-        raise S2Error("unexpected response shape")
-    return payload
+    return _cached_request(
+        s2, "POST", BATCH_PATH, {"fields": fields}, {"ids": list(ids)}, cache,
+        validate=lambda p: isinstance(p, list) and len(p) == len(ids),
+    )
 
 
 # --------------------------------------------------------------------------- A. snippets
@@ -185,11 +207,103 @@ def snippet_params(query: str, limit: int, fields_of_study: str | None = None) -
     return params
 
 
+_DATASET_LABEL = re.compile(
+    r"\b(claims?|evidence|rationale|ground\s+truth|verdict|labels?|gold\s+label)\s*:", re.IGNORECASE
+)
+_SENTENCE_END = re.compile(r"[.!?](?:\s|$)|\n")
+DATASET_JACCARD = 0.6
+_SEGMENT_MAX_TOKENS = 80
+
+
+def _token_set(text: str) -> frozenset[str]:
+    return frozenset(_norm_tokens(text).split())
+
+
+def _jaccard(a: frozenset[str], b: frozenset[str]) -> float:
+    return len(a & b) / len(a | b) if a and b else 0.0
+
+
+class DatasetSnippetFilter:
+    """Flags snippets that print a claim-verification dataset example: a dataset label
+    ("Claim:", "Evidence:", "Ground Truth:", "Rationale:", "Label:", "Verdict:") followed
+    by text whose token set has Jaccard >= `threshold` with a known claim (SciFact's, plus
+    the query being searched). The text compared is what follows each label up to the
+    next label or sentence end (<= 80 tokens), so a long snippet is not diluted.
+
+    Both conditions are required: a paper that merely shares words with a claim (any
+    gold abstract) has no dataset labels, and a methods section that says "evidence:"
+    does not repeat a claim."""
+
+    def __init__(self, claims: Iterable[str] = (), threshold: float = DATASET_JACCARD):
+        self.threshold = threshold
+        self._claims: list[frozenset[str]] = []
+        self._index: dict[str, list[int]] = {}
+        for c in claims:
+            self._add(_token_set(c))
+
+    def _add(self, toks: frozenset[str]) -> None:
+        if not toks:
+            return
+        i = len(self._claims)
+        self._claims.append(toks)
+        for t in toks:
+            self._index.setdefault(t, []).append(i)
+
+    def __len__(self) -> int:
+        return len(self._claims)
+
+    @classmethod
+    def from_scifact(cls, dataset: str | None = None) -> "DatasetSnippetFilter":
+        """Every SciFact claim (beir/scifact queries: train + test). If the dataset cannot
+        be loaded (e.g. an API image without ir_datasets data), the filter still checks
+        each query against itself."""
+        try:
+            import ir_datasets
+
+            from app.core.config import settings
+
+            ds = ir_datasets.load(dataset or settings.corpus_dataset)
+            return cls(q.text for q in ds.queries_iter())
+        except Exception:  # noqa: BLE001 - best effort; degrade to query-only
+            return cls()
+
+    def _segments(self, text: str) -> list[frozenset[str]]:
+        out = []
+        labels = list(_DATASET_LABEL.finditer(text))
+        for i, m in enumerate(labels):
+            end = labels[i + 1].start() if i + 1 < len(labels) else len(text)
+            seg = text[m.end():end]
+            if (stop := _SENTENCE_END.search(seg)) is not None:
+                seg = seg[: stop.start()]
+            toks = _norm_tokens(seg).split()[:_SEGMENT_MAX_TOKENS]
+            if toks:
+                out.append(frozenset(toks))
+        return out
+
+    def flags(self, text: object, query: str = "") -> bool:
+        """True if `text` looks like a dataset example of a known claim (or `query`)."""
+        if not isinstance(text, str) or not _DATASET_LABEL.search(text):
+            return False
+        q = _token_set(query)
+        for seg in self._segments(text):
+            if q and _jaccard(seg, q) >= self.threshold:
+                return True
+            cands = {i for t in seg for i in self._index.get(t, ())}
+            if any(_jaccard(seg, self._claims[i]) >= self.threshold for i in cands):
+                return True
+        return False
+
+
 def parse_snippets(
-    payload: object, query: str = "", *, exclude_quoting: bool = True
+    payload: object,
+    query: str = "",
+    *,
+    exclude_quoting: bool = True,
+    dataset_filter: DatasetSnippetFilter | None = None,
 ) -> tuple[list[SnippetPaper], list[str]]:
     """snippet/search payload -> (papers deduped by corpusId in first-appearance order,
-    corpus ids excluded as quoting the query / mentioning SciFact)."""
+    corpus ids excluded as quoting the query / mentioning SciFact / (with
+    `dataset_filter`) printing a dataset example of a claim)."""
     data = payload.get("data") if isinstance(payload, dict) else None
     if not isinstance(data, list):
         return [], []
@@ -214,6 +328,11 @@ def parse_snippets(
             if "scifact" in norm or "scifact" in _norm_tokens(raw_title) or (
                 check_quote and snip.get("snippetKind") == "body" and f" {q} " in f" {norm} "
             ):
+                excluded.append(cid)
+                excluded_set.add(cid)
+        if dataset_filter is not None and cid not in excluded_set:
+            raw_text = snip.get("text") if isinstance(snip.get("text"), str) else ""
+            if dataset_filter.flags(raw_text, query):
                 excluded.append(cid)
                 excluded_set.add(cid)
     papers: list[SnippetPaper] = []
@@ -245,22 +364,22 @@ def snippet_search(
     *,
     fields_of_study: str | None = None,
     exclude_quoting: bool = True,
+    dataset_filter: DatasetSnippetFilter | None = None,
 ) -> list[SnippetPaper]:
     """S2 full-text snippet search -> SnippetPapers (one per paper, best snippet kept).
 
     One request (``limit`` capped at 1000; 1000 snippets was ~2.6 MB / ~5 s in the probe,
     100 is ~250 KB). The raw response is cached in ``cache`` (falling back to
-    ``s2.cache``; both None = no caching) under endpoint + params. See the module
-    docstring for ``exclude_quoting`` and ``fields_of_study``.
+    ``s2.cache``; both None = no caching) under endpoint + params, only once its shape
+    checks out. See the module docstring for ``exclude_quoting``, ``dataset_filter`` and
+    ``fields_of_study``.
     """
     params = snippet_params(query, limit, fields_of_study)
     if not params["query"]:
         return []
     cache = cache if cache is not None else s2.cache
-    payload = _cached_request(s2, "GET", SNIPPET_PATH, params, None, cache)
-    if not isinstance(payload, dict) or not isinstance(payload.get("data", []), list):
-        raise S2Error("unexpected response shape")
-    return parse_snippets(payload, query, exclude_quoting=exclude_quoting)[0]
+    payload = _cached_request(s2, "GET", SNIPPET_PATH, params, None, cache, validate=_data_list)
+    return parse_snippets(payload, query, exclude_quoting=exclude_quoting, dataset_filter=dataset_filter)[0]
 
 
 # ------------------------------------------------------------------ B. citation graph
@@ -344,10 +463,9 @@ def expand_citations(
                     {"fields": "corpusId", "limit": min(max_cites, CITATIONS_PAGE_MAX), "offset": 0},
                     None,
                     cache,
+                    validate=_data_list,
                 )
-                data = page.get("data") if isinstance(page, dict) else None
-                if not isinstance(data, list):
-                    raise S2Error("unexpected response shape")
+                data = page["data"]
                 cites[cid] = _nested_ids(data, "citingPaper", max_cites)
                 continue
             if not nested or budget + n > NESTED_CITES_BUDGET or len(nested[-1]) >= S2_BATCH_MAX_IDS:
@@ -432,7 +550,9 @@ class S2IdResolver:
     results are written in one transaction (atomic); an unreadable/corrupt entry or file
     is a miss. So a bulk ``prefetch`` in the eval fills the cache and later per-claim
     calls send zero requests. A paper whose first id (CorpusId > PMID > DOI) resolves to
-    null is retried with its next id. Batch failures raise S2Error (caller decides).
+    null is retried with its next id. A persistent HTTP 400 on a minimal chunk leaves
+    those ids unresolved (None, not cached); other batch failures raise S2Error (caller
+    decides).
     """
 
     def __init__(self, s2: SemanticScholarRetriever, cache_dir: str | Path | None = None):
@@ -514,34 +634,46 @@ class S2IdResolver:
             c = canonical_id(s)
             if c is not None and c not in ids:
                 ids.append(c)
+        # The lock guards the in-memory dict only — never held across disk or network
+        # I/O, so concurrent requests resolving different ids do not serialise. Two
+        # requests missing the same id may both fetch it; the results are identical.
         with self._lock:
             if len(self._mem) > MAX_MEM_IDS:  # long-running API process: stay bounded
                 self._mem.clear()
             out = {i: self._mem[i] for i in ids if i in self._mem}
-            missing = [i for i in ids if i not in out]
-            disk = self._disk_get(missing)
+        missing = [i for i in ids if i not in out]
+        disk = self._disk_get(missing)
+        out.update(disk)
+        with self._lock:
             self._mem.update(disk)
-            out.update(disk)
-            missing = [i for i in missing if i not in disk]
-            for start in range(0, len(missing), S2_BATCH_MAX_IDS):
-                chunk = missing[start : start + S2_BATCH_MAX_IDS]
-                batch = self._batch_split(chunk)
-                got = {i: _slim(p) for i, p in zip(chunk, batch)}
-                self._disk_put(got)
+        missing = [i for i in missing if i not in disk]
+        for start in range(0, len(missing), S2_BATCH_MAX_IDS):
+            chunk = missing[start : start + S2_BATCH_MAX_IDS]
+            batch = self._batch_split(chunk)
+            got = {i: _slim(p) for i, p in zip(chunk, batch) if p is not _UNRESOLVED}
+            # Ids whose lookup failed (persistent HTTP 400) are unresolved for this call
+            # only: reported as None, never cached, retried next time.
+            out.update({i: None for i, p in zip(chunk, batch) if p is _UNRESOLVED})
+            self._disk_put(got)
+            with self._lock:
                 self._mem.update(got)
-                out.update(got)
+            out.update(got)
         return out
 
     def _batch_split(self, chunk: list[str], depth: int = 0) -> list:
         """paper/batch for `chunk`; on HTTP 400 (seen live, intermittently, on a ~430-id
         mixed PMID/DOI batch that succeeded on retry and in halves) split in two and
         retry each half, at most 3 levels deep, so one bad request cannot drop a whole
-        query's external candidates."""
+        query's external candidates. A chunk that still gets 400 at the bottom (or a
+        single id) comes back as _UNRESOLVED entries instead of raising: the rest of the
+        lookup carries on. Other failures (429, 5xx, network, limiter) still raise."""
         try:
             return _batch(self.s2, chunk, RESOLVE_FIELDS, None)
         except S2Error as e:
-            if "HTTP 400" not in str(e) or len(chunk) < 2 or depth >= 3:
+            if "HTTP 400" not in str(e):
                 raise
+            if len(chunk) < 2 or depth >= 3:
+                return [_UNRESOLVED] * len(chunk)
             mid = len(chunk) // 2
             return self._batch_split(chunk[:mid], depth + 1) + self._batch_split(chunk[mid:], depth + 1)
 

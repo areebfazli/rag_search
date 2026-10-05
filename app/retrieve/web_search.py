@@ -22,11 +22,15 @@ what S2 returned, so it can raise Recall@5/10 and nDCG but not Recall@100 of tha
 """
 from __future__ import annotations
 
+import contextvars
 import hashlib
 import sqlite3
 import threading
 from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
 from contextlib import AbstractContextManager, nullcontext
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -36,7 +40,14 @@ from app.core.interfaces import SearchHit
 from app.index.lexical import LexicalIndex
 from app.retrieve.fusion import fuse_hits
 from app.retrieve.query_rewrite import TermRarity, rewrite_queries
-from app.retrieve.semantic_scholar import S2_MAX_LIMIT, S2Error, parse_search
+from app.retrieve.semantic_scholar import (
+    S2_MAX_LIMIT,
+    RequestBudget,
+    S2Error,
+    current_budget,
+    parse_search,
+    request_budget,
+)
 
 
 def candidate_passage(hit: SearchHit) -> str:
@@ -253,6 +264,50 @@ def _restamp(hits: list[SearchHit]) -> list[SearchHit]:
     return [SearchHit(h.doc_id, 1.0 / (i + 1), h.text, h.metadata) for i, h in enumerate(hits)]
 
 
+@dataclass
+class WebResult:
+    """One web search's output. Everything per-request lives here, never on the shared
+    WebSearch instance (the API serves concurrent requests from one instance):
+
+    hits    — the ranked results.
+    errors  — extra sources that failed and were skipped ("pubmed: HTTP 503", ...); the
+              results are still served, from a thinner pool. SearchService turns these
+              into response warnings.
+    entries — the S2 paper/search cache entries behind the search (the eval reads their
+              fetch dates and counts the rewrite fallbacks from them).
+    warnings — response-ready notes (filled by SearchService.retrieve_web).
+    """
+
+    hits: list[SearchHit]
+    errors: list[str] = field(default_factory=list)
+    entries: list[dict] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+
+
+# Extra-source work of a pooled search with a deadline runs on ONE process-wide, bounded
+# pool, so abandoned work can never grow the thread count: at most WEB_EXTRA_WORKERS
+# threads exist however many requests time out, and a step queued behind them simply
+# times out too. Abandoned steps also stop on their own: each runs inside the request's
+# RequestBudget, which is cancelled when the request returns (see _run_pooled).
+WEB_EXTRA_WORKERS = 8
+_EXECUTOR: ThreadPoolExecutor | None = None
+_EXECUTOR_LOCK = threading.Lock()
+
+
+def _executor() -> ThreadPoolExecutor:
+    global _EXECUTOR
+    with _EXECUTOR_LOCK:
+        if _EXECUTOR is None:
+            _EXECUTOR = ThreadPoolExecutor(max_workers=WEB_EXTRA_WORKERS, thread_name_prefix="web-extra")
+        return _EXECUTOR
+
+
+def _submit(fn: Callable[[], object]) -> Future:
+    """Run `fn` on the shared pool in a copy of the caller's context, so it sees (and
+    stops with) the current request's RequestBudget."""
+    return _executor().submit(contextvars.copy_context().run, fn)
+
+
 class WebSearch:
     """Retriever over S2 with optional claim->keyword rewrite and local re-ranking.
 
@@ -262,7 +317,19 @@ class WebSearch:
     terms by local-corpus rarity; None falls back to entity/length priority.
     `keep_no_abstract` keeps title-only papers (the eval's web_any view). With `strict`
     a failed fallback request raises (the eval must not silently score a degraded
-    pool); otherwise the primary results are served alone.
+    pool); otherwise the primary results are served alone. `deadline_s` (API only; None
+    = no budget, the eval's choice) bounds a pooled search, including steps already
+    running when it expires: every extra source (PubMed, snippets, extra S2 queries, id
+    resolution, citations) then runs on a bounded worker pool and is waited for only
+    for the time left; one still running at the deadline is abandoned and recorded as
+    an error, and its HTTP calls stop at their next check (RequestBudget: no new call
+    after the deadline, timeouts and waits capped at what is left). `snippet_filter`
+    (see s2_extra.DatasetSnippetFilter) drops dataset-dump snippets before they are
+    pooled.
+
+    Thread-safety: one instance serves concurrent requests. Configuration is fixed at
+    construction and every per-request value (options, errors, cache entries) is passed
+    as an argument or returned in a WebResult — nothing per-request is stored on self.
     """
 
     def __init__(
@@ -286,6 +353,8 @@ class WebSearch:
         dense_cap: int | None = None,
         pubmed_queries: tuple[str, ...] = ("rewrite",),
         snippet_queries: tuple[str, ...] = ("rewrite",),
+        deadline_s: float | None = None,
+        snippet_filter=None,
     ):
         self.s2 = s2
         self.rewrite = rewrite
@@ -297,7 +366,6 @@ class WebSearch:
         self.strict = strict
         self.fetch_k = max(1, min(int(fetch_k), S2_MAX_LIMIT))
         self._init_lock = threading.Lock()
-        self.last_entries: list[dict] = []  # cache entries behind the last search (eval dates)
         # Extra candidate sources (all off by default; see search_pooled). `pubmed` is a
         # PubMedSource, `resolver` an S2IdResolver (needed by pubmed/snippets/citations).
         self.multi_query = max(0, int(multi_query))
@@ -307,13 +375,14 @@ class WebSearch:
         self.citation_cap = citation_cap
         self.resolver = resolver
         self.dense_cap = dense_cap
+        self.deadline_s = deadline_s
+        self.snippet_filter = snippet_filter
         # Which query each extra source gets: "rewrite" (primary keyword query) / "claim".
         for kinds in (pubmed_queries, snippet_queries):
             if not kinds or set(kinds) - {"rewrite", "claim"}:
                 raise ValueError("query kinds must be a non-empty subset of ('rewrite', 'claim')")
         self.pubmed_queries = tuple(pubmed_queries)
         self.snippet_queries = tuple(snippet_queries)
-        self.last_errors: list[str] = []  # extra sources that failed in the last search
         if (pubmed is not None or snippets or self.citation_seeds) and resolver is None:
             raise ValueError("pubmed / snippets / citation expansion need an S2IdResolver")
 
@@ -347,29 +416,41 @@ class WebSearch:
                 return qs
         return [claim]
 
-    def candidates(self, claim: str, limit: int) -> list[SearchHit]:
+    def candidates(
+        self,
+        claim: str,
+        limit: int,
+        *,
+        keep_no_abstract: bool | None = None,
+        entries: list[dict] | None = None,
+    ) -> list[SearchHit]:
         """The S2 candidate pool for `claim` in fetch order (primary results first,
         deduped). The fallback query is sent unless the primary alone filled the page
         (`limit` papers WITH an abstract) — decided on that count in both views, so web
-        and web_any always come from the same requests."""
-        self.last_entries = []
+        and web_any always come from the same requests. `keep_no_abstract` overrides the
+        instance's view for this call only; each S2 cache entry is appended to `entries`
+        (if given)."""
+        keep = self.keep_no_abstract if keep_no_abstract is None else keep_no_abstract
         pool: list[SearchHit] = []
         served: list[SearchHit] = []
         seen: set[str] = set()
         for i, q in enumerate(self.queries(claim)):
             if i > 0 and len(served) >= limit:
                 break
+            if i > 0 and (budget := current_budget()) is not None and budget.expired():
+                break  # past the web deadline: the primary results are served alone
             try:
                 entry = self.s2.fetch(q, limit)
             except S2Error:
                 if i == 0 or self.strict:
                     raise
                 break  # API: a failed fallback serves the primary results alone
-            self.last_entries.append(entry)
+            if entries is not None:
+                entries.append(entry)
             response = entry.get("response")
             if i == 0:
                 served = parse_search(response, limit)
-            for h in parse_search(response, limit, keep_no_abstract=self.keep_no_abstract):
+            for h in parse_search(response, limit, keep_no_abstract=keep):
                 if h.doc_id not in seen:
                     seen.add(h.doc_id)
                     pool.append(h)
@@ -378,23 +459,35 @@ class WebSearch:
     def search(
         self, query: str, top_k: int, lock: AbstractContextManager | None = None
     ) -> list[SearchHit]:
-        """Top `top_k` for `query`. Without rerank, S2 is asked for `top_k` papers per
-        query (as before); with it, for `fetch_k` (the full page) to rerank. `lock`, if
-        given, is held around the local rerank only — the S2 calls never run under it."""
+        """Top `top_k` for `query` (the hits of `run`)."""
+        return self.run(query, top_k, lock).hits
+
+    def run(
+        self, query: str, top_k: int, lock: AbstractContextManager | None = None
+    ) -> WebResult:
+        """Top `top_k` for `query`, with this request's source errors and S2 cache
+        entries. Without rerank, S2 is asked for `top_k` papers per query (as before);
+        with it, for `fetch_k` (the full page) to rerank. `lock`, if given, is held
+        around the local rerank only — the network calls never run under it."""
         top_k = max(1, min(int(top_k), S2_MAX_LIMIT))
         if self.pooled:
-            return self.search_pooled(query, top_k, lock)
+            return self._run_pooled(query, top_k, lock)
+        entries: list[dict] = []
         limit = self.fetch_k if self.do_rerank else top_k
-        pool = self.candidates(query, limit)
+        pool = self.candidates(query, limit, entries=entries)
         if not self.do_rerank:
-            return _restamp(pool)[:top_k]
+            return WebResult(_restamp(pool)[:top_k], [], entries)
         with lock or nullcontext():
-            return rerank(query, pool, self.embedder, self.emb_cache)[:top_k]
+            if self.dense_cap is not None:  # == rerank() when the pool fits the cap
+                hits = rerank_pool(query, pool, self.embedder, self.emb_cache, self.dense_cap)
+            else:
+                hits = rerank(query, pool, self.embedder, self.emb_cache)
+        return WebResult(hits[:top_k], [], entries)
 
-    def _extra(self, name: str, fn, default):
-        """Run one extra source; a failure degrades to `default` (recorded in
-        last_errors) unless strict, where it raises — the eval must not score a thinner
-        pool silently."""
+    def _extra(self, name: str, fn, default, errors: list[str]):
+        """Run one extra source; a failure degrades to `default` (recorded in this
+        request's `errors`) unless strict, where it raises — the eval must not score a
+        thinner pool silently."""
         from app.retrieve.web_sources import SourceError
 
         try:
@@ -402,12 +495,40 @@ class WebSearch:
         except (S2Error, SourceError) as e:
             if self.strict:
                 raise
-            self.last_errors.append(f"{name}: {e}")
+            errors.append(f"{name}: {e}")
+            return default
+
+    def _step(self, name: str, fn, default, errors: list[str], budget: RequestBudget):
+        """One extra-source step. Without a deadline it runs inline (the eval). With one
+        it runs on the shared bounded pool and is waited for only for the time left; a
+        step still running then is abandoned (recorded in `errors`; its own HTTP calls
+        stop at their next budget check) and `default` is used."""
+        from app.retrieve.web_sources import SourceError
+
+        if budget.seconds is None:
+            return self._extra(name, fn, default, errors)
+        future = _submit(fn)
+        try:
+            return future.result(timeout=budget.remaining())
+        except FutureTimeout:
+            future.cancel()
+            errors.append(f"{name}: abandoned, the {self.deadline_s:g}s web deadline was reached")
+            return default
+        except (S2Error, SourceError) as e:
+            if self.strict:
+                raise
+            errors.append(f"{name}: {e}")
             return default
 
     def search_pooled(
         self, claim: str, top_k: int, lock: AbstractContextManager | None = None
     ) -> list[SearchHit]:
+        """The pooled search's hits (see _run_pooled)."""
+        return self._run_pooled(claim, top_k, lock).hits
+
+    def _run_pooled(
+        self, claim: str, top_k: int, lock: AbstractContextManager | None = None
+    ) -> WebResult:
         """Multi-source candidate generation, then the local rerank of the whole pool:
 
             S2 rewrite queries (+ `multi_query` extra keyword queries)   ─┐
@@ -416,15 +537,35 @@ class WebSearch:
             ──► citation expansion of the top `citation_seeds` (pre-ranked)     batch)
             ──► merge_pools ──► rerank_pool(dense_cap)
 
-        The base S2 queries are required (their failure raises, as before); every extra
-        source degrades to nothing on failure. S2 calls share the process-wide limiter;
-        PubMed runs in a worker thread against its own host limiter."""
-        from concurrent.futures import ThreadPoolExecutor
+        The base S2 queries are required (their failure raises at once, without waiting
+        for the PubMed worker, which is abandoned); every extra source degrades to
+        nothing on failure. With `deadline_s`, an extra source still pending or running
+        when the budget runs out is abandoned too (recorded in errors; see _step). S2
+        calls share the process-wide limiter; PubMed runs in a worker thread against its
+        own host limiter. The whole search runs inside one RequestBudget, cancelled on
+        return, so no abandoned worker keeps making requests for a finished request."""
+        budget = RequestBudget(self.deadline_s)
+        with request_budget(budget):
+            try:
+                return self._pooled(claim, top_k, lock, budget)
+            finally:
+                budget.cancel()  # abandoned workers stop at their next HTTP check
 
+    def _pooled(
+        self, claim: str, top_k: int, lock: AbstractContextManager | None, budget: RequestBudget
+    ) -> WebResult:
         from app.retrieve.query_rewrite import multi_queries
         from app.retrieve.s2_extra import expand_citations, snippet_search
 
-        self.last_errors = []
+        errors: list[str] = []
+        entries: list[dict] = []
+
+        def out_of_time(name: str) -> bool:
+            if not budget.expired():
+                return False
+            errors.append(f"{name}: skipped, the {self.deadline_s:g}s web deadline was reached")
+            return True
+
         cache = getattr(self.s2, "cache", None)
         rws = self.queries(claim)
         primary = rws[0]
@@ -432,43 +573,74 @@ class WebSearch:
         pm_qs = list(dict.fromkeys(by_kind[k] for k in self.pubmed_queries))
         snip_qs = list(dict.fromkeys(by_kind[k] for k in self.snippet_queries))
         lists: list[list[SearchHit]] = []
-        with ThreadPoolExecutor(max_workers=1) as pool_exec:
-            pm_future = (
-                pool_exec.submit(lambda: [self._extra("pubmed", lambda q=q: self.pubmed.search(q, 100), []) for q in pm_qs])
-                if self.pubmed is not None
-                else None
-            )
-            keep, self.keep_no_abstract = self.keep_no_abstract, True
-            try:
-                base = self.candidates(claim, self.fetch_k)  # raises if S2 fails
-            finally:
-                self.keep_no_abstract = keep
+        groups: list[list] = []
+        pm_errors: list[str] = []  # the worker's own list: merged only if it finishes
+        pm_future = (
+            _submit(lambda: [self._extra("pubmed", lambda q=q: self.pubmed.search(q, 100), [], pm_errors)
+                             for q in pm_qs])
+            if self.pubmed is not None
+            else None
+        )
+        try:
+            # Base pool always keeps title-only papers (another source may lend the
+            # abstract); the instance's view is applied once, at merge time.
+            base = self.candidates(claim, self.fetch_k, keep_no_abstract=True, entries=entries)  # raises
             lists.append(_tag(base, "s2"))
-            if self.multi_query:
+            if self.multi_query and not out_of_time("s2_multi"):
                 extra_q = multi_queries(claim, self.rarity, self.multi_query) if self.rewrite else []
-                lists.append(_tag(self._extra("s2_multi", lambda: self._fetch_all(extra_q), []), "s2_multi"))
-            groups: list[list] = []
+                multi_entries: list[dict] = []  # merged only if the step finishes
+                hits, done = self._step(
+                    "s2_multi", lambda: (self._fetch_all(extra_q, multi_entries), True), ([], False), errors, budget
+                )
+                if done:
+                    entries += multi_entries
+                lists.append(_tag(hits, "s2_multi"))
             if self.snippets:
                 for q in snip_qs:
-                    groups.append(self._extra("snippets", lambda q=q: snippet_search(self.s2, q, 100, cache), []))
+                    if out_of_time("snippets"):
+                        break
+                    groups.append(self._step(
+                        "snippets",
+                        lambda q=q: snippet_search(self.s2, q, 100, cache, **self._snippet_kw()),
+                        [],
+                        errors,
+                        budget,
+                    ))
             if pm_future is not None:
-                groups += pm_future.result()
+                try:
+                    groups += pm_future.result(timeout=budget.remaining())
+                    errors += pm_errors
+                except FutureTimeout:
+                    errors.append(f"pubmed: abandoned, the {self.deadline_s:g}s web deadline was reached")
+        finally:
+            # Never wait for an unfinished worker (base S2 failed, or the deadline
+            # passed): a queued one is cancelled, a running one stops at its next HTTP
+            # check once the request's budget is cancelled (see _run_pooled).
+            if pm_future is not None and not pm_future.done():
+                pm_future.cancel()
         groups = [g for g in groups if g]
-        if groups:
+        if groups and not out_of_time("resolve"):
             # One S2 batch resolves every source's ids; each source stays its own ranked
-            # list for the pool's RRF order.
-            # A failed resolve batch drops these sources for this query (recorded in
-            # last_errors): unresolved ids could not be deduped against S2's.
-            resolved = self._extra("resolve", lambda: (self.resolver.prefetch([p for g in groups for p in g]), True)[1], False)
-            if resolved:
-                for g in groups:
-                    lists.append(self._extra("resolve", lambda g=g: self.resolver.to_hits(g, keep_no_abstract=True), []))
-        if self.citation_seeds:
+            # list for the pool's RRF order. A failed resolve batch drops these sources
+            # for this query (recorded in errors): unresolved ids could not be deduped
+            # against S2's.
+            resolve_errors: list[str] = []  # merged only if the step finishes
+
+            def resolve_all() -> list[list[SearchHit]]:
+                self.resolver.prefetch([p for g in groups for p in g])
+                return [self._extra("resolve", lambda g=g: self.resolver.to_hits(g, keep_no_abstract=True),
+                                    [], resolve_errors) for g in groups]
+
+            resolved = self._step("resolve", resolve_all, None, errors, budget)
+            if resolved is not None:
+                errors += resolve_errors
+                lists += resolved
+        if self.citation_seeds and not out_of_time("citations"):
             # Seeds come from the abstract-bearing S2 base pool (BM25 needs text to rank).
             seeds = [h.doc_id for h in prerank(claim, merge_pools(lists[:1]))[: self.citation_seeds]
                      if h.doc_id.isdigit()]
             if seeds:
-                cited = self._extra(
+                cited = self._step(
                     "citations",
                     lambda: self.resolver.to_hits(
                         expand_citations(self.s2, seeds, max_refs_per_seed=self.citation_cap,
@@ -476,20 +648,26 @@ class WebSearch:
                         keep_no_abstract=True,
                     ),
                     [],
+                    errors,
+                    budget,
                 )
                 lists.append(cited)
         merged = merge_pools(lists, keep_no_abstract=self.keep_no_abstract)
         if not self.do_rerank:
-            return _restamp(merged)[:top_k]
+            return WebResult(_restamp(merged)[:top_k], errors, entries)
         with lock or nullcontext():
-            return rerank_pool(claim, merged, self.embedder, self.emb_cache, self.dense_cap)[:top_k]
+            hits = rerank_pool(claim, merged, self.embedder, self.emb_cache, self.dense_cap)
+        return WebResult(hits[:top_k], errors, entries)
 
-    def _fetch_all(self, queries: list[str]) -> list[SearchHit]:
+    def _snippet_kw(self) -> dict:
+        return {"dataset_filter": self.snippet_filter} if self.snippet_filter is not None else {}
+
+    def _fetch_all(self, queries: list[str], entries: list[dict]) -> list[SearchHit]:
         out: list[SearchHit] = []
         seen: set[str] = set()
         for q in queries:
             entry = self.s2.fetch(q, self.fetch_k)
-            self.last_entries.append(entry)
+            entries.append(entry)
             for h in parse_search(entry.get("response"), self.fetch_k, keep_no_abstract=True):
                 if h.doc_id not in seen:
                     seen.add(h.doc_id)

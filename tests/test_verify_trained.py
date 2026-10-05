@@ -25,7 +25,15 @@ from app.verify import nli
 from app.verify import train as tr
 from app.verify import train_data as td
 from app.verify.nli import LabelMappingError, PairCache, PairScore, score_pairs_cached
-from app.verify.trained import TrainedVerifier, checkpoint_sha, model_id, trained_label_order
+from app.verify.trained import (
+    HASHED_FILES,
+    WEIGHT_FILES,
+    TrainedVerifier,
+    checkpoint_sha,
+    model_id,
+    resolve_checkpoint,
+    trained_label_order,
+)
 from tests.test_nli import FakeTokenizer
 
 # --- a tiny SciFact-shaped world ---------------------------------------------------------------
@@ -232,6 +240,68 @@ def test_checkpoint_sha_tracks_weights_and_config(tmp_path):
     h2 = checkpoint_sha(tmp_path)
     (tmp_path / "config.json").write_text('{"x": 1}')
     assert len({h1, h2, checkpoint_sha(tmp_path)}) == 3
+
+
+def _ckpt(path, weights=("model.safetensors",)):
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "config.json").write_text("{}")
+    (path / "meta.json").write_text(json.dumps({"base_model": "fake/base", "max_length": 64}))
+    for w in weights:
+        (path / w).write_bytes(b"weights")
+    return path
+
+
+def test_trained_verifier_loads_safetensors_locally_without_remote_code(tmp_path, monkeypatch):
+    import transformers
+
+    ckpt = _ckpt(tmp_path / "model")
+    calls = {}
+    tok = FakeTokenizer()
+
+    def fake_tokenizer(path, **kw):
+        calls["tokenizer"] = (path, kw)
+        return tok
+
+    def fake_model(path, **kw):
+        calls["model"] = (path, kw)
+        return ClaimFirstModel(tok)
+
+    monkeypatch.setattr(transformers.AutoTokenizer, "from_pretrained", fake_tokenizer)
+    monkeypatch.setattr(transformers.AutoModelForSequenceClassification, "from_pretrained", fake_model)
+    v = TrainedVerifier(checkpoint=tmp_path / "model", threads=0, batch_size=2)
+    assert calls["tokenizer"] == (ckpt, {"trust_remote_code": False, "local_files_only": True})
+    path, kw = calls["model"]
+    assert path == ckpt and kw == {"dtype": torch.float32, "use_safetensors": True,
+                                   "trust_remote_code": False, "local_files_only": True}
+    assert v.checkpoint_hash == checkpoint_sha(ckpt)
+
+
+def test_a_pickle_only_checkpoint_is_refused_by_name(tmp_path, monkeypatch):
+    import transformers
+
+    def boom(*a, **kw):
+        raise AssertionError("must refuse before any from_pretrained call")
+
+    monkeypatch.setattr(transformers.AutoTokenizer, "from_pretrained", boom)
+    monkeypatch.setattr(transformers.AutoModelForSequenceClassification, "from_pretrained", boom)
+    assert WEIGHT_FILES == ("model.safetensors",) and "pytorch_model.bin" not in HASHED_FILES
+    flat = _ckpt(tmp_path / "flat", weights=("pytorch_model.bin",))
+    nested = _ckpt(tmp_path / "zip" / "verifier_model", weights=("pytorch_model.bin",))
+    for where, named in ((flat, flat), (tmp_path / "zip", nested)):
+        with pytest.raises(FileNotFoundError, match="pytorch_model.bin.*model.safetensors is accepted") as e:
+            resolve_checkpoint(where)
+        assert str(named) in str(e.value)
+        with pytest.raises(FileNotFoundError, match="pytorch_model.bin"):
+            TrainedVerifier(checkpoint=where)
+    with pytest.raises(FileNotFoundError, match="pytorch_model.bin is not accepted"):
+        checkpoint_sha(flat)
+
+
+def test_a_bin_next_to_safetensors_is_ignored_not_hashed(tmp_path):
+    a = _ckpt(tmp_path / "a")
+    b = _ckpt(tmp_path / "b", weights=("model.safetensors", "pytorch_model.bin"))
+    assert resolve_checkpoint(b) == b
+    assert checkpoint_sha(a) == checkpoint_sha(b)  # a safetensors-only hash is unchanged
 
 
 # --- combination rules ----------------------------------------------------------------------------

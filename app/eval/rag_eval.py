@@ -13,7 +13,11 @@ measured, and each comes from the most deterministic source available:
   ``answered`` field is consulted ONLY for replies with no parseable verdict line.
 * **Faithfulness and context relevance** (the judge, on every scored query). These have
   no gold label, so they stay LLM-judged. LLM-as-judge agrees with humans ~85-92% of
-  the time — treat as signal, not truth.
+  the time — treat as signal, not truth. Faithfulness is averaged over answered rows
+  except those answered only via the re-ask after a first reply with no text — it hit
+  the token budget (or, rarely, was empty) — so the judge saw a placeholder, not an
+  answer: ``faithfulness_n`` rows averaged,
+  ``faithfulness_unjudged_reask`` left out. Context relevance is over all rows.
 
 "It abstained" is not by itself a good outcome: an over-conservative model looks
 identical on abstention rate alone. So ``answered`` is crossed with whether the
@@ -83,10 +87,15 @@ has no verdict gets ONE more call (generator.LLMGenerator.reask_verdict, the pro
 budget rag_secondlook froze and measured). The eval applies it as a post-step over the
 finished first-pass rows, never inside the checkpointed generation: the checkpoint keeps
 first-pass rows and its signature does not include the re-ask, so an existing checkpoint
-resumes as-is. Each reply is cached in ``data/eval_cache/secondlook/<dataset>.json`` under
-rag_secondlook's own keys (kind, claim, sha of [model, budget, exact messages]): a reply
-either one fetched is a hit for the other, and a re-run re-asks from the cache with no
-LLM call (whether a reply came from the cache is counted in ``run.reask_replies``, not in
+resumes as-is. Each reply is cached in ``data/eval_cache/secondlook/<dataset>.json``, the
+file rag_secondlook shares (app.eval.reply_cache): a reply either one fetched is a hit for
+the other, and a re-run re-asks from the cache with no LLM call. Keys are versioned: new
+replies go under the v2 key (reask_key_v2: claim, budget, exact messages AND the endpoint
+fingerprint — provider, base URL, model, resolved reasoning effort, temperature policy,
+routing), so a Groq or paid run never reuses a reply another endpoint gave. Migration: a
+lookup (reask_lookup) tries v2, then the legacy v1 key (model + budget + messages) but only
+for the canonical OpenRouter Ling endpoint every v1 entry was fetched with — which is how
+the committed rag.json's 15 re-ask replies stay cache hits with zero LLM calls (whether a reply came from the cache is counted in ``run.reask_replies``, not in
 the rows, so a resumed run's rows equal a fresh one's). SSR_EVAL_REFRESH ignores the row
 checkpoint only, never this cache: its entries include the replies behind the measured
 result. A run with SSR_LLM_REASK=false is never canonical (``..._noreask``).
@@ -138,12 +147,14 @@ from app.core.llm_endpoints import (
     resolve_endpoint,
 )
 from app.core.interfaces import SearchHit, hit_passage
+from app.core.paths import RESULTS, assert_outside
 from app.generate.generator import (
     REASK_MAX_TOKENS,
+    REASK_NOTE,
     TRUNCATION_NOTE,
     LLMGenerator,
     generation_temperature,
-    looks_like_question,
+    looks_like_claim,
     map_citations,
     needs_reask,
     parse_reask,
@@ -290,11 +301,12 @@ def typical_generation_cost(gen: LLMEndpoint) -> float:
     return cost_upper_bound(EST_GEN_PROMPT_TOKENS, EST_GEN_COMPLETION_TOKENS, gen.model)
 
 
-OUT = Path("eval/results")  # canonical run only — the committed artifact
+OUT = RESULTS  # canonical run only — the committed artifact (repo-anchored, not cwd)
 RUNS = Path("data/eval_runs")  # every other run (gitignored)
 CACHE = Path("data/eval_cache/rag")  # per-row resume checkpoints (gitignored)
-# Re-ask replies (one file per dataset), in rag_secondlook's ReplyCache format and keys:
-# the replies its measured post-hoc re-ask fetched are cache hits here, and vice versa.
+# Re-ask replies (one file per dataset), in rag_secondlook's ReplyCache format and keys
+# (v2, with the legacy-key migration in reask_lookup): the replies its measured post-hoc
+# re-ask fetched are cache hits here, and vice versa.
 REASK_CACHE = Path("data/eval_cache/secondlook")
 # Expected share of claims the re-ask fires on, for the up-front request estimate only:
 # 15 of 300 on the committed test run. A checkpoint's own rate wins once it is big enough.
@@ -507,7 +519,7 @@ def reparse_row(row: dict, query: str) -> dict:
     raw = answer[: -len(note)] if answer.endswith(note) else (
         "" if answer == TRUNCATION_NOTE else answer
     )
-    text, verdict, source = parse_verdict(raw, allow_stance=not looks_like_question(query))
+    text, verdict, source = parse_verdict(raw, allow_stance=looks_like_claim(query))
     if verdict is None:
         return {**row, "verdict_source": None}
     if truncated_note:
@@ -555,7 +567,90 @@ def reask_hits(doc_ids: Sequence[str], docs: Mapping[str, Mapping]) -> list[Sear
 
 
 def reask_key(qid: str, model: str, messages: Sequence[Mapping]) -> str:
+    """The LEGACY (v1) re-ask key: model id + budget + messages, nothing about who served
+    it. Read only as a migration fallback (reask_lookup); never written any more."""
     return ReplyCache.key("reask", qid, model, REASK_MAX_TOKENS, messages)
+
+
+def reask_request_fingerprint(gen: LLMEndpoint) -> dict:
+    """Everything about the endpoint that can change a re-ask reply besides the messages
+    and budget: provider, base URL, model id, the reasoning effort LLMGenerator resolves
+    for it (from settings.llm_reasoning_effort, as main() builds it), the temperature
+    policy (generator.generation_temperature; None = not sent) and the provider routing
+    every call carries (endpoint.extra_body()). Never the key."""
+    return {
+        "provider": gen.provider,
+        "base_url": gen.base_url,
+        "model": gen.model,
+        "reasoning_effort": resolve_reasoning_effort(gen.model, settings.llm_reasoning_effort),
+        "temperature": generation_temperature(gen.model),
+        "extra_body": gen.extra_body(),
+    }
+
+
+def reask_key_v2(qid: str, gen: LLMEndpoint, messages: Sequence[Mapping]) -> str:
+    """The v2 re-ask key (reply_cache.ReplyCache.key_v2 over reask_request_fingerprint):
+    the only key new re-ask replies are written under."""
+    return ReplyCache.key_v2("reask", qid, reask_request_fingerprint(gen), REASK_MAX_TOKENS, messages)
+
+
+# The one endpoint every legacy (v1) re-ask entry was fetched with — frozen here as
+# literals, not read from the live code defaults, so a later change to the default
+# temperature or free routing stops matching the old entries instead of silently
+# inheriting them. The model id is the code-default generator (default_endpoints()).
+LEGACY_REASK_TEMPERATURE = 0.1
+LEGACY_REASK_EXTRA_BODY = {
+    "provider": {"allow_fallbacks": False, "max_price": {"prompt": 0, "completion": 0}},
+}
+
+
+def is_legacy_reask_endpoint(gen: LLMEndpoint) -> bool:
+    """True only for the canonical OpenRouter Ling endpoint the v1 re-ask entries came
+    from: provider openrouter at OPENROUTER_BASE_URL, the code-default generator id, no
+    reasoning field sent, temperature 0.1, the free routing."""
+    fp = reask_request_fingerprint(gen)
+    return (
+        fp["provider"] == "openrouter"
+        and fp["base_url"] == OPENROUTER_BASE_URL
+        and (fp["provider"], fp["model"]) == default_endpoints()[0]
+        and fp["reasoning_effort"] is None
+        and fp["temperature"] == LEGACY_REASK_TEMPERATURE
+        and fp["extra_body"] == LEGACY_REASK_EXTRA_BODY
+    )
+
+
+def reask_lookup(
+    cache: ReplyCache, qid: str, gen: LLMEndpoint, messages: Sequence[Mapping]
+) -> dict | None:
+    """The cached re-ask reply for this request, or None. The v2 key first; then — key
+    migration — the legacy v1 key, but ONLY when ``gen`` is exactly the canonical endpoint
+    the v1 entries were fetched with (is_legacy_reask_endpoint). Any other endpoint (a
+    Groq or paid run with the same model id and messages) never reads a v1 entry."""
+    rec = cache.get(reask_key_v2(qid, gen, messages))
+    if rec is None and is_legacy_reask_endpoint(gen):
+        rec = cache.get(reask_key(qid, gen.model, messages))
+    return rec
+
+
+def _no_judgeable_reply(answer: str | None) -> bool:
+    """The first reply carried nothing the judge could score: empty, or only the
+    truncation note (generator.reask_display_text's REASK_NOTE condition)."""
+    return (answer or "").strip() in ("", TRUNCATION_NOTE)
+
+
+def judge_scored_placeholder(row: Mapping) -> bool:
+    """A row answered via the re-ask whose FIRST reply had no judgeable content: the judge
+    scored a placeholder (faithfulness 0.0 by construction), not the answer shown. Read
+    from the flag apply_reask sets, else — rows written before the flag existed — from
+    the displayed REASK_NOTE or the first-pass answer under ``first_pass``."""
+    if "judge_scored_placeholder" in row:
+        return bool(row["judge_scored_placeholder"])
+    if row.get("verdict_source") != "reask":
+        return False
+    if row.get("answer") == REASK_NOTE:
+        return True
+    fp = row.get("first_pass")
+    return isinstance(fp, Mapping) and _no_judgeable_reply(fp.get("answer"))
 
 
 def apply_reask(row: Mapping, rec: Mapping | None, error: str | None = None) -> dict:
@@ -563,7 +658,9 @@ def apply_reask(row: Mapping, rec: Mapping | None, error: str | None = None) -> 
     a parsed verdict replaces the first-pass one (verdict_source "reask", answered
     decided by it), with the displayed text per generator.reask_display_text and the
     first-pass values of every changed field under "first_pass". The judge's scores
-    stay those of the first reply (not re-judged)."""
+    stay those of the first reply (not re-judged); ``judge_scored_placeholder`` marks a
+    row whose first reply had no judgeable content (empty / the truncation note), so
+    its faithfulness scored a placeholder and aggregate() leaves it out of the mean."""
     out = {**row, "reask_attempted": True}
     if rec is None:
         out.update(reask=None, reask_error=error)
@@ -579,7 +676,16 @@ def apply_reask(row: Mapping, rec: Mapping | None, error: str | None = None) -> 
     if verdict is None:
         return out
     answered = verdict != "NOT ENOUGH EVIDENCE"
-    text = reask_display_text(row.get("answer") or "")
+    first_answer = row.get("answer") or ""
+    text = reask_display_text(first_answer)
+    # Citations of the DISPLAYED text over the retrieved passages, as reparse_row does
+    # (today the same as keeping the first reply's when the text is unchanged, and [] for
+    # REASK_NOTE; robust if reask_display_text starts rewriting the prose).
+    retrieved = [SearchHit(d, 0.0, "") for d in row.get("retrieved_doc_ids") or []]
+    cited = (
+        map_citations(text, retrieved) if retrieved
+        else (row.get("cited_doc_ids") if text == row.get("answer") else [])
+    )
     out.update(
         first_pass={k: row.get(k) for k in FIRST_PASS_KEYS},
         verdict=verdict,
@@ -590,7 +696,10 @@ def apply_reask(row: Mapping, rec: Mapping | None, error: str | None = None) -> 
         abstention_class=_abstention_class(answered, row["evidence"]),
         abstention_class_qrels=_abstention_class(answered, row["evidence_qrels"]),
         answer=text,
-        cited_doc_ids=row.get("cited_doc_ids") if text == row.get("answer") else [],
+        cited_doc_ids=cited,
+        # The judge saw the first reply, which here had nothing to judge: its faithfulness
+        # (0.0) scores a placeholder, so aggregate() leaves the row out of the mean.
+        judge_scored_placeholder=_no_judgeable_reply(first_answer),
     )
     return out
 
@@ -599,7 +708,7 @@ def first_pass_row(row: Mapping) -> dict:
     """A row as the first pass left it (the re-ask undone): what the checkpoint stores and
     what experiments built on the pre-re-ask answers (rag_secondlook) read."""
     out = {k: v for k, v in row.items() if k not in ("first_pass", "reask", "reask_attempted",
-                                                     "reask_error")}
+                                                     "reask_error", "judge_scored_placeholder")}
     out.update(row.get("first_pass") or {})
     return out
 
@@ -763,10 +872,18 @@ def verdict_scores(rows: list[dict]) -> dict:
     }
 
 
+_QUOTE_UNKNOWN = object()  # the row has no `quote_found` key at all
+
+
 def _quote_stats(rows: list[dict]) -> dict:
+    """Verdict accuracy split by the evidence-quote check. ``no_quote`` only where the
+    check ran and found no quote (key present, None); a row with no ``quote_found`` key
+    (resumed / legacy rows written before the check existed) is ``unknown``, not
+    no_quote."""
     out = {}
-    for key, want in (("found", True), ("not_found", False), ("no_quote", None)):
-        sub = [r for r in rows if r.get("quote_found") is want]
+    for key, want in (("found", True), ("not_found", False), ("no_quote", None),
+                      ("unknown", _QUOTE_UNKNOWN)):
+        sub = [r for r in rows if r.get("quote_found", _QUOTE_UNKNOWN) is want]
         out[key] = {
             "n": len(sub),
             "verdict_accuracy": _rate(sum(r["predicted_label"] == r["gold_label"] for r in sub), len(sub)),
@@ -787,6 +904,12 @@ def aggregate(
     headline = _abstention(rows, "evidence")
     answered = [r for r in rows if r["answered"]]
     with_verdict = [r for r in rows if r["verdict"] is not None]
+    # Faithfulness is averaged over answered rows whose judged reply is the answer shown.
+    # A row answered only via the re-ask whose first reply had no content (empty / the
+    # truncation note, displayed as REASK_NOTE) was judged on that placeholder — its 0.0
+    # says nothing about the answer — so it is counted apart, not averaged in.
+    unjudged = [r for r in answered if judge_scored_placeholder(r)]
+    judged = [r for r in answered if not judge_scored_placeholder(r)]
     return {
         "n": len(rows),
         "evidence_rate": headline.pop("evidence_rate"),
@@ -819,9 +942,14 @@ def aggregate(
         "judge_verdict_agreement": _rate(
             sum(r["judge_answered"] == r["answered"] for r in with_verdict), len(with_verdict)
         ),
-        "faithfulness_answered": round(statistics.mean(r["faithfulness"] for r in answered), 4)
-        if answered
+        "faithfulness_answered": round(statistics.mean(r["faithfulness"] for r in judged), 4)
+        if judged
         else None,
+        "faithfulness_n": len(judged),
+        "faithfulness_unjudged_reask": len(unjudged),
+        # Over ALL rows, re-asked placeholders included, deliberately: context relevance
+        # judges the retrieved passages against the question, not the answer, and the
+        # passages a re-asked row was judged on are exactly the ones it was answered from.
         "context_relevance": round(statistics.mean(r["context_relevance"] for r in rows), 4)
         if rows
         else None,
@@ -868,7 +996,57 @@ def _quadrant_md(q: dict) -> str:
     )
 
 
-def _markdown(agg: dict, skipped: int, parse_failures: int, dataset: str | None = None) -> str:
+def _first_reply(row: Mapping) -> str:
+    """The generator's first reply as stored: under ``first_pass`` once the re-ask replaced
+    the verdict, else the row's own answer."""
+    fp = row.get("first_pass")
+    return str((fp.get("answer") if isinstance(fp, Mapping) else row.get("answer")) or "")
+
+
+def _cut_off(row: Mapping) -> bool:
+    """The first reply hit the token budget (after the generator's one retry)."""
+    return bool(row.get("truncated")) or _first_reply(row).strip().endswith(TRUNCATION_NOTE)
+
+
+def _truncation_note(n: int, rows: Sequence[Mapping] | None) -> str:
+    """The header note on truncated answers. With the rows it says what became of them —
+    a verdict from the re-ask, one parsed from the text before the cut-off, or none."""
+    note = f"{n} answer{'' if n == 1 else 's'} truncated at the token budget"
+    if rows is None:
+        return note
+    cut = [r for r in rows if r.get("truncated")]
+    reasked = sum(r.get("verdict_source") == "reask" for r in cut)
+    none = sum(r.get("verdict") is None for r in cut)
+    kept = len(cut) - reasked - none
+    parts = [
+        f"{reasked} got a verdict from the verdict-only re-ask" if reasked else "",
+        f"{kept} kept a verdict parsed from the text before the cut-off" if kept else "",
+        f"{none} {'was' if none == 1 else 'were'} scored with no verdict" if none else "",
+    ]
+    return note + f" (of those, {', '.join(x for x in parts if x)})"
+
+
+def _unjudged_cause(rows: Sequence[Mapping] | None) -> str:
+    """Why the judge saw no answer text for the re-ask-only answers left out of the
+    faithfulness mean: their first reply hit the token budget, or was empty."""
+    if rows is None:
+        return "had no judgeable text"
+    unjudged = [r for r in rows if r.get("answered") and judge_scored_placeholder(r)]
+    cut = sum(_cut_off(r) for r in unjudged)
+    empty = len(unjudged) - cut
+    if cut and empty:
+        return f"hit the token budget with no text left ({cut}) or was empty ({empty})"
+    return "hit the token budget with no text left" if cut else "was empty"
+
+
+def _markdown(
+    agg: Mapping,
+    skipped: int,
+    parse_failures: int,
+    dataset: str | None = None,
+    rows: Sequence[Mapping] | None = None,
+) -> str:
+    """rag.md from the aggregates (and the rows, for the notes that break counts down)."""
     # The canonical header stays verbatim; any other split names itself, so a train-split
     # table can't pass for the headline.
     source = "SciFact claims" if dataset in (None, CANONICAL_DATASET) else f"claims from {dataset}"
@@ -880,11 +1058,17 @@ def _markdown(agg: dict, skipped: int, parse_failures: int, dataset: str | None 
             f"{parse_failures} judge repl{'y' if parse_failures == 1 else 'ies'} unparseable"
         )
     if truncated := agg.get("truncated_answers", 0):
-        notes.append(
-            f"{truncated} answer{'' if truncated == 1 else 's'} truncated at the token budget "
-            f"(scored as written, with no verdict line)"
-        )
+        notes.append(_truncation_note(truncated, rows))
     note_line = f"\n{'; '.join(notes)}.\n" if notes else ""
+    # Re-ask-only answers whose first reply had no text (cut off at the token budget, or
+    # empty) were judged on a placeholder: excluded from the faithfulness mean, and the
+    # table says so — and why, from the rows.
+    faith_scope = ""
+    if unjudged := agg.get("faithfulness_unjudged_reask"):
+        faith_scope = (
+            f", n={agg.get('faithfulness_n')}; {unjudged} answered only via the re-ask excluded "
+            f"— the first reply {_unjudged_cause(rows)}, so the judge saw no answer text"
+        )
     k = agg["top_k"]
     cols = (*LABELS, NO_VERDICT)
     confusion = "".join(
@@ -904,7 +1088,7 @@ def _markdown(agg: dict, skipped: int, parse_failures: int, dataset: str | None 
         f"{note_line}\n"
         f"## Answer quality (LLM judge)\n\n"
         f"| Metric | Score |\n|---|---|\n"
-        f"| Faithfulness (over answered) | {_fmt(agg['faithfulness_answered'])} |\n"
+        f"| Faithfulness (over answered{faith_scope}) | {_fmt(agg['faithfulness_answered'])} |\n"
         f"| Context relevance (all) | {_fmt(agg['context_relevance'])} |\n\n"
         f"## Claim verdicts, scored against the gold label (no judge)\n\n"
         f"The final `Verdict:` line maps SUPPORTED→SUPPORT, REFUTED→CONTRADICT, NOT ENOUGH "
@@ -937,6 +1121,23 @@ def _markdown(agg: dict, skipped: int, parse_failures: int, dataset: str | None 
         f"{_quadrant_md(agg['qrels_oracle']['quadrants'])}\n"
         f"{_abstention_md(agg['qrels_oracle'], agg['answered_rate'])}"
     )
+
+
+def markdown_from_json(blob: Mapping) -> str:
+    """rag.md re-rendered offline from a finished rag.json — the aggregates and rows it
+    stores — with the current writer: no LLM call, no retrieval, nothing recomputed."""
+    run = blob.get("run") if isinstance(blob.get("run"), Mapping) else {}
+    rows = blob.get("rows") if isinstance(blob.get("rows"), list) else None
+    return _markdown(blob, int(blob.get("skipped") or 0), int(blob.get("judge_parse_failures") or 0),
+                     run.get("dataset"), rows)
+
+
+def render_markdown(path: Path) -> Path:
+    """Write rag.md next to the rag.json at `path` (which is only read), from its stored
+    contents (markdown_from_json). Returns the written path."""
+    md_path = path.parent / "rag.md"
+    md_path.write_text(markdown_from_json(json.loads(path.read_text())))
+    return md_path
 
 
 def _estimate_line(n: int, gen: LLMEndpoint, judge_ep: LLMEndpoint, throttle: float) -> str:
@@ -1071,7 +1272,7 @@ def output_dir(
             name += f"_judge-{_slug(judge_ep.model)}"
     if not reask:
         name += "_noreask"
-    return RUNS / name, False
+    return assert_outside(RUNS / name), False
 
 
 def _non_default_notice(changed: Sequence[str], gen: LLMEndpoint, judge_ep: LLMEndpoint) -> str:
@@ -1363,11 +1564,21 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
         help="read the OpenRouter key's remaining free requests (GET /api/v1/key) and abort "
         "before any LLM call if they are fewer than needed (also: SSR_RAG_CHECK_QUOTA=1)",
     )
+    p.add_argument(
+        "--render-md",
+        metavar="RAG_JSON",
+        type=Path,
+        help="only re-render rag.md next to this finished rag.json from what it stores (the "
+        "json is read, never written); no retrieval, no LLM call",
+    )
     return p.parse_args(list(argv))
 
 
 def main(argv: Sequence[str] = ()) -> None:
     args = _parse_args(argv)
+    if args.render_md is not None:
+        print(f"Wrote {render_markdown(args.render_md)}")
+        return
     want_quota = args.check_quota or os.environ.get("SSR_RAG_CHECK_QUOTA", "") not in ("", "0")
     dataset = rag_dataset()
     n_req = parse_n(os.environ.get("SSR_RAG_N"))
@@ -1488,13 +1699,16 @@ def main(argv: Sequence[str] = ()) -> None:
         return reask_hits(done[qid]["retrieved_doc_ids"], corpus)
 
     def reask_request(qid: str) -> tuple[list[dict], str]:
+        """The re-ask messages and the v2 key a fresh reply is written under (lookups go
+        through reask_lookup: v2, then the legacy key for the canonical endpoint only)."""
         msgs = reask_messages(queries[qid], passages(qid))
-        return msgs, reask_key(qid, gen_ep.model, msgs)
+        return msgs, reask_key_v2(qid, gen_ep, msgs)
+
+    def reask_cached(qid: str) -> dict | None:
+        return reask_lookup(reask_cache, qid, gen_ep, reask_request(qid)[0])
 
     reask_done = [q for q in qids if q in done and needs_reask(queries[q], done[q]["verdict"])]
-    reask_missing = (
-        [q for q in reask_done if reask_cache.get(reask_request(q)[1]) is None] if reask_on else []
-    )
+    reask_missing = [q for q in reask_done if reask_cached(q) is None] if reask_on else []
     if len(done) >= MIN_ROWS_FOR_OBSERVED_RETRY:
         reask_rate = len(reask_done) / len(done)
     else:
@@ -1728,7 +1942,7 @@ def main(argv: Sequence[str] = ()) -> None:
         if r is None or not needs_reask(queries[qid], r["verdict"]):
             continue
         msgs, key = reask_request(qid)
-        rec = reask_cache.get(key)
+        rec = reask_lookup(reask_cache, qid, gen_ep, msgs)
         if rec is not None:
             reask_stats["cached"] += 1
             account(rec.get("cost_usd"), worst_reask)
@@ -1774,10 +1988,11 @@ def main(argv: Sequence[str] = ()) -> None:
             "completion_tokens": reply.completion_tokens, "reasoning_tokens": reply.reasoning_tokens,
             "provider": reply.provider, "cost_usd": reply.cost_usd, "requests": 1,
             "kind": "reask", "query_id": qid, "model": gen_ep.model,
-            "max_tokens": REASK_MAX_TOKENS, "source": "rag_eval",
+            "max_tokens": REASK_MAX_TOKENS, "source": "rag_eval", "key_version": 2,
+            "request": reask_request_fingerprint(gen_ep),
             "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
-        reask_cache.put(key, rec)  # persisted at once, like a checkpointed row
+        reask_cache.put(key, rec)  # v2 key; persisted at once, like a checkpointed row
         reask_stats["fetched"] += 1
         final[qid] = apply_reask(r, rec)
         x = final[qid]
@@ -1824,13 +2039,15 @@ def main(argv: Sequence[str] = ()) -> None:
             indent=2,
         )
     )
-    (out / "rag.md").write_text(_markdown(agg, skipped, parse_failures, dataset))
+    (out / "rag.md").write_text(_markdown(agg, skipped, parse_failures, dataset, rows))
     print(
         f"\nn={agg['n']}  verdict_accuracy={agg['verdict_accuracy']}  "
         f"evidence={agg['evidence_rate']}  answered={agg['answered_rate']}  "
         f"abstention_precision={agg['abstention_precision']} "
         f"(qrels: {agg['qrels_oracle']['abstention_precision']})  "
-        f"faithfulness={agg['faithfulness_answered']}  ctx={agg['context_relevance']}  "
+        f"faithfulness={agg['faithfulness_answered']} (n={agg['faithfulness_n']}; "
+        f"{agg['faithfulness_unjudged_reask']} re-ask placeholders excluded)  "
+        f"ctx={agg['context_relevance']}  "
         f"judge_answered_fallbacks={agg['judge_answered_fallbacks']}  "
         f"truncated={agg['truncated_answers']} (retried {agg['retried_answers']})  "
         f"reasked={agg['reasked_answers']} ({agg['reask_verdicts']} verdicts; "

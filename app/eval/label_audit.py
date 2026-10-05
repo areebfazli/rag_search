@@ -64,6 +64,7 @@ from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from app.core.paths import display_path, is_within
 from app.eval import rag_eval
 from app.eval.rag_eval import LABELS, _abstention, _abstention_class, _rate, verdict_scores
 from app.eval.verify_eval import wilson
@@ -561,8 +562,8 @@ def to_markdown(rep: Mapping) -> str:
         "(GPT-5.4-mini) flagged, adjudicated with a frontier-LLM (GPT-5.4) second opinion; the "
         "other 3 from the same annotator's review of the 152 unflagged pairs (paper, Stage 2). The "
         "corrections therefore lean toward how an LLM reads the evidence, so an LLM generator "
-        "agreeing with them is expected in part — read the gain as an upper-side sensitivity, "
-        "not as hidden accuracy.",
+        "agreeing with them is expected in part — read the gain as a one-sided "
+        "sensitivity check, not as hidden accuracy.",
         "- **One direction only.** Only the 188 evidence-bearing claims (209 pairs) were "
         "audited; the 112 NEI claims were not, so a label can move to NEI or flip, but an NEI "
         "claim can never be corrected to SUPPORT/CONTRADICT.",
@@ -655,10 +656,14 @@ def main(argv: Sequence[str] | None = None) -> None:
         labels = load_claim_labels(AUDIT_DATASET)
         for src in map(Path, args.runs):
             blob = json.loads(src.read_text())
-            if src.resolve().parent == rag_eval.OUT.resolve() and not (blob.get("run") or {}).get("canonical"):
-                raise AuditError(f"{src}: only the canonical run is reported into {rag_eval.OUT}/")
-            rep = audit_run(blob, labels, audit, source=str(src))
             out_json, out_md = output_paths(src)
+            # rag_eval.OUT is repo-anchored; is_within resolves symlinks / `..` / aliases,
+            # so neither the source nor a report path can lead a non-canonical run in.
+            if not (blob.get("run") or {}).get("canonical") and any(
+                is_within(p, rag_eval.OUT) for p in (src, out_json, out_md)
+            ):
+                raise AuditError(f"{src}: only the canonical run is reported into {rag_eval.OUT}/")
+            rep = audit_run(blob, labels, audit, source=display_path(src))
             out_json.write_text(json.dumps(rep, indent=2) + "\n")
             out_md.write_text(to_markdown(rep))
             t = rep["tiers"]

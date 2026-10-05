@@ -491,7 +491,7 @@ def test_reask_goes_through_the_same_spend_policy_routing_and_params(monkeypatch
     # exactly the first request's routing (pinned paid provider / $0 free routing) and
     # model-aware params (no temperature for Luna, reasoning object per model).
     gen, fake = _or_generator(monkeypatch, model=model, cost=0.0001, finish="length", reask=True)
-    ans = gen.generate("claim", _hits(2))
+    ans = gen.generate("Statins lower LDL cholesterol.", _hits(2))
     assert len(fake.requests) == 3
     first, reask = fake.requests[0], fake.requests[2]
     assert reask["max_tokens"] == REASK_MAX_TOKENS and reask["model"] == first["model"]

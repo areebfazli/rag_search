@@ -29,6 +29,15 @@ three in order; each writes the file the next one reads, tied to the checkpoint'
             Refuses to run untuned, with a different checkpoint than the one tuned on, or
             when the output already exists (pass --rerun to reproduce it on purpose).
 
+Ling's rows are always read as the FIRST PASS left them (``ling_first_pass``, i.e.
+rag_eval.first_pass_row on every row): the verdict-only re-ask that rag_eval now applies
+as a post-step (and that the committed rag.json rows carry) is undone at load, for the
+test run, the train tuning run and the rag_compare baseline alike. The combination rules
+were tuned on, and the committed verify_combined_* / verify_trained_R1_* outputs were
+scored against, Ling's pre-re-ask verdicts; on the committed rag.json the mapping
+reproduces those rows exactly, so a --rerun still measures "verifier vs Ling's first
+pass", not "verifier vs Ling + re-ask".
+
 The model comes from data/models/verifier/model/ (the unzipped Kaggle output; see
 app.verify.trained).
 
@@ -53,16 +62,27 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from app.eval.rag_eval import LABELS, TOP_K, _abstention_class
+from app.core.paths import RESULTS, is_within
+from app.eval.rag_eval import LABELS, TOP_K, _abstention_class, first_pass_row
 from app.eval.verify_eval import (
     LABEL_TO_VERDICT,
     RUNS,
-    assert_safe_output,
+    UnsafeOutputError,
     class_scores,
     summarize,
 )
+from app.eval.verify_eval import assert_safe_output as _assert_safe_output
 from app.verify import nli
 from app.verify.nli import NON_NEI
+
+def assert_safe_output(path: Path) -> Path:
+    """verify_eval.assert_safe_output (strictly inside data/eval_runs/), checked against
+    the repo-anchored eval/results/ rather than a cwd-relative one, and refusing any alias
+    of it that a symlink, `..` or absolute path could reach (app.core.paths.is_within)."""
+    if is_within(path, RESULTS):
+        raise UnsafeOutputError(f"{path} is inside the committed {RESULTS}")
+    return _assert_safe_output(path, forbidden=RESULTS)
+
 
 TRAIN_DATASET = "beir/scifact/train"
 TEST_DATASET = "beir/scifact/test"
@@ -81,6 +101,21 @@ TUNING_DIR = RUNS / f"verify_combined_tuning_train_{N_TUNING}"
 FROZEN_PATH = TUNING_DIR / "frozen.json"  # written by `tune`, the only input `test` takes
 R1_TEST_DIR = RUNS / f"verify_trained_R1_test_{N_TEST}"
 FROZEN_KEYS = ("windowing", "rule", "params", "r1_tau", "checkpoint_sha", "tuned_on")
+
+
+def ling_first_pass(blob: Mapping) -> dict:
+    """A Ling rag.json with the verdict re-ask undone: every row through
+    rag_eval.first_pass_row (a no-op on rows that never carried it), and the run's re-ask
+    settings dropped so a combined run block copied from it does not claim a re-ask its
+    rows no longer have. Only rows and run are rebuilt; nothing here reads the file's
+    top-level aggregates."""
+    rows = [first_pass_row(r) for r in blob["rows"]]
+    run = dict(blob.get("run") or {})
+    if any(k.startswith("reask") for k in run) or any(
+            "first_pass" in r or "reask_attempted" in r for r in blob["rows"]):
+        run = {k: v for k, v in run.items() if not k.startswith("reask")}
+        run["ling_rows"] = "first_pass: verdict re-ask undone (rag_eval.first_pass_row)"
+    return {**blob, "run": run, "rows": rows}
 
 
 def test_dir(rule: str) -> Path:
@@ -370,7 +405,7 @@ def _ling_train_rows() -> tuple[list[dict], dict, dict]:
     from app.ingest.corpus import load_queries_qrels
     from app.verify.train_data import TUNING_RUN
 
-    blob = json.loads(TUNING_RUN.read_text())
+    blob = ling_first_pass(json.loads(TUNING_RUN.read_text()))  # before re-parsing
     if blob["run"]["dataset"] != TRAIN_DATASET:
         raise SystemExit(f"{TUNING_RUN} is not a {TRAIN_DATASET} run")
     queries, _ = load_queries_qrels(TRAIN_DATASET)
@@ -450,7 +485,7 @@ def stage_test(rerun: bool = False, log=print) -> Path:
     out_r1 = assert_safe_output(R1_TEST_DIR)
     if (out / "rag.json").exists() and not rerun:
         raise SystemExit(f"{out}/rag.json exists: the test split is touched once (--rerun to reproduce it)")
-    blob = json.loads(TEST_RUN.read_text())
+    blob = ling_first_pass(json.loads(TEST_RUN.read_text()))
     if blob["run"]["dataset"] != TEST_DATASET or len(blob["rows"]) != N_TEST:
         raise SystemExit(f"{TEST_RUN} is not the 300-claim test run")
     queries, _ = load_queries_qrels(TEST_DATASET)
@@ -472,12 +507,15 @@ def stage_test(rerun: bool = False, log=print) -> Path:
     return out
 
 
-def compare_to_ling(run_dir: Path, baseline: Path = TEST_RUN) -> str:
-    """rag_compare (paired exact McNemar) of a run against Ling's committed test run ->
-    run_dir/compare.{md,json}; returns the markdown."""
+def compare_to_ling(run_dir: Path, baseline: Path | None = None) -> str:
+    """rag_compare (paired exact McNemar) of a run against Ling's committed test run (its
+    first pass, like the rows the run was built from) -> run_dir/compare.{md,json};
+    returns the markdown."""
     from app.eval import rag_compare
 
-    res = rag_compare.compare(rag_compare.load_run(baseline), rag_compare.load_run(run_dir / "rag.json"))
+    baseline = TEST_RUN if baseline is None else baseline
+    base = ling_first_pass(rag_compare.load_run(baseline))
+    res = rag_compare.compare(base, rag_compare.load_run(run_dir / "rag.json"))
     md = rag_compare.to_markdown(res, str(baseline), str(run_dir / "rag.json"))
     (run_dir / "compare.json").write_text(json.dumps(res, indent=2, default=list))
     (run_dir / "compare.md").write_text(md)

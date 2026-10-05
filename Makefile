@@ -18,10 +18,10 @@ analysis:  ## label-stratified re-score of the cached eval runs -> eval/results/
 latency:  ## per-query retrieval latency for every eval config -> eval/results/latency.{md,json}
 	uv run --locked python -m app.eval.latency
 
-eval-rag:  ## RAG answer-quality eval (needs SSR_OPENROUTER_API_KEY in .env; ~$0.01-0.02/run)
+eval-rag:  ## RAG answer-quality eval (needs SSR_OPENROUTER_API_KEY in .env; $0 on the default free models; an optional paid generator costs ~$0.005-0.10/run depending on model and SSR_RAG_N, capped by SSR_RAG_MAX_SPEND_USD)
 	uv run python -m app.eval.rag_eval
 
-web-eval:  ## S2 web search vs local hybrid on gold qrels -> eval/results/web_retrieval.{md,json} (set SSR_S2_API_KEY; ~300 requests at 1 req/s)
+web-eval:  ## S2 web search vs local hybrid on gold qrels -> eval/results/web_retrieval.{md,json} (set SSR_S2_API_KEY; pooled S2 + PubMed, a few thousand requests at 1 req/s)
 	uv run --locked python -m app.eval.web_eval
 
 verify-eval:  ## NLI (DeBERTa) verdicts, no LLM -> data/eval_runs/verify_*/ (SSR_RAG_DATASET, SSR_RAG_N; ARGS=--tune on train only)

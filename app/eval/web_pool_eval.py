@@ -25,12 +25,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
 
 from app.core.config import settings
 from app.core.interfaces import SearchHit
+from app.retrieve.pubmed import quiet_http_logs
 
 METRICS = ["recall@5", "recall@10", "recall@100", "ndcg@10"]
 SEED = 13
@@ -140,9 +142,58 @@ class Sources:
         return out
 
 
-def main() -> int:
+def baseline_of(name: str) -> str:
+    return "s2" + ("_any" if name.endswith("_any") else "")
+
+
+def score_on_subsets(
+    qrels: dict[str, dict[str, int]], runs: dict[str, dict], subsets: dict[str, list[str]]
+) -> dict[str, dict]:
+    """ranx scores per run on ITS OWN claim subset, plus its baseline (s2 in the same
+    view) re-scored on that subset and the paired t-test p-value against it.
+
+    Runs sharing a subset are scored together (one ranx.compare per subset). Returns
+    {name: {"scores", "baseline_scores", "vs_s2_p"}} ("vs_s2_p" absent for the baseline
+    itself); a run with an empty subset gets nothing."""
     from ranx import Qrels, Run, compare
 
+    groups: dict[tuple[str, ...], list[str]] = {}
+    for name, subset in subsets.items():
+        if subset:
+            groups.setdefault(tuple(subset), []).append(name)
+    out: dict[str, dict] = {}
+    for subset, names in groups.items():
+        bases = [b for b in dict.fromkeys(baseline_of(n) for n in names) if b in runs]
+        members = list(dict.fromkeys(names + bases))
+        q = Qrels({k: qrels[k] for k in subset})
+        blob = compare(q, [Run({k: runs[nm].get(k, {}) for k in subset}, name=nm) for nm in members],
+                       METRICS, max_p=0.05).to_dict()
+        for nm in names:
+            base = baseline_of(nm)
+            entry = {"scores": {m: float(blob[nm]["scores"][m]) for m in METRICS}}
+            if base in blob:
+                entry["baseline_scores"] = {m: float(blob[base]["scores"][m]) for m in METRICS}
+                if nm != base:
+                    entry["vs_s2_p"] = {m: float(blob[nm]["comparisons"][base][m]) for m in METRICS}
+            out[nm] = entry
+    return out
+
+
+_TAG_OK = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
+def pool_tag() -> str:
+    """SSR_POOL_TAG (an output-dir suffix), or "" if unset. Only [A-Za-z0-9_-] (1-64
+    chars) is accepted; anything else ("../x", "a/b", spaces, dots) is refused with
+    ValueError before any work starts, so the tag can never move the output dir out
+    of data/eval_runs/."""
+    tag = os.environ.get("SSR_POOL_TAG", "")
+    if tag and not _TAG_OK.fullmatch(tag):
+        raise ValueError(f"SSR_POOL_TAG must match [A-Za-z0-9_-]{{1,64}}, got {tag!r}")
+    return tag
+
+
+def main() -> int:
     from app.eval.rag_eval import sample_claims
     from app.eval.web_eval import load_rarity, make_embedder, to_run
     from app.ingest.corpus import load_documents, load_queries_qrels
@@ -150,6 +201,8 @@ def main() -> int:
     from app.retrieve.s2_extra import expand_citations
     from app.retrieve.web_search import EmbeddingCache, merge_pools, prerank, rerank_pool
 
+    tag = pool_tag()  # refuse a bad tag up front, not after hours of fetching
+    quiet_http_logs()
     queries, qrels = load_queries_qrels()
     n = int(os.environ.get("SSR_WEB_EVAL_N", "100"))
     ids = sample_claims(queries, n, SEED)
@@ -216,22 +269,26 @@ def main() -> int:
     if os.environ.get("SSR_POOL_FETCH_ONLY"):
         return 0
 
-    # 4. Score combinations.
+    # 4. Score combinations. A combination is scored ONLY on the claims where every one
+    # of its sources was actually queried (OpenAlex ran on the first OA_CLAIMS claims
+    # only), and its baseline (s2, same view) is re-scored on exactly those claims — a
+    # source that was never asked must not count as a miss.
     combos_env = os.environ.get("SSR_POOL_COMBOS")
     combos = [tuple(c.split("+")) for c in combos_env.split(",")] if combos_env else (
         [(s,) for s in SOURCE_NAMES]
         + [("s2", s) for s in SOURCE_NAMES if s != "s2"]
     )
-    qrels_d = {q: qrels[q] for q in ids}
+    if ("s2",) not in combos:
+        combos = [("s2",)] + list(combos)  # the baseline every row is compared with
     results = {}
     runs = {}
+    subsets: dict[str, list[str]] = {}
     for combo in combos:
         for view, keep in (("", False), ("_any", True)):
             name = "+".join(combo) + view
             run, pool_hit, pool_sizes = {}, 0, []
-            for qid in ids:
-                if not all(s in per[qid] for s in combo):
-                    continue
+            subset = [qid for qid in ids if all(s in per[qid] for s in combo)]
+            for qid in subset:
                 pool = merge_pools([per[qid][s] for s in combo], keep_no_abstract=keep)
                 pool_sizes.append(len(pool))
                 pool_hit += any(h.doc_id in qrels[qid] for h in pool)
@@ -239,32 +296,37 @@ def main() -> int:
                           rerank_pool(queries[qid], pool, embedder, emb_cache, dense_cap))[:100]
                 run[qid] = to_run(ranked)
             runs[name] = run
-            results[name] = {"n": len(run), "pool_any_gold": pool_hit / max(1, len(run)),
-                             "pool_mean": sum(pool_sizes) / max(1, len(run))}
-        print(f"  scored {'+'.join(combo)}", flush=True)
-    q = Qrels(qrels_d)
+            subsets[name] = subset
+            results[name] = {"n": len(subset), "pool_any_gold": pool_hit / max(1, len(subset)),
+                             "pool_mean": sum(pool_sizes) / max(1, len(subset)),
+                             "subset": len(subset) < len(ids)}
+        print(f"  scored {'+'.join(combo)} (n={len(subsets['+'.join(combo)])})", flush=True)
+    for nm, scored in score_on_subsets(qrels, runs, subsets).items():
+        results[nm].update(scored)
     names = list(runs)
-    ref = "s2"
-    blob = compare(q, [Run({k: runs[nm].get(k, {}) for k in ids}, name=nm) for nm in names], METRICS, max_p=0.05).to_dict()
-    for nm in names:
-        results[nm]["scores"] = {m: float(blob[nm]["scores"][m]) for m in METRICS}
-        base = ref + ("_any" if nm.endswith("_any") else "")
-        if nm != base and base in blob:
-            results[nm]["vs_s2_p"] = {m: float(blob[nm]["comparisons"][base][m]) for m in METRICS}
     slug = "".join(c if c.isalnum() else "-" for c in settings.eval_dataset).strip("-")
-    out = RUNS / (f"web_pool_{slug}_{len(ids)}" + (os.environ.get("SSR_POOL_TAG", "") and "_" + os.environ["SSR_POOL_TAG"]))
+    out = RUNS / (f"web_pool_{slug}_{len(ids)}" + (tag and "_" + tag))
     out.mkdir(parents=True, exist_ok=True)
     lines = [f"# Web candidate pool — {settings.eval_dataset}, {len(ids)} claims (seed {SEED})", "",
-             f"dense_cap={dense_cap}; logical requests per claim: "
+             f"dense_cap={dense_cap}; screen={SCREEN}; logical requests per claim: "
              + ", ".join(f"{k}={v / len(ids):.2f}" for k, v in src.logical.items()), "",
-             "| Pool | gold in pool | mean pool | R@5 | R@10 | R@100 | nDCG@10 | p(R@100 vs s2) |",
-             "|---|---|---|---|---|---|---|---|"]
+             "Each row is scored only on the n claims where all of its sources were queried; "
+             "`s2 R@100 (same n)` and the p-value compare it with the s2 baseline (same view) "
+             f"on exactly those claims. OpenAlex (oa_*) ran on the first {OA_CLAIMS} claims only.", "",
+             "| Pool | n | gold in pool | mean pool | R@5 | R@10 | R@100 | nDCG@10 | s2 R@100 (same n) | p(R@100 vs s2) |",
+             "|---|---|---|---|---|---|---|---|---|---|"]
     for nm in names:
         r = results[nm]
+        if "scores" not in r:
+            lines.append(f"| {nm} | 0 | | | | | | | | |")
+            continue
         s = r["scores"]
         p = r.get("vs_s2_p", {}).get("recall@100")
-        lines.append(f"| {nm} | {r['pool_any_gold']:.2f} | {r['pool_mean']:.0f} | {s['recall@5']:.4f} | {s['recall@10']:.4f} | "
-                     f"{s['recall@100']:.4f} | {s['ndcg@10']:.4f} | {'' if p is None else f'{p:.4f}'} |")
+        base = r.get("baseline_scores", {}).get("recall@100")
+        label = nm + (f" (OpenAlex subset, n={r['n']})" if "oa_" in nm else (f" (subset, n={r['n']})" if r["subset"] else ""))
+        lines.append(f"| {label} | {r['n']} | {r['pool_any_gold']:.2f} | {r['pool_mean']:.0f} | {s['recall@5']:.4f} | "
+                     f"{s['recall@10']:.4f} | {s['recall@100']:.4f} | {s['ndcg@10']:.4f} | "
+                     f"{'' if base is None else f'{base:.4f}'} | {'' if p is None else f'{p:.4f}'} |")
     md = "\n".join(lines) + "\n"
     (out / "web_pool.md").write_text(md)
     (out / "web_pool.json").write_text(json.dumps({"results": results, "logical": src.logical, "n": len(ids),

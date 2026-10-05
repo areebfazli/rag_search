@@ -128,3 +128,53 @@ def test_rrf_sensitivity_baseline_must_be_committed_hybrid(monkeypatch):
     runs["hybrid"]["q1"] = _as_run(["g", "x"])  # true equal-weight order is x, g
     with pytest.raises(ValueError, match="differs from the cached hybrid run"):
         analysis.rrf_sensitivity(runs, qids, relevant, committed)
+
+
+@pytest.mark.parametrize(
+    "wins,losses,want",
+    [
+        (9, 2, 134 / 2048),  # hybrid vs dense R@100: 2 * (C(11,0)+C(11,1)+C(11,2)) / 2^11
+        (2, 9, 134 / 2048),  # symmetric
+        (5, 0, 2 / 32),  # 5-0 is not significant at 0.05 two-sided
+        (1, 13, 2 * 15 / 2**14),
+        (3, 3, 1.0),  # capped at 1
+    ],
+)
+def test_sign_test_p_exact(wins, losses, want):
+    assert analysis.sign_test_p(wins, losses) == pytest.approx(want)
+
+
+def test_sign_test_p_no_discordant_is_nan():
+    assert analysis.sign_test_p(0, 0) != analysis.sign_test_p(0, 0)  # NaN
+
+
+def _comparison(p, wins, ties, losses):
+    return {
+        "delta": 0.01,
+        "p": p,
+        "win_tie_loss": {"W": wins, "T": ties, "L": losses},
+        "sign_p": analysis.sign_test_p(wins, losses),
+    }
+
+
+def test_recall_sig_marker_follows_sign_test_not_t_test():
+    # t-test p 0.03 but a 9-2 split: sign p 0.065 -> recall row not marked; nDCG uses t-test.
+    c = _comparison(0.03, 9, 289, 2)
+    assert not analysis._is_sig(c, "recall@100")
+    assert analysis._is_sig(c, "ndcg@10")
+    assert analysis._is_sig(_comparison(0.2, 18, 281, 1), "recall@100")
+
+
+def test_score_and_compare_reports_sign_p():
+    # 3 queries: hybrid finds gold on q1, q2; dense on none -> W/T/L 2/1/0 at Recall@100.
+    runs = {
+        "hybrid": {"q1": {"g": 2.0, "x": 1.0}, "q2": {"h": 2.0}, "q3": {"x": 1.0}},
+        "dense": {"q1": {"x": 1.0}, "q2": {"y": 1.0}, "q3": {"x": 1.0}},
+    }
+    relevant = {"q1": {"g"}, "q2": {"h"}, "q3": {"z"}}
+    blob = analysis.score_and_compare(
+        runs, ["q1", "q2", "q3"], relevant, ["hybrid", "dense"], [("hybrid", "dense")]
+    )
+    c = blob["comparisons"]["hybrid_vs_dense"]["recall@100"]
+    assert c["win_tie_loss"] == {"W": 2, "T": 1, "L": 0}
+    assert c["sign_p"] == pytest.approx(0.5)

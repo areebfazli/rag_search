@@ -368,3 +368,24 @@ def test_frontend_renders_hits_without_innerhtml():
 
 def test_hit_is_searchhit():
     assert isinstance(parse_search({"data": [paper(1)]}, 1)[0], SearchHit)
+
+
+# --- review fix: S2 bodies are size-capped while streaming -----------------------------
+
+
+def test_an_oversize_s2_body_is_refused_while_streaming(monkeypatch, tmp_path):
+    from app.retrieve import semantic_scholar
+
+    monkeypatch.setattr(semantic_scholar, "S2_MAX_RESPONSE_BYTES", 1000)
+    body = json.dumps({"data": [paper(i, abstract="x" * 200) for i in range(10)]}).encode()
+    chunked = FakeS2(lambda r: httpx.Response(200, content=iter([body[:600], body[600:]])))
+    cache = ResponseCache(tmp_path)
+    s2 = make(chunked, cache=cache)
+    with pytest.raises(S2Error, match="too large"):
+        s2.fetch("q", 10)
+    assert len(chunked.requests) == 1 and list(tmp_path.iterdir()) == []  # no retry, nothing cached
+    declared = FakeS2(httpx.Response(200, content=body))  # Content-Length over the cap
+    with pytest.raises(S2Error, match="too large"):
+        make(declared).fetch("q", 10)
+    small = FakeS2(ok(paper(1)))
+    assert [h.doc_id for h in make(small).search("q", 10)] == ["1"]

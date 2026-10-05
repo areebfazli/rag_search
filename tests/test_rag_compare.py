@@ -171,3 +171,86 @@ def test_main_refuses_mismatched_sets_with_a_clear_exit(tmp_path):
     b = write(tmp_path, "b.json", run([row("2")]))
     with pytest.raises(SystemExit, match="rag_compare: claim sets differ"):
         rag_compare.main([str(a), str(b)])
+
+
+def test_settings_diff_reports_reask_settings_and_rescored():
+    reask = {"enabled": True, "prompt_hash": "r1", "max_tokens": 8192}
+    a = run([row("1")], reask=reask)
+    b = run([row("1")], reask={**reask, "prompt_hash": "r2", "max_tokens": 4096}, rescored=True)
+    differ = {k: (va, vb) for k, va, vb in rag_compare.compare(a, b)["settings_differ"]}
+    assert differ == {
+        "reask.prompt_hash": ("r1", "r2"),
+        "reask.max_tokens": (8192, 4096),
+        "rescored": (None, True),
+    }
+    # A run from before the re-ask (no run.reask block) vs one with it off/on.
+    old = run([row("1")])
+    off = run([row("1")], reask={**reask, "enabled": False})
+    differ = {k for k, _, _ in rag_compare.compare(old, off)["settings_differ"]}
+    assert {"reask.enabled", "reask.prompt_hash", "reask.max_tokens"} <= differ
+    same = rag_compare.compare(a, run([row("1")], reask=dict(reask)))["settings_same"]
+    assert {"reask.enabled", "reask.prompt_hash", "reask.max_tokens", "rescored"} <= set(same)
+
+
+# --- the settings that differ ---------------------------------------------------------------
+
+
+def _full_run():
+    return {
+        "n": 2, "top_k": 5, "sample_seed": 13, "generator_model": "g",
+        "run": {
+            "dataset": "beir/scifact/test", "generator_model": "g", "generator_provider": "openrouter",
+            "generator_base_url": "https://openrouter.ai/api/v1", "generator_temperature": 0.1,
+            "generator_reasoning_param": None,
+            "generator_extra_body": {"provider": {"allow_fallbacks": False}},
+            "judge_extra_body": {"reasoning": {"effort": "none"}},
+            "judge_base_url": "https://openrouter.ai/api/v1",
+            "oracle": "rationale", "eval_limit": 0, "n_sample": 2, "top_k": 5, "sample_seed": 13,
+            "label_source": {"dataset": "beir/scifact/test", "source_zip_sha256": "aa"},
+            "checkpoint_signature": "cb01", "reask": {"enabled": True, "trigger": "no verdict"},
+            "throttle_s": 12.0, "reask_cache": "x.json", "reask_replies": {"cached": 1},
+            "canonical": True, "default_models": True,
+        },
+        "rows": [row("1"), row("2")],
+    }
+
+
+@pytest.mark.parametrize(("path", "label"), [
+    (("generator_temperature",), "generator_temperature"),
+    (("generator_reasoning_param",), "generator_reasoning_param"),
+    (("generator_extra_body", "provider", "allow_fallbacks"), "generator_extra_body"),
+    (("judge_extra_body", "reasoning", "effort"), "judge_extra_body"),
+    (("generator_base_url",), "generator_base_url"),
+    (("judge_base_url",), "judge_base_url"),
+    (("oracle",), "oracle"),
+    (("eval_limit",), "eval_limit"),
+    (("n_sample",), "n_sample"),
+    (("label_source", "source_zip_sha256"), "label_source.source_zip_sha256"),
+    (("checkpoint_signature",), "checkpoint_signature"),
+    (("reask", "trigger"), "reask.trigger"),
+])
+def test_settings_diff_reports_each_run_setting_that_can_move_an_outcome(path, label):
+    a, b = _full_run(), _full_run()
+    node = b["run"]
+    for k in path[:-1]:
+        node = node[k]
+    node[path[-1]] = "CHANGED"
+    differ, same = rag_compare.settings_diff(a, b)
+    assert [d[0] for d in differ] == [label]
+    assert label not in same
+    assert f"| {label} |" in rag_compare.to_markdown(rag_compare.compare(a, b), "A", "B")
+
+
+@pytest.mark.parametrize("key", ["throttle_s", "reask_cache", "reask_replies", "canonical", "default_models"])
+def test_settings_diff_ignores_bookkeeping_and_derived_keys(key):
+    a, b = _full_run(), _full_run()
+    b["run"][key] = "CHANGED"
+    assert rag_compare.settings_diff(a, b)[0] == []
+
+
+def test_settings_fall_back_to_top_level_copies_for_an_old_run_block():
+    a, b = _full_run(), _full_run()
+    for blob, k in ((a, 13), (b, 7)):
+        del blob["run"]["sample_seed"]
+        blob["sample_seed"] = k
+    assert [d[0] for d in rag_compare.settings_diff(a, b)[0]] == ["sample_seed"]

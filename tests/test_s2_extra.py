@@ -394,9 +394,20 @@ def test_falls_back_to_next_id_when_first_is_unknown():
 
 
 def test_batch_failure_raises_s2error():
+    # Retrying cannot clear a 401/403/404, and a 5xx/429 is transient: the caller decides.
+    for status in (403, 503):
+        router = Router({("POST", "/paper/batch"): lambda r, status=status: httpx.Response(status)})
+        with pytest.raises(S2Error):
+            S2IdResolver(make(router)).resolve([ExternalPaper("pubmed", 0, pmid="1")])
+
+
+def test_a_persistent_400_leaves_ids_unresolved_without_raising_or_caching(tmp_path):
     router = Router({("POST", "/paper/batch"): lambda r: httpx.Response(400)})
-    with pytest.raises(S2Error):
-        S2IdResolver(make(router)).resolve([ExternalPaper("pubmed", 0, pmid="1")])
+    r = S2IdResolver(make(router), tmp_path)
+    assert r.resolve([ExternalPaper("pubmed", 0, pmid="1")]) == {"PMID:1": None}
+    n = len(router.requests)
+    # Not cached as "unknown to S2": the next call asks again.
+    assert r.lookup(["PMID:1"]) == {"PMID:1": None} and len(router.requests) == n + 1
 
 
 def test_to_hits_doc_ids_text_fallback_order_and_dedupe():
@@ -478,7 +489,81 @@ def test_a_400_batch_is_split_and_retried_in_halves():
     assert all(out[f"PMID:{i}"]["corpusId"] == 100 + i for i in range(1, 9))
     assert [len(b["ids"]) for b in router.bodies()] == [8, 4, 2, 2, 4, 2, 2]
 
-    # A 400 that persists down to single ids (or past the depth bound) still raises.
-    router = Router({("POST", "/paper/batch"): lambda request: httpx.Response(400)})
-    with pytest.raises(S2Error):
-        S2IdResolver(make(router)).resolve(papers)
+    # A 400 that persists down to the depth bound leaves just that chunk unresolved; the
+    # other chunks still resolve (the poison id sits in the first quarter).
+    poison = "PMID:2"
+
+    def poisoned(request):
+        if poison in json.loads(request.content)["ids"]:
+            return httpx.Response(400)
+        return ok(request)
+
+    router = Router({("POST", "/paper/batch"): poisoned})
+    out = S2IdResolver(make(router)).resolve(papers)
+    assert out["PMID:2"] is None  # 8 -> 4 -> 2 -> 1 id at depth 3: only the poison is lost
+    assert all(out[f"PMID:{i}"]["corpusId"] == 100 + i for i in (1, 3, 4, 5, 6, 7, 8))
+    assert len(router.requests) <= 1 + 2 + 4 + 8  # bounded: at most 3 split levels
+
+
+# --- review fixes: no caching of malformed bodies; dataset-dump snippet filter --------
+
+
+def test_a_malformed_snippet_response_is_not_cached_and_a_cached_one_is_a_miss(tmp_path):
+    bad = Router({("GET", "/snippet/search"): lambda r: httpx.Response(200, json={"data": {"bad": "shape"}})})
+    s2 = make(bad, cache=ResponseCache(tmp_path))
+    for _ in range(2):
+        with pytest.raises(S2Error):
+            snippet_search(s2, "some claim text here", 100)
+    assert len(bad.requests) == 2  # the second call went to the network again
+    assert list(tmp_path.iterdir()) == []
+    # An entry poisoned by an older version is re-fetched, not replayed.
+    params = s2_extra.snippet_params("some claim text here", 100)
+    ResponseCache(tmp_path).put(s2_extra.SNIPPET_PATH, params, {"data": "oops"})
+    good = Router({("GET", "/snippet/search"): lambda r: httpx.Response(200, json={"data": [snip(5)]})})
+    assert [p.corpus_id for p in snippet_search(make(good, cache=ResponseCache(tmp_path)), "some claim text here")] == ["5"]
+    assert len(good.requests) == 1
+
+
+def test_a_wrong_length_batch_is_not_cached(tmp_path):
+    router = Router({("POST", "/paper/batch"): lambda r: httpx.Response(200, json=[None])})
+    s2 = make(router)
+    for _ in range(2):
+        with pytest.raises(S2Error):
+            s2_extra._batch(s2, ["CorpusId:1", "CorpusId:2"], "corpusId", ResponseCache(tmp_path))
+    assert len(router.requests) == 2 and list(tmp_path.iterdir()) == []
+
+
+CLAIM = "Antiretroviral therapy reduces rates of tuberculosis across a broad range of CD4 strata."
+
+
+def test_dataset_snippet_filter_flags_dataset_examples_only():
+    f = s2_extra.DatasetSnippetFilter([CLAIM, "Vitamin D deficiency causes rickets in children."])
+    assert len(f) == 2
+    # A dataset dump: label + a (re-cased, lightly reworded) claim.
+    assert f.flags("FactDetect Claim: antiretroviral therapy reduces the rates of tuberculosis across "
+                   "broad range of CD4 strata. Evidence: ART is associated with ...")
+    assert f.flags("Ground Truth: YES. Claim: Vitamin D deficiency causes rickets in kids")
+    # The query counts as a known claim even when the dataset is not loaded.
+    assert s2_extra.DatasetSnippetFilter().flags("Claim: zeta kinase activates macrophages strongly",
+                                                 query="Zeta kinase activates macrophages strongly.")
+    # Same words, no dataset labels: a gold-like abstract is never flagged.
+    assert not f.flags("Antiretroviral therapy reduces rates of tuberculosis across a broad range of CD4 strata.")
+    # Labels, but the text after them is not a known claim.
+    assert not f.flags("Evidence: the cohort was followed for 10 years. Claim: smoking is harmful.")
+    assert not f.flags(None) and not f.flags("")
+
+
+def test_parse_snippets_drops_papers_the_dataset_filter_flags():
+    f = s2_extra.DatasetSnippetFilter([CLAIM])
+    payload = {"data": [snip(1, "Claim: " + CLAIM + " Ground Truth: YES", kind="body"),
+                        snip(2, "We studied antiretroviral therapy and tuberculosis in CD4 strata.")]}
+    papers, excluded = parse_snippets(payload, "unrelated query words", dataset_filter=f)
+    assert [p.corpus_id for p in papers] == ["2"] and excluded == ["1"]
+    assert [p.corpus_id for p in parse_snippets(payload, "unrelated query words")[0]] == ["1", "2"]
+
+
+def test_dataset_snippet_filter_degrades_to_query_only_without_the_dataset(monkeypatch):
+    import ir_datasets
+
+    monkeypatch.setattr(ir_datasets, "load", lambda *a, **k: (_ for _ in ()).throw(KeyError("gone")))
+    assert len(s2_extra.DatasetSnippetFilter.from_scifact()) == 0

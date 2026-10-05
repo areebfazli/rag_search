@@ -35,6 +35,9 @@ data/eval_runs/ (verify_eval.assert_safe_output refuses eval/results/).
 
 Every reply is cached per (kind, claim, exact prompt, budget, model) under
 data/eval_cache/secondlook/, so a re-run or report rebuild never spends a request twice.
+Re-ask replies use rag_eval's versioned keys (v2 adds the endpoint fingerprint; the legacy
+key is read only for the canonical endpoint — see app.eval.reply_cache), the second-look
+kinds the legacy key, which is unambiguous because every stage runs only on that endpoint.
 Each stage counts the HTTP requests it sends (retries included) and stops before
 exceeding ``--max-requests`` or today's free quota minus RESERVE (read from GET
 /api/v1/key, which is not an LLM call).
@@ -59,6 +62,7 @@ from pathlib import Path
 from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI, RateLimitError
 
 from app.core.interfaces import SearchHit
+from app.core.paths import RESULTS, is_within
 from app.core.llm_endpoints import (
     EmptyCompletionError,
     LLMEndpoint,
@@ -77,9 +81,14 @@ from app.eval.rag_eval import (
     fetch_key_info,
     first_pass_row,
     free_requests_remaining,
+    is_legacy_reask_endpoint,
+    reask_key_v2,
+    reask_lookup,
+    reask_request_fingerprint,
 )
 from app.eval.reply_cache import ReplyCache, _sha
-from app.eval.verify_eval import RUNS, assert_safe_output, class_scores, wilson
+from app.eval.verify_eval import RUNS, UnsafeOutputError, class_scores, wilson
+from app.eval.verify_eval import assert_safe_output as _assert_safe_output
 from app.generate.generator import (
     REASK_MAX_TOKENS,
     _usage_counts,
@@ -89,6 +98,15 @@ from app.generate.generator import (
     reask_prompt_hash,
 )
 from app.generate.prompts import _sanitize_question, context_block, reask_messages
+
+def assert_safe_output(path: Path) -> Path:
+    """verify_eval.assert_safe_output (strictly inside data/eval_runs/), checked against
+    the repo-anchored eval/results/ rather than a cwd-relative one, and refusing any alias
+    of it that a symlink, `..` or absolute path could reach (app.core.paths.is_within)."""
+    if is_within(path, RESULTS):
+        raise UnsafeOutputError(f"{path} is inside the committed {RESULTS}")
+    return _assert_safe_output(path, forbidden=RESULTS)
+
 
 TRAIN_DATASET = "beir/scifact/train"
 TEST_DATASET = "beir/scifact/test"
@@ -293,10 +311,27 @@ class Caller:
 
 
 def cached_call(cache: ReplyCache, caller: Caller | None, kind: str, qid: str, model: str,
-                max_tokens: int, messages: list[dict], stats: dict) -> dict | None:
-    """The cached reply, else a fresh one (None when there is no caller: plan-only)."""
-    key = cache.key(kind, qid, model, max_tokens, messages)
-    if (hit := cache.get(key)) is not None:
+                max_tokens: int, messages: list[dict], stats: dict,
+                endpoint: LLMEndpoint | None = None) -> dict | None:
+    """The cached reply, else a fresh one (None when there is no caller: plan-only).
+
+    A re-ask with ``endpoint`` (every stage passes it) uses rag_eval's versioned keys, so
+    both tools read and write the same entries: looked up with rag_eval.reask_lookup (v2,
+    then the legacy key only for the canonical endpoint — the frozen test re-run's
+    legacy-keyed replies stay hits) and written under rag_eval.reask_key_v2. Other kinds
+    (``secondlook:*``) and endpoint-less calls keep the legacy key (app.eval.reply_cache):
+    they are only fetched through default_generator_endpoint, which refuses anything but
+    that canonical endpoint, so the legacy key is unambiguous for them."""
+    versioned = kind == "reask" and endpoint is not None
+    if versioned:
+        if (model, max_tokens) != (endpoint.model, REASK_MAX_TOKENS):
+            raise ValueError("a versioned re-ask is the endpoint's model at REASK_MAX_TOKENS")
+        key = reask_key_v2(qid, endpoint, messages)
+        hit = reask_lookup(cache, qid, endpoint, messages)
+    else:
+        key = cache.key(kind, qid, model, max_tokens, messages)
+        hit = cache.get(key)
+    if hit is not None:
         stats["cache_hits"] = stats.get("cache_hits", 0) + 1
         return hit
     if caller is None:  # plan only: count each distinct missing request once
@@ -308,6 +343,8 @@ def cached_call(cache: ReplyCache, caller: Caller | None, kind: str, qid: str, m
     rec = caller.call(messages, max_tokens)
     rec.update(kind=kind, query_id=qid, model=model, max_tokens=max_tokens,
                fetched_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))
+    if versioned:
+        rec.update(key_version=2, request=reask_request_fingerprint(endpoint))
     cache.put(key, rec)
     stats["new_calls"] = stats.get("new_calls", 0) + 1
     stats["requests"] = stats.get("requests", 0) + rec["requests"]
@@ -447,14 +484,16 @@ def load_docs() -> dict[str, dict]:
 # --- the two fixes over a split ---------------------------------------------------------------
 
 
-def run_reask(rows, queries, docs, cache, caller, model, stats, only=None) -> list[dict]:
-    """Fix 3 over `rows` (`only`: restrict to these ids — the probe — else needs_reask)."""
+def run_reask(rows, queries, docs, cache, caller, model, stats, only=None, endpoint=None) -> list[dict]:
+    """Fix 3 over `rows` (`only`: restrict to these ids — the probe — else needs_reask).
+    `endpoint`: the generator endpoint, for the versioned re-ask keys (see cached_call)."""
     out = []
     for r in rows:
         if (r["query_id"] in only) if only is not None else needs_reask(r):
             msgs = reask_messages(queries[r["query_id"]], hits_for(r["retrieved_doc_ids"], docs))
             stats["triggered"] = stats.get("triggered", 0) + 1
-            rec = cached_call(cache, caller, "reask", r["query_id"], model, REASK_MAX_TOKENS, msgs, stats)
+            rec = cached_call(cache, caller, "reask", r["query_id"], model, REASK_MAX_TOKENS, msgs, stats,
+                              endpoint=endpoint)
             r = apply_reask(r, rec)
         out.append(r)
     return out
@@ -536,13 +575,19 @@ def _summary_line(name: str, blob: Mapping) -> str:
 
 
 def default_generator_endpoint() -> LLMEndpoint:
-    """The code-default free generator, or SystemExit: these experiments never pay."""
+    """The code-default free generator, or SystemExit: these experiments never pay. It must
+    also be exactly the canonical endpoint (rag_eval.is_legacy_reask_endpoint: no
+    reasoning field, temperature 0.1, the free routing) — the one every legacy-keyed reply
+    in the cache was fetched with, so a legacy key read here is never another endpoint's."""
     from app.core.llm_endpoints import resolve_endpoint
 
     ep = resolve_endpoint("generator")
     want = default_endpoints()[0]
     if (ep.provider, ep.model) != want or ep.paid:
         raise SystemExit(f"generator is {ep.provider} {ep.model}; these runs use only the code default {want}")
+    if not is_legacy_reask_endpoint(ep):
+        raise SystemExit(f"generator request settings differ from the frozen canonical endpoint "
+                         f"({reask_request_fingerprint(ep)}); these runs use only that endpoint")
     return ep
 
 
@@ -609,7 +654,8 @@ def stage_reask_train(probe: bool, max_requests: int, log=print) -> None:
     only = None
     if probe:  # long-reasoning rows WITH a verdict: the re-ask prompt's accuracy on hard rows
         only = {r["query_id"] for r in split.rows if (r.get("generation_attempts") or 1) > 1 and not needs_reask(r)}
-    res = _execute(lambda c, s: run_reask(split.rows, split.queries, docs, cache, c, ep.model, s, only), ep,
+    res = _execute(lambda c, s: run_reask(split.rows, split.queries, docs, cache, c, ep.model, s, only,
+                                          endpoint=ep), ep,
                    max_requests, log)
     rows, stats = res["rows"], res["stats"]
     trig = [r["query_id"] for r in rows if "reask" in r]
@@ -714,7 +760,8 @@ def stage_test(max_requests: int, rerun: bool = False, log=print) -> None:
 
     def everything(c, s):
         s3, s2, s23 = s.setdefault("fix3", {}), s.setdefault("fix2", {}), s.setdefault("fix2fix3", {})
-        r3 = run_reask(split.rows, split.queries, docs, cache, c, ep.model, s3) if reask_on else None
+        r3 = (run_reask(split.rows, split.queries, docs, cache, c, ep.model, s3, endpoint=ep)
+              if reask_on else None)
         r2 = run_secondlook(split.rows, split.queries, split.vlabels, docs, cache, c, ep.model, variant, s2)
         r23 = (run_secondlook(r3, split.queries, split.vlabels, docs, cache, c, ep.model, variant, s23)
                if reask_on else None)

@@ -264,6 +264,27 @@ def test_select_rows_limit_is_seeded_subset_in_file_order():
     assert [int(r["query_id"]) for r in a] == sorted(int(r["query_id"]) for r in a)
 
 
+def test_load_source_rejudges_the_first_pass_of_a_reasked_row():
+    # rag_eval's verdict re-ask replaces a row's answer/verdict but keeps the judge's
+    # scores of the FIRST reply; judge_agreement must re-judge (and record) that reply.
+    first = _row("1", answer=rag_eval.TRUNCATION_NOTE, verdict=None,
+                 answered=False, answered_source="judge", judge_answered=False,
+                 predicted_label="NEI", verdict_source=None, abstention_class="x",
+                 abstention_class_qrels="x", cited_doc_ids=[], evidence=True, evidence_qrels=True)
+    reasked = rag_eval.apply_reask(first, {"raw": "Verdict: SUPPORTED [1]", "finish_reason": "stop"})
+    assert reasked["answered_source"] == "reask" and reasked["answer"] != first["answer"]
+    blob = {**_blob(), "rows": [reasked, {**_row("2"), "reask_attempted": False}]}
+    loaded = ja.load_source(json.dumps(blob).encode())
+    assert loaded["rows"][0] == first and loaded["rows"][1] == _row("2")
+    check_source(loaded)
+    keep, _ = select_rows(loaded["rows"], limit=0, seed=13)
+    assert keep[0]["answer"] == rag_eval.TRUNCATION_NOTE  # not the re-ask's display text
+    rec = ja._record(keep[0])
+    assert (rec["verdict"], rec["answered"], rec["answered_source"]) == (None, False, "judge")
+    # A file written before the re-ask existed loads unchanged.
+    assert ja.load_source(json.dumps(_blob())) == _blob()
+
+
 # --- config / estimate / output location ------------------------------------------------
 
 

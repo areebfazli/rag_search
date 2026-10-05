@@ -32,6 +32,10 @@ LABELS = {key: label for key, label, *_ in CONFIGS}
 METRICS = ["ndcg@10", "recall@100"]
 PRETTY = {"ndcg@10": "nDCG@10", "recall@100": "Recall@100"}
 PAIRS = [("hybrid", "dense"), ("hybrid", "bm25")]
+# Per-query Recall@100 is near-binary (most claims have one gold doc), so a t-test on it
+# is a poor fit; for these metrics the "(sig.)" marker comes from an exact sign test on
+# the W/L counts instead (the t-test p is still reported).
+SIGN_TEST_METRICS = ("recall@100",)
 LABEL_ORDER = ("SUPPORT", "CONTRADICT", "NEI")
 # RRF sensitivity grid: k swept at equal weight, dense weight swept at k = BASE_K.
 BASE_K = 60  # the production default (settings.rrf_k), and the sweep's baseline
@@ -98,6 +102,26 @@ def check_hybrid_replay(runs: dict[str, Run_]) -> None:
         )
 
 
+def sign_test_p(wins: int, losses: int) -> float:
+    """Exact two-sided sign test: P(a split at least this uneven) under Binomial(W + L,
+    1/2), ties dropped. NaN when there are no discordant queries (nothing to test)."""
+    n = wins + losses
+    if n == 0:
+        return math.nan
+    tail = sum(math.comb(n, i) for i in range(min(wins, losses) + 1))
+    return min(1.0, 2 * tail / 2**n)
+
+
+def _sig_p(c: dict, metric: str) -> float:
+    """The p-value the "(sig.)" marker is based on for `metric`."""
+    return c["sign_p"] if metric in SIGN_TEST_METRICS else c["p"]
+
+
+def _is_sig(c: dict, metric: str) -> bool:
+    p = _sig_p(c, metric)
+    return math.isfinite(p) and p < MAX_P
+
+
 def score_and_compare(
     runs: dict[str, Run_],
     qids: list[str],
@@ -106,7 +130,8 @@ def score_and_compare(
     pairs: Sequence[tuple[str, str]],
 ) -> dict:
     """ranx scores + paired t-tests (retrieval_eval's method) of `keys` on one query
-    subset, with Δ / p / W-T-L for each (a, b) in `pairs`."""
+    subset, with Δ / p / W-T-L and an exact sign-test p (`sign_p`, from the W/L counts)
+    for each (a, b) in `pairs`."""
     from ranx import Qrels, Run, compare
 
     qrels = Qrels({q: {d: 1 for d in relevant[q]} for q in qids})
@@ -121,6 +146,9 @@ def score_and_compare(
                     "delta": blob[a]["scores"][m] - blob[b]["scores"][m],
                     "p": float(blob[a]["comparisons"][b][m]),
                     "win_tie_loss": blob[a]["win_tie_loss"][b][m],
+                    "sign_p": sign_test_p(
+                        blob[a]["win_tie_loss"][b][m]["W"], blob[a]["win_tie_loss"][b][m]["L"]
+                    ),
                 }
                 for m in METRICS
             }
@@ -341,23 +369,33 @@ def to_markdown(report: dict) -> str:
     for s in strata:
         cells = " | ".join(f"{s['scores'][k][m]:.4f}" for m in METRICS for k in KEYS)
         lines.append(f"| {s['subset']} | {s['relevant_set']} | {s['n']} | {cells} |")
+    exact = ", ".join(PRETTY[m] for m in SIGN_TEST_METRICS)
     lines += [
         "",
-        f"Paired two-sided Student's t-test via ranx (as in `retrieval_eval`), p < {MAX_P}, "
-        "uncorrected for multiple comparisons:",
+        f"*t-test p*: paired two-sided Student's t-test via ranx (as in `retrieval_eval`). "
+        f"*Sign-test p*: exact two-sided sign test on the W/L counts (ties dropped), shown for "
+        f"{exact} only. Per-query {exact} is near-binary (most claims have one gold doc), so "
+        f"for {exact} the **(sig.)** marker (p < {MAX_P}) is based on the sign test; for "
+        "nDCG@10 it is based on the t-test. All uncorrected for multiple comparisons.",
         "",
-        "| Subset | Relevant set | Comparison | Metric | Δ | p | W/T/L |",
-        "|---|---|---|---|---|---|---|",
+        "| Subset | Relevant set | Comparison | Metric | Δ | t-test p | Sign-test p | W/T/L |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     for s in strata:
         for a, b in PAIRS:
             for m in METRICS:
                 c = s["comparisons"][f"{a}_vs_{b}"][m]
                 wtl = c["win_tie_loss"]
-                sig = " **(sig.)**" if math.isfinite(c["p"]) and c["p"] < MAX_P else ""
+                sig = " **(sig.)**" if _is_sig(c, m) else ""
+                tp, sp = _p(c["p"]), _p(c["sign_p"])
+                if m in SIGN_TEST_METRICS:
+                    sp += sig
+                else:
+                    tp += sig
+                    sp = "—"
                 lines.append(
                     f"| {s['subset']} | {s['relevant_set']} | {a} vs {b} | {PRETTY[m]} | "
-                    f"{c['delta']:+.4f} | {_p(c['p'])}{sig} | {wtl['W']}/{wtl['T']}/{wtl['L']} |"
+                    f"{c['delta']:+.4f} | {tp} | {sp} | {wtl['W']}/{wtl['T']}/{wtl['L']} |"
                 )
 
     full = sum(1 for r in misses if r["hybrid_recall@100"] == 0)
@@ -403,23 +441,27 @@ def sensitivity_markdown(sens: dict, misses: list[dict]) -> list[str]:
         f"from a list getting nothing from it. Baseline: k = {sens['baseline']['k']}, "
         f"w = {sens['baseline']['dense_weight']} (the production config), verified to "
         f"reproduce the cached hybrid run on {sens['n']}/{sens['n']} queries and the committed "
-        "hybrid row of `retrieval.md` exactly. Δ, p (paired two-sided t-test, uncorrected) and "
-        "W/T/L are against that baseline.",
+        "hybrid row of `retrieval.md` exactly. Δ, p (paired two-sided t-test, uncorrected), "
+        "the exact sign-test p for Recall@100 (which the **(sig.)** marker uses for that "
+        "metric, as in §2) and W/T/L are against that baseline.",
         "",
-        "| k | Dense weight w | nDCG@10 | Δ | p | W/T/L | Recall@100 | Δ | p | W/T/L |",
-        "|---|---|---|---|---|---|---|---|---|---|",
+        "| k | Dense weight w | nDCG@10 | Δ | p | W/T/L | Recall@100 | Δ | t-test p "
+        "| Sign-test p | W/T/L |",
+        "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for r in rows:
         cells = []
         for m in METRICS:
+            sign = m in SIGN_TEST_METRICS
             cells.append(f"{r['scores'][m]:.4f}")
             if r["baseline"]:
-                cells += ["baseline", "—", "—"]
+                cells += ["baseline", "—", "—"] + (["—"] if sign else [])
                 continue
             c = r["vs_baseline"][m]
             wtl = c["win_tie_loss"]
-            sig = " **(sig.)**" if math.isfinite(c["p"]) and c["p"] < MAX_P else ""
-            cells += [f"{c['delta']:+.4f}", f"{_p(c['p'])}{sig}", f"{wtl['W']}/{wtl['T']}/{wtl['L']}"]
+            sig = " **(sig.)**" if _is_sig(c, m) else ""
+            ps = [f"{_p(c['p'])}", f"{_p(c['sign_p'])}{sig}"] if sign else [f"{_p(c['p'])}{sig}"]
+            cells += [f"{c['delta']:+.4f}", *ps, f"{wtl['W']}/{wtl['T']}/{wtl['L']}"]
         lines.append(f"| {r['k']} | {r['dense_weight']} | " + " | ".join(cells) + " |")
 
     k_rows = [r for r in rows if not r["baseline"] and r["dense_weight"] == 0.5]
@@ -454,7 +496,8 @@ def sensitivity_markdown(sens: dict, misses: list[dict]) -> list[str]:
         + " ".join(
             f"Dense weight {r['dense_weight']}: nDCG@10 {c(r, 'ndcg@10')['delta']:+.4f} "
             f"(p = {_p(c(r, 'ndcg@10')['p'])}), Recall@100 {r['scores']['recall@100']:.4f} "
-            f"({c(r, 'recall@100')['delta']:+.4f}, p = {_p(c(r, 'recall@100')['p'])})."
+            f"({c(r, 'recall@100')['delta']:+.4f}, t-test p = {_p(c(r, 'recall@100')['p'])}, "
+            f"sign-test p = {_p(c(r, 'recall@100')['sign_p'])})."
             for r in w_rows
         ),
         "",
@@ -517,12 +560,19 @@ def interpret(strata: list[dict], misses: list[dict]) -> str:
             f"{wtl(r_evr)}) and {r_evq['delta']:+.4f} on qrels (p = {_p(r_evq['p'])}); "
             f"nDCG@10 by {n_evr['delta']:+.4f} (p = {_p(n_evr['p'])})."
         )
+    def ps(c: dict) -> str:
+        return f"sign-test p = {_p(c['sign_p'])}, t-test p = {_p(c['p'])}"
+
+    def verdict(c: dict) -> str:
+        return "significant" if _is_sig(c, "recall@100") else "not significant"
+
     return (
-        f"Fusion's significant Recall@100 gain over dense on the full set "
-        f"({r_all['delta']:+.4f}, p = {_p(r_all['p'])}, W/T/L {wtl(r_all)}) comes from the "
+        f"Fusion's Recall@100 gain over dense on the full set ({r_all['delta']:+.4f}, "
+        f"W/T/L {wtl(r_all)}; {ps(r_all)}) is {verdict(r_all)} under the exact sign test "
+        f"this report uses for Recall@100 (p < {MAX_P}), and it comes entirely from the "
         f"**NEI** claims: {nei_discordant} of the {discordant} queries where the two differ are "
-        f"NEI, and on that stratum hybrid gains {r_nei['delta']:+.4f} (p = {_p(r_nei['p'])}, "
-        f"W/T/L {wtl(r_nei)}). {ev} For an NEI claim the qrels doc is a cited abstract in "
+        f"NEI, and on that stratum hybrid gains {r_nei['delta']:+.4f} (W/T/L {wtl(r_nei)}; "
+        f"{ps(r_nei)}). {ev} For an NEI claim the qrels doc is a cited abstract in "
         f"which annotators found no rationale, so the recall fusion adds is recall of "
         f"documents that cannot ground a SUPPORT or CONTRADICT verdict. It still widens the "
         f"candidate pool, which is why hybrid stays the default, but it is not evidence that "
@@ -530,8 +580,8 @@ def interpret(strata: list[dict], misses: list[dict]) -> str:
         f"it does not. Of the {len(misses)} gold docs hybrid misses, {nei_misses} belong to NEI "
         f"claims and {unreachable} were in neither retriever's top-{DEPTH}, so no fusion rule "
         f"over these two candidate pools could have recovered them. All p-values are "
-        f"uncorrected; p = {_p(r_nei['p'])} on {nei_discordant} discordant queries is "
-        f"suggestive, not settled."
+        f"uncorrected; a {r_nei['win_tie_loss']['W']}–{r_nei['win_tie_loss']['L']} split on "
+        f"{nei_discordant} discordant queries is suggestive, not settled."
     )
 
 
@@ -578,7 +628,8 @@ def main() -> None:
         "dataset": settings.eval_dataset,
         "n_queries": len(all_q),
         "candidate_depth": DEPTH,
-        "stat_test": "student (paired, two-sided, via ranx)",
+        "stat_test": "student (paired, two-sided, via ranx); Recall@100 significance from an "
+        "exact two-sided sign test on W/L (`sign_p`)",
         "max_p": MAX_P,
         "label_distribution": {
             lab: {"n": counts[lab], "qrels_differs_from_rationale": diff_by_label[lab]}

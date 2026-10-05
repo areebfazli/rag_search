@@ -4,7 +4,9 @@ rag_eval judges every answer once, so its faithfulness / context-relevance numbe
 the judge-decided ``answered`` fallback) carry no error bar for the judge itself. This
 re-judges the answers already stored in eval/results/rag.json — same claim, same
 retrieved context, same answer text, same prompt, same model — K times at each of
-several temperatures, and measures how much the scores move:
+several temperatures, and measures how much the scores move. A row the verdict-only
+re-ask changed is re-judged on its FIRST-PASS answer (see load_source): that is the
+reply the stored judge scores belong to.
 
 * **T = 0.0** (the production judge temperature): anything that changes is provider
   nondeterminism, so this is the reproducibility of the published numbers.
@@ -69,6 +71,7 @@ from openai import RateLimitError
 from app.core.config import settings
 from app.core.llm_endpoints import EmptyCompletionError
 from app.core.interfaces import SearchHit, hit_passage
+from app.core.paths import RESULTS, assert_outside, display_path
 from app.core.llm_endpoints import (
     base_model,
     build_client,
@@ -96,8 +99,8 @@ def throttle_s(provider: str, env: Mapping[str, str] | None = None) -> float:
 RATE_LIMIT_RETRIES = rag_eval.RATE_LIMIT_RETRIES
 RATE_LIMIT_WAIT_S = rag_eval.RATE_LIMIT_WAIT_S
 
-SOURCE = Path("eval/results/rag.json")
-OUT = Path("eval/results")  # canonical (no row limit) run only — the committed artifact
+SOURCE = RESULTS / "rag.json"  # repo-anchored; recorded repo-relative (display_path)
+OUT = RESULTS  # canonical (no row limit) run only — the committed artifact (repo-anchored)
 RUNS = Path("data/eval_runs")  # every limited run (gitignored)
 CACHE = Path("data/eval_cache")  # resume checkpoint (gitignored)
 
@@ -202,6 +205,28 @@ def estimate_compare(n_rows: int, throttles: Mapping[str, float]) -> tuple[dict[
 
 
 # --- input validation -----------------------------------------------------------------
+
+
+def load_source(raw: bytes | str) -> dict:
+    """rag.json as the judge saw it: every row mapped through rag_eval.first_pass_row.
+
+    rag_eval's verdict-only re-ask is a post-step: a re-asked row carries a replaced
+    answer/verdict/answered (verdict_source "reask", first-pass values under
+    "first_pass"), but its faithfulness / context_relevance / judge_answered were given
+    to the FIRST reply and are not re-judged. Re-judging the replaced text would compare
+    the stored scores against a different answer, so the first-pass answer is what gets
+    re-judged, and the first-pass verdict/answered/answered_source are what get recorded
+    (answered_source "judge" is then the first pass's, not hidden behind "reask"). Rows
+    without the re-ask fields (every rag.json written before it, e.g. the gpt-oss run the
+    committed judge_agreement.* was measured on) pass through unchanged. Applied once,
+    here; check_source and select_rows see only first-pass rows. The source sha256 stays
+    that of the file bytes, so the checkpoint signature still identifies the file read.
+    """
+    blob = json.loads(raw)
+    if isinstance(blob, dict) and isinstance(blob.get("rows"), list):
+        blob = {**blob, "rows": [rag_eval.first_pass_row(r) if isinstance(r, dict) else r
+                                 for r in blob["rows"]]}
+    return blob
 
 
 def check_source(blob: object, judge_model: str | None = None) -> None:
@@ -732,7 +757,7 @@ def output_dir(limit: int) -> tuple[Path, bool]:
     """Only a full (no row limit) run may write the committed eval/results/ artifact."""
     if not limit:
         return OUT, True
-    return RUNS / f"judge_agreement_limit{limit}", False
+    return assert_outside(RUNS / f"judge_agreement_limit{limit}"), False
 
 
 def _f(v: float | None) -> str:
@@ -941,7 +966,7 @@ def main() -> None:
     throttles = {p: throttle_s(p) for p in endpoints}
 
     raw = SOURCE.read_bytes()
-    blob = json.loads(raw)
+    blob = load_source(raw)  # re-ask undone: the judge's scores belong to the first reply
     for e in endpoints.values():
         check_source(blob, judge_model=e.model)
     if compare:
@@ -1006,11 +1031,12 @@ def main() -> None:
     clients = {p: build_client(e, factory=OpenAI, timeout=60.0) for p, e in endpoints.items()}
     save = _checkpoint_saver(ckpt, sig)
     source_meta = {
-        "path": str(SOURCE),
+        "path": display_path(SOURCE),
         "sha256": source_sha,
         "git_sha": src_run.get("git_sha"),
         "sample_seed": src_run.get("sample_seed"),
         "generator_model": src_run.get("generator_model"),
+        "rows_view": "first_pass (rag_eval.first_pass_row: verdict re-ask undone)",
     }
     common_run = {
         "git_sha": rag_eval._git_sha(),

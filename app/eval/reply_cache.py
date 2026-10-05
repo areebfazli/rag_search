@@ -1,9 +1,29 @@
 """On-disk cache of single LLM replies, keyed by the exact request.
 
 Shared by app.eval.rag_secondlook (its post-hoc re-ask / second-look experiments) and
-app.eval.rag_eval (the re-ask post-step of the canonical eval): both key a re-ask reply
-as ``reask|<query id>|<sha16 of [model, max_tokens, messages]>``, so a reply fetched by
-either is a cache hit for the other and is never paid for (or quota-spent) twice.
+app.eval.rag_eval (the re-ask post-step of the canonical eval), so a re-ask reply fetched
+by either is a cache hit for the other and is never paid for (or quota-spent) twice.
+
+Two key formats:
+
+* **v1 (legacy)** — ``<kind>|<query id>|<sha16 of [model, max_tokens, messages]>``
+  (``ReplyCache.key``). It names the model id but not who served it: the same model id
+  and messages sent to another provider / base URL, with another reasoning effort,
+  temperature policy or routing, would collide. Every re-ask reply cached before the v2
+  format (the 15 behind the committed eval/results/rag.json among them) is under v1, and
+  rag_secondlook's ``secondlook:*`` kinds still are (they only ever run on the exact
+  canonical endpoint, which rag_secondlook.default_generator_endpoint enforces).
+* **v2** — ``<kind>|v2|<query id>|<sha16 of [request, max_tokens, messages]>``
+  (``ReplyCache.key_v2``), where ``request`` is a mapping that fingerprints the endpoint
+  and sampling policy (for the re-ask: rag_eval.reask_request_fingerprint — provider,
+  base URL, model, resolved reasoning effort, temperature, routing). New re-ask replies
+  are written only under v2.
+
+Migration: a re-ask lookup tries the v2 key first and falls back to the v1 key ONLY for
+the one endpoint every v1 re-ask entry was fetched with — the canonical OpenRouter Ling
+endpoint (rag_eval.is_legacy_reask_endpoint). Any other endpoint never reads a v1 entry,
+so a Groq (or paid, or differently-routed) run with the same model id + messages is a
+miss, not a silent cross-provider hit. Entries are never rewritten in place.
 """
 from __future__ import annotations
 
@@ -32,6 +52,14 @@ class ReplyCache:
     @staticmethod
     def key(kind: str, qid: str, model: str, max_tokens: int, messages: Sequence[Mapping]) -> str:
         return f"{kind}|{qid}|{_sha([model, max_tokens, list(messages)])[:16]}"
+
+    @staticmethod
+    def key_v2(
+        kind: str, qid: str, request: Mapping, max_tokens: int, messages: Sequence[Mapping]
+    ) -> str:
+        """The v2 key: ``request`` fingerprints everything about the endpoint that can
+        change the reply (see the module docstring); it must be JSON-serialisable."""
+        return f"{kind}|v2|{qid}|{_sha([dict(request), max_tokens, list(messages)])[:16]}"
 
     def get(self, key: str) -> dict | None:
         return self.entries.get(key)

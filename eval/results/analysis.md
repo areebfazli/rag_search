@@ -21,26 +21,26 @@ Every claim has at least one qrels-relevant doc, NEI claims included: for those,
 | evidence-bearing | rationale | 188 | 0.8381 | 0.8638 | 0.8642 | 0.9750 | 0.9947 | 0.9947 |
 | NEI | qrels | 112 | 0.4334 | 0.4625 | 0.4882 | 0.8125 | 0.8571 | 0.9196 |
 
-Paired two-sided Student's t-test via ranx (as in `retrieval_eval`), p < 0.05, uncorrected for multiple comparisons:
+*t-test p*: paired two-sided Student's t-test via ranx (as in `retrieval_eval`). *Sign-test p*: exact two-sided sign test on the W/L counts (ties dropped), shown for Recall@100 only. Per-query Recall@100 is near-binary (most claims have one gold doc), so for Recall@100 the **(sig.)** marker (p < 0.05) is based on the sign test; for nDCG@10 it is based on the t-test. All uncorrected for multiple comparisons.
 
-| Subset | Relevant set | Comparison | Metric | Δ | p | W/T/L |
-|---|---|---|---|---|---|---|
-| all | qrels | hybrid vs dense | nDCG@10 | +0.0114 | 0.2578 | 53/213/34 |
-| all | qrels | hybrid vs dense | Recall@100 | +0.0233 | 0.0346 **(sig.)** | 9/289/2 |
-| all | qrels | hybrid vs bm25 | nDCG@10 | +0.0378 | 0.0007 **(sig.)** | 72/202/26 |
-| all | qrels | hybrid vs bm25 | Recall@100 | +0.0523 | 0.0001 **(sig.)** | 18/281/1 |
-| evidence-bearing | qrels | hybrid vs dense | nDCG@10 | +0.0029 | 0.7948 | 25/145/18 |
-| evidence-bearing | qrels | hybrid vs dense | Recall@100 | +0.0000 | n/a (identical per query) | 0/188/0 |
-| evidence-bearing | qrels | hybrid vs bm25 | nDCG@10 | +0.0277 | 0.0164 **(sig.)** | 36/139/13 |
-| evidence-bearing | qrels | hybrid vs bm25 | Recall@100 | +0.0197 | 0.0410 **(sig.)** | 5/183/0 |
-| evidence-bearing | rationale | hybrid vs dense | nDCG@10 | +0.0003 | 0.9771 | 24/146/18 |
-| evidence-bearing | rationale | hybrid vs dense | Recall@100 | +0.0000 | n/a (identical per query) | 0/188/0 |
-| evidence-bearing | rationale | hybrid vs bm25 | nDCG@10 | +0.0261 | 0.0241 **(sig.)** | 34/142/12 |
-| evidence-bearing | rationale | hybrid vs bm25 | Recall@100 | +0.0197 | 0.0410 **(sig.)** | 5/183/0 |
-| NEI | qrels | hybrid vs dense | nDCG@10 | +0.0257 | 0.1913 | 28/68/16 |
-| NEI | qrels | hybrid vs dense | Recall@100 | +0.0625 | 0.0342 **(sig.)** | 9/101/2 |
-| NEI | qrels | hybrid vs bm25 | nDCG@10 | +0.0548 | 0.0164 **(sig.)** | 36/63/13 |
-| NEI | qrels | hybrid vs bm25 | Recall@100 | +0.1071 | 0.0011 **(sig.)** | 13/98/1 |
+| Subset | Relevant set | Comparison | Metric | Δ | t-test p | Sign-test p | W/T/L |
+|---|---|---|---|---|---|---|---|
+| all | qrels | hybrid vs dense | nDCG@10 | +0.0114 | 0.2578 | — | 53/213/34 |
+| all | qrels | hybrid vs dense | Recall@100 | +0.0233 | 0.0346 | 0.0654 | 9/289/2 |
+| all | qrels | hybrid vs bm25 | nDCG@10 | +0.0378 | 0.0007 **(sig.)** | — | 72/202/26 |
+| all | qrels | hybrid vs bm25 | Recall@100 | +0.0523 | 0.0001 | 0.0001 **(sig.)** | 18/281/1 |
+| evidence-bearing | qrels | hybrid vs dense | nDCG@10 | +0.0029 | 0.7948 | — | 25/145/18 |
+| evidence-bearing | qrels | hybrid vs dense | Recall@100 | +0.0000 | n/a (identical per query) | n/a (identical per query) | 0/188/0 |
+| evidence-bearing | qrels | hybrid vs bm25 | nDCG@10 | +0.0277 | 0.0164 **(sig.)** | — | 36/139/13 |
+| evidence-bearing | qrels | hybrid vs bm25 | Recall@100 | +0.0197 | 0.0410 | 0.0625 | 5/183/0 |
+| evidence-bearing | rationale | hybrid vs dense | nDCG@10 | +0.0003 | 0.9771 | — | 24/146/18 |
+| evidence-bearing | rationale | hybrid vs dense | Recall@100 | +0.0000 | n/a (identical per query) | n/a (identical per query) | 0/188/0 |
+| evidence-bearing | rationale | hybrid vs bm25 | nDCG@10 | +0.0261 | 0.0241 **(sig.)** | — | 34/142/12 |
+| evidence-bearing | rationale | hybrid vs bm25 | Recall@100 | +0.0197 | 0.0410 | 0.0625 | 5/183/0 |
+| NEI | qrels | hybrid vs dense | nDCG@10 | +0.0257 | 0.1913 | — | 28/68/16 |
+| NEI | qrels | hybrid vs dense | Recall@100 | +0.0625 | 0.0342 | 0.0654 | 9/101/2 |
+| NEI | qrels | hybrid vs bm25 | nDCG@10 | +0.0548 | 0.0164 **(sig.)** | — | 36/63/13 |
+| NEI | qrels | hybrid vs bm25 | Recall@100 | +0.1071 | 0.0011 | 0.0018 **(sig.)** | 13/98/1 |
 
 ## 3. Hybrid misses at depth 100
 
@@ -62,24 +62,24 @@ Every qrels-relevant doc hybrid fails to return in its top-100 (11 docs over 11 
 
 ## 4. RRF sensitivity (offline replay)
 
-The cached dense and BM25 top-100 lists re-fused at other settings, each fused list cut to depth 100 and scored like the rows above. Equal-weight rows use the production `reciprocal_rank_fusion`; weighted rows use score(d) = w·1/(k + r_dense) + (1 − w)·1/(k + r_bm25), 1-based ranks, a doc absent from a list getting nothing from it. Baseline: k = 60, w = 0.5 (the production config), verified to reproduce the cached hybrid run on 300/300 queries and the committed hybrid row of `retrieval.md` exactly. Δ, p (paired two-sided t-test, uncorrected) and W/T/L are against that baseline.
+The cached dense and BM25 top-100 lists re-fused at other settings, each fused list cut to depth 100 and scored like the rows above. Equal-weight rows use the production `reciprocal_rank_fusion`; weighted rows use score(d) = w·1/(k + r_dense) + (1 − w)·1/(k + r_bm25), 1-based ranks, a doc absent from a list getting nothing from it. Baseline: k = 60, w = 0.5 (the production config), verified to reproduce the cached hybrid run on 300/300 queries and the committed hybrid row of `retrieval.md` exactly. Δ, p (paired two-sided t-test, uncorrected), the exact sign-test p for Recall@100 (which the **(sig.)** marker uses for that metric, as in §2) and W/T/L are against that baseline.
 
-| k | Dense weight w | nDCG@10 | Δ | p | W/T/L | Recall@100 | Δ | p | W/T/L |
-|---|---|---|---|---|---|---|---|---|---|
-| 1 | 0.5 | 0.7278 | +0.0037 | 0.6083 | 27/241/32 | 0.9650 | +0.0000 | n/a (identical per query) | 0/300/0 |
-| 2 | 0.5 | 0.7287 | +0.0046 | 0.4775 | 24/246/30 | 0.9650 | +0.0000 | n/a (identical per query) | 0/300/0 |
-| 5 | 0.5 | 0.7267 | +0.0026 | 0.5653 | 22/256/22 | 0.9650 | +0.0000 | n/a (identical per query) | 0/300/0 |
-| 10 | 0.5 | 0.7287 | +0.0046 | 0.2243 | 21/265/14 | 0.9650 | +0.0000 | n/a (identical per query) | 0/300/0 |
-| 20 | 0.5 | 0.7265 | +0.0024 | 0.3439 | 13/277/10 | 0.9650 | +0.0000 | n/a (identical per query) | 0/300/0 |
-| 60 | 0.5 | 0.7241 | baseline | — | — | 0.9650 | baseline | — | — |
-| 100 | 0.5 | 0.7236 | -0.0005 | 0.1947 | 1/295/4 | 0.9650 | +0.0000 | n/a (identical per query) | 0/300/0 |
-| 60 | 0.3 | 0.7146 | -0.0096 | 0.1769 | 34/225/41 | 0.9277 | -0.0373 | 0.0018 **(sig.)** | 1/286/13 |
-| 60 | 0.7 | 0.7275 | +0.0034 | 0.4965 | 29/247/24 | 0.9517 | -0.0133 | 0.1576 | 2/292/6 |
+| k | Dense weight w | nDCG@10 | Δ | p | W/T/L | Recall@100 | Δ | t-test p | Sign-test p | W/T/L |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 0.5 | 0.7278 | +0.0037 | 0.6083 | 27/241/32 | 0.9650 | +0.0000 | n/a (identical per query) | n/a (identical per query) | 0/300/0 |
+| 2 | 0.5 | 0.7287 | +0.0046 | 0.4775 | 24/246/30 | 0.9650 | +0.0000 | n/a (identical per query) | n/a (identical per query) | 0/300/0 |
+| 5 | 0.5 | 0.7267 | +0.0026 | 0.5653 | 22/256/22 | 0.9650 | +0.0000 | n/a (identical per query) | n/a (identical per query) | 0/300/0 |
+| 10 | 0.5 | 0.7287 | +0.0046 | 0.2243 | 21/265/14 | 0.9650 | +0.0000 | n/a (identical per query) | n/a (identical per query) | 0/300/0 |
+| 20 | 0.5 | 0.7265 | +0.0024 | 0.3439 | 13/277/10 | 0.9650 | +0.0000 | n/a (identical per query) | n/a (identical per query) | 0/300/0 |
+| 60 | 0.5 | 0.7241 | baseline | — | — | 0.9650 | baseline | — | — | — |
+| 100 | 0.5 | 0.7236 | -0.0005 | 0.1947 | 1/295/4 | 0.9650 | +0.0000 | n/a (identical per query) | n/a (identical per query) | 0/300/0 |
+| 60 | 0.3 | 0.7146 | -0.0096 | 0.1769 | 34/225/41 | 0.9277 | -0.0373 | 0.0018 | 0.0018 **(sig.)** | 1/286/13 |
+| 60 | 0.7 | 0.7275 | +0.0034 | 0.4965 | 29/247/24 | 0.9517 | -0.0133 | 0.1576 | 0.2891 | 2/292/6 |
 
-For k ∈ {1, 2, 5, 10, 20, 100} at equal weight, nDCG@10 moves by at most 0.0046 from the baseline (all p ≥ 0.1947), and Recall@100 is identical to the baseline's on every query (0.9650). Dense weight 0.3: nDCG@10 -0.0096 (p = 0.1769), Recall@100 0.9277 (-0.0373, p = 0.0018). Dense weight 0.7: nDCG@10 +0.0034 (p = 0.4965), Recall@100 0.9517 (-0.0133, p = 0.1576).
+For k ∈ {1, 2, 5, 10, 20, 100} at equal weight, nDCG@10 moves by at most 0.0046 from the baseline (all p ≥ 0.1947), and Recall@100 is identical to the baseline's on every query (0.9650). Dense weight 0.3: nDCG@10 -0.0096 (p = 0.1769), Recall@100 0.9277 (-0.0373, t-test p = 0.0018, sign-test p = 0.0018). Dense weight 0.7: nDCG@10 +0.0034 (p = 0.4965), Recall@100 0.9517 (-0.0133, t-test p = 0.1576, sign-test p = 0.2891).
 
 Recall@100 has little room to rise under any fusion of these two pools: only 3 of the 11 gold docs hybrid misses are in either retriever's top-100 ([§3](#3-hybrid-misses-at-depth-100)), so no k or weighting can exceed the union ceiling of 0.9750. It can fall, though: the two top-100 lists can hold up to 200 docs, and a setting that leans on one retriever cuts gold docs only the other ranked highly (k = 60, w = 0.3: -0.0373; k = 60, w = 0.7: -0.0133).
 
 ## 5. Interpretation
 
-Fusion's significant Recall@100 gain over dense on the full set (+0.0233, p = 0.0346, W/T/L 9/289/2) comes from the **NEI** claims: 11 of the 11 queries where the two differ are NEI, and on that stratum hybrid gains +0.0625 (p = 0.0342, W/T/L 9/101/2). On the 188 evidence-bearing claims, hybrid and dense are **identical at Recall@100** — every query tied, against either relevant set (0.9947 on rationale docs, 0.9920 on qrels) — and their nDCG@10 on rationale docs differs by +0.0003 (p = 0.9771). For an NEI claim the qrels doc is a cited abstract in which annotators found no rationale, so the recall fusion adds is recall of documents that cannot ground a SUPPORT or CONTRADICT verdict. It still widens the candidate pool, which is why hybrid stays the default, but it is not evidence that fusion finds more supporting or refuting abstracts than dense alone; on this corpus it does not. Of the 11 gold docs hybrid misses, 9 belong to NEI claims and 8 were in neither retriever's top-100, so no fusion rule over these two candidate pools could have recovered them. All p-values are uncorrected; p = 0.0342 on 11 discordant queries is suggestive, not settled.
+Fusion's Recall@100 gain over dense on the full set (+0.0233, W/T/L 9/289/2; sign-test p = 0.0654, t-test p = 0.0346) is not significant under the exact sign test this report uses for Recall@100 (p < 0.05), and it comes entirely from the **NEI** claims: 11 of the 11 queries where the two differ are NEI, and on that stratum hybrid gains +0.0625 (W/T/L 9/101/2; sign-test p = 0.0654, t-test p = 0.0342). On the 188 evidence-bearing claims, hybrid and dense are **identical at Recall@100** — every query tied, against either relevant set (0.9947 on rationale docs, 0.9920 on qrels) — and their nDCG@10 on rationale docs differs by +0.0003 (p = 0.9771). For an NEI claim the qrels doc is a cited abstract in which annotators found no rationale, so the recall fusion adds is recall of documents that cannot ground a SUPPORT or CONTRADICT verdict. It still widens the candidate pool, which is why hybrid stays the default, but it is not evidence that fusion finds more supporting or refuting abstracts than dense alone; on this corpus it does not. Of the 11 gold docs hybrid misses, 9 belong to NEI claims and 8 were in neither retriever's top-100, so no fusion rule over these two candidate pools could have recovered them. All p-values are uncorrected; a 9–2 split on 11 discordant queries is suggestive, not settled.

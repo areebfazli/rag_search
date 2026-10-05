@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class Hit(BaseModel):
@@ -19,8 +19,9 @@ class SearchResponse(BaseModel):
     query: str
     mode: str
     hits: list[Hit]
-    # e.g. hybrid_web fell back to local results because Semantic Scholar failed.
-    warnings: list[str] = []
+    # Human-readable notes, de-duplicated, e.g. hybrid_web fell back to local results
+    # because Semantic Scholar failed, or any note the retrieval layer attached.
+    warnings: list[str] = Field(default_factory=list)
 
 
 class AnswerResponse(BaseModel):
@@ -37,4 +38,7 @@ class AnswerResponse(BaseModel):
     # (parsed from the answer), "reask" (the claim's answer had no verdict, so one
     # verdict-only re-check of the same passages supplied it), or None with no verdict.
     verdict_source: str | None = None
-    warnings: list[str] = []
+    # Same notes as SearchResponse.warnings, plus answer-side ones: e.g. the verdict
+    # re-ask failed (only the error CLASS name is shown, never its message) so the first
+    # answer is served without a verdict.
+    warnings: list[str] = Field(default_factory=list)

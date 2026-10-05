@@ -24,19 +24,23 @@ API key, any site (IP address) posting more than 3 requests per second to the
 E-utilities will receive an error message" ({"error":"API rate limit exceeded",...});
 "NCBI recommends that users post no more than three URL requests per second and limit
 large jobs to either weekends or between 9:00 PM and 5:00 AM Eastern time during
-weekdays". No API key is used here, so a process-wide limiter (web_sources.host_limiter)
-spaces every request, retries included, to DEFAULT_RATE_PER_S = 2/s, and a rate above 3
-is refused.
+weekdays". A process-wide limiter (web_sources.host_limiter) spaces every request,
+retries included, to DEFAULT_RATE_PER_S = 2/s; without an API key a rate above 3 is
+refused.
 
-tool/email: NBK25499 says "The following two parameters should be included in all
-E-utility requests. tool ... email" — recommended, not required (the NLM data guide,
+tool/email/api_key: NBK25499 says "The following two parameters should be included in
+all E-utility requests. tool ... email" — recommended, not required (the NLM data guide,
 https://dataguide.nlm.nih.gov/eutilities/utilities.html: "the tool and email parameters
 are allowed (and encouraged) on any E-utilities URL"). NBK25497: if NCBI blocks an IP,
 "service will not be restored unless the developers ... register values of the tool and
 email parameters", and email "should be a complete and valid e-mail address of the
-software developer and not that of a third-party end user". We send tool=rag_search and
-NO email: none has been provided, and inventing one would be wrong. A deployment that
-expects sustained traffic should register a real developer email with NCBI and add it.
+software developer and not that of a third-party end user". We always send tool=rag_search;
+`email` is sent only when configured (settings.ncbi_email, empty by default — none is
+invented). NBK25497 on API keys: "By including an API key, a site can post up to 10
+requests per second by default", and "users should include it in each E-utility request
+by assigning it to the api_key parameter" — so with settings.ncbi_api_key set the rate
+may go up to MAX_RATE_WITH_KEY. Email and key are "wire" params: sent to the
+fixed E-utilities host only, never part of a cache key, a cache file or an error message.
 
 Query syntax (PubMed User Guide, https://pubmed.ncbi.nlm.nih.gov/help/, last update
 September 30, 2026): untagged terms go through Automatic Term Mapping (ATM) and "PubMed
@@ -56,7 +60,9 @@ text goes through semantic_scholar.clean_untrusted with the same caps as S2 text
 """
 from __future__ import annotations
 
+import logging
 import re
+import threading
 import time
 import xml.etree.ElementTree as ET
 from collections.abc import Callable, Iterable
@@ -90,6 +96,8 @@ PUBMED_URL = "https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
 
 DEFAULT_RATE_PER_S = 2.0  # NBK25497: > 3 req/s without an API key "will receive an error"
 MAX_RATE_PER_S = 3.0
+MAX_RATE_WITH_KEY = 10.0  # NBK25497: an API key raises the limit to 10 requests/second
+MAX_EMAIL_CHARS = 254
 DEFAULT_MAX_RETRIES = 3
 MAX_IDS = 200  # NBK25499: "more than about 200 UIDs ... should be made using the HTTP POST method"
 MAX_TERM_CHARS = 300  # NBK25499: POST advised for queries "more than several hundred characters"
@@ -110,6 +118,63 @@ _DOCTYPE_EXTERNAL = re.compile(
     rf"<!DOCTYPE\s+[A-Za-z_][\w.:-]*\s+(?:PUBLIC\s+{_QUOTED}\s+{_QUOTED}|SYSTEM\s+{_QUOTED})\s*>"
 )
 _YEAR = re.compile(r"\b(1[89]\d\d|20\d\d|21\d\d)\b")
+
+
+# The NCBI api_key travels as a URL query parameter (NBK25497: "assigning it to the
+# api_key parameter"), and httpx logs every request's full URL at INFO ("HTTP Request:
+# GET https://...&api_key=..."). So once a key is configured, a filter on httpx's (and
+# httpcore's) loggers rewrites any record carrying it, whatever level or handler the
+# host app configures; entry points also pin those loggers at WARNING (quiet_http_logs).
+HTTP_LOGGERS = ("httpx", "httpcore", "httpcore.connection", "httpcore.http11", "httpcore.http2",
+                "httpcore.proxy")
+_API_KEY_PARAM = re.compile(r"(?i)(api_key=)[^&\s\"'#<>]+")
+REDACTED = "[REDACTED]"
+
+
+class _RedactApiKey(logging.Filter):
+    """Rewrites a log record whose message carries an api_key (as a URL parameter, or a
+    configured key's literal value) to the redacted text, args dropped. Never drops a
+    record."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.keys: set[str] = set()
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            msg = record.getMessage()
+        except Exception:  # noqa: BLE001 - a malformed record: redact its parts instead
+            msg = f"{record.msg} {record.args}"
+        red = _API_KEY_PARAM.sub(rf"\1{REDACTED}", msg)
+        for key in self.keys:
+            red = red.replace(key, REDACTED)
+        if red != msg or any(k in str(record.args) for k in self.keys):
+            record.msg, record.args = red, ()
+        return True
+
+
+_REDACTOR = _RedactApiKey()
+_REDACTOR_LOCK = threading.Lock()
+
+
+def redact_key_in_http_logs(key: str) -> None:
+    """Install (once; idempotent) the api_key-redacting filter on the httpx/httpcore
+    loggers and register `key`'s literal value with it."""
+    with _REDACTOR_LOCK:
+        if len(key) >= 8:  # literal match only for real-looking keys ("k" would mangle text);
+            _REDACTOR.keys.add(key)  # the api_key= pattern covers every key in a URL anyway
+        for name in HTTP_LOGGERS:
+            lg = logging.getLogger(name)
+            if _REDACTOR not in lg.filters:
+                lg.addFilter(_REDACTOR)
+
+
+def quiet_http_logs() -> None:
+    """Entry points (API, eval harnesses): httpx/httpcore at WARNING, so per-request URL
+    lines (which carry query parameters) are never emitted, plus the redacting filter."""
+    for name in HTTP_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
+    redact_key_in_http_logs("")
 
 
 def pubmed_term(query: object) -> str:
@@ -146,6 +211,18 @@ def pubmed_term(query: object) -> str:
     return out or words[0][:MAX_TERM_CHARS]
 
 
+def valid_email(value: object) -> str:
+    """`value` stripped if it looks like one e-mail address (NBK25499: "a string with no
+    internal spaces"), else "" — a malformed setting is not sent."""
+    if not isinstance(value, str):
+        return ""
+    v = value.strip()
+    local, at, domain = v.partition("@")
+    ok = (at and local and "." in domain and "@" not in domain and len(v) <= MAX_EMAIL_CHARS
+          and not any(c.isspace() or ord(c) < 32 for c in v))
+    return v if ok else ""
+
+
 def esearch_params(term: str, limit: int) -> dict:
     """ESearch query parameters (the fetcher adds db/tool) — also the cache key."""
     return {
@@ -158,7 +235,11 @@ def esearch_params(term: str, limit: int) -> dict:
 
 
 def parse_esearch(payload: object, limit: int) -> list[str]:
-    """ESearch JSON -> PMIDs in Best Match order, validated, deduped, capped at `limit`."""
+    """ESearch JSON -> PMIDs in Best Match order, validated, deduped, capped at `limit`.
+    An error body (top-level "error", or esearchresult.ERROR — NCBI sends both with HTTP
+    200 at times) or a non-list idlist raises SourceError."""
+    if isinstance(payload, dict) and payload.get("error"):
+        raise SourceError("esearch reported an error")
     result = payload.get("esearchresult") if isinstance(payload, dict) else None
     if not isinstance(result, dict):
         raise SourceError("unexpected esearch response shape")
@@ -318,9 +399,11 @@ class PubMedSource:
     `fetcher` replaces the whole HTTP layer (it must point at EUTILS_BASE_URL); otherwise
     one HttpFetcher is built from cache/client/limiter/max_retries/max_wait_s/
     max_backoff_s. Without a `limiter`, the process-wide "pubmed" host limiter is used at
-    `rate` req/s (first caller's rate wins for the process). `cache=None` disables
+    `rate` req/s (first caller's rate wins for the process; at most 3, or 10 with an
+    `api_key`). `email` / `api_key` (None = settings.ncbi_email / ncbi_api_key; "" = off)
+    are sent on every request when set, outside the cache key. `cache=None` disables
     caching; with a ResponseCache, esearch is cached by term/retmax/sort and efetch by its
-    exact id list, as raw payloads.
+    exact id list, as raw payloads — only once they parse.
     """
 
     def __init__(
@@ -336,11 +419,21 @@ class PubMedSource:
         max_backoff_s: float = 30.0,
         timeout_s: float = 10.0,
         include_labels: bool = True,
+        email: str | None = None,
+        api_key: str | None = None,
         sleep: Callable[[float], None] = time.sleep,
     ):
+        from app.core.config import settings
+
+        email = valid_email(settings.ncbi_email if email is None else email)
+        key = (settings.ncbi_api_key if api_key is None else api_key or "").strip()
+        self._authenticated = bool(key)
+        if key:
+            redact_key_in_http_logs(key)  # the key rides in the URL: keep it out of httpx's logs
         if fetcher is None:
-            if not 0 < rate <= MAX_RATE_PER_S:
-                raise ValueError(f"rate must be in (0, {MAX_RATE_PER_S}] req/s without an API key")
+            cap = MAX_RATE_WITH_KEY if key else MAX_RATE_PER_S
+            if not 0 < rate <= cap:
+                raise ValueError(f"rate must be in (0, {cap}] req/s" + ("" if key else " without an API key"))
             fetcher = HttpFetcher(
                 EUTILS_BASE_URL,
                 limiter=limiter or host_limiter(SOURCE, rate),
@@ -351,12 +444,18 @@ class PubMedSource:
                 max_wait_s=max_wait_s,
                 max_backoff_s=max_backoff_s,
                 default_params={"db": "pubmed", "tool": TOOL},
+                wire_params={"email": email, "api_key": key},
                 sleep=sleep,
             )
         elif fetcher.base_url != EUTILS_BASE_URL:
             raise ValueError("PubMedSource fetcher must target the NCBI E-utilities host")
         self._fetchers = (fetcher,)
         self.include_labels = include_labels
+
+    @property
+    def authenticated(self) -> bool:
+        """An NCBI API key is configured (the key itself is never exposed)."""
+        return self._authenticated
 
     @property
     def _fetcher(self) -> HttpFetcher:
@@ -374,11 +473,14 @@ class PubMedSource:
         if not term:
             return []
         params = esearch_params(term, limit)
-        entry = self._fetcher.get(
-            ESEARCH_PATH, params, parse="json",
-            validate=lambda p: isinstance(p, dict) and isinstance(p.get("esearchresult"), dict),
-        )
-        return parse_esearch(entry["response"], params["retmax"])
+        parsed: dict[str, list[str]] = {}
+
+        def check(payload: object) -> bool:  # parse before caching: an ERROR reply is not kept
+            parsed["ids"] = parse_esearch(payload, params["retmax"])
+            return True
+
+        entry = self._fetcher.get(ESEARCH_PATH, params, parse="json", validate=check)
+        return parsed["ids"] if "ids" in parsed else parse_esearch(entry["response"], params["retmax"])
 
     def efetch(self, pmids: Iterable[str]) -> dict[str, ExternalPaper]:
         """ONE EFetch GET for up to MAX_IDS PMIDs -> {pmid: ExternalPaper} for those PubMed
@@ -394,8 +496,15 @@ class PubMedSource:
         if len(ids) > MAX_IDS:
             raise ValueError(f"efetch takes at most {MAX_IDS} PMIDs per GET")
         params = {"id": ",".join(ids), "rettype": "abstract", "retmode": "xml"}
-        entry = self._fetcher.get(EFETCH_PATH, params, parse="text")
-        records = parse_efetch(entry["response"], include_labels=self.include_labels)
+        parsed: dict[str, dict[str, ExternalPaper]] = {}
+
+        def check(text: object) -> bool:  # parse before caching: an <ERROR> reply is not kept
+            parsed["records"] = parse_efetch(text, include_labels=self.include_labels)
+            return True
+
+        entry = self._fetcher.get(EFETCH_PATH, params, parse="text", validate=check)
+        records = parsed["records"] if "records" in parsed else parse_efetch(
+            entry["response"], include_labels=self.include_labels)
         wanted = set(ids)
         return {p: rec for p, rec in records.items() if p in wanted}
 

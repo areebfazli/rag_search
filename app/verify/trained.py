@@ -13,6 +13,15 @@ output there:
 A zip that unpacks into one subfolder (model/verifier_model/...) is found too; anything
 else (no weights, several candidate folders) is refused with a message saying so.
 
+**Safetensors only, local only, no remote code.** The weights must be
+``model.safetensors``: a ``pytorch_model.bin`` is a pickle, and unpickling a file can
+execute code, so a directory with only that file is refused (re-save it with
+``save_pretrained(..., safe_serialization=True)``, which train.py and the Kaggle notebook
+already do). A ``.bin`` next to the safetensors file is ignored — never loaded, never
+hashed. Model and tokenizer load with ``trust_remote_code=False`` and
+``local_files_only=True`` (the model also with ``use_safetensors=True``), so a
+checkpoint's config can neither pull code from the Hub nor trigger a download.
+
 Differences from the zero-shot NLIVerifier, all read from the checkpoint rather than
 assumed:
 
@@ -34,7 +43,8 @@ from pathlib import Path
 from app.verify.nli import LABELS, LabelMappingError, NLIVerifier
 
 CHECKPOINT_DIR = Path("data/models/verifier/model")
-WEIGHT_FILES = ("model.safetensors", "pytorch_model.bin")
+WEIGHT_FILES = ("model.safetensors",)  # the only weights accepted (and hashed)
+PICKLE_WEIGHT_FILES = ("pytorch_model.bin",)  # recognised only to refuse them by name
 TOKENIZER_FILES = ("tokenizer.json", "vocab.txt", "tokenizer_config.json", "special_tokens_map.json")
 HASHED_FILES = ("config.json", *WEIGHT_FILES, *TOKENIZER_FILES)
 
@@ -43,14 +53,29 @@ def is_checkpoint(path: Path) -> bool:
     return (path / "config.json").is_file() and any((path / w).is_file() for w in WEIGHT_FILES)
 
 
+def _pickle_only(path: Path) -> bool:
+    """config.json + pickle weights but no model.safetensors: a checkpoint we refuse."""
+    return (path / "config.json").is_file() and not is_checkpoint(path) and any(
+        (path / w).is_file() for w in PICKLE_WEIGHT_FILES)
+
+
 def resolve_checkpoint(path: Path | str = CHECKPOINT_DIR) -> Path:
-    """The checkpoint directory: `path` itself, or its single checkpoint subfolder."""
+    """The checkpoint directory: `path` itself, or its single checkpoint subfolder. A
+    folder whose only weights are pytorch_model.bin is refused by name (FileNotFoundError,
+    like every other "no usable checkpoint" case, but saying why)."""
     path = Path(path)
     if is_checkpoint(path):
         return path
-    subs = [d for d in sorted(path.iterdir()) if d.is_dir() and is_checkpoint(d)] if path.is_dir() else []
+    dirs = [d for d in sorted(path.iterdir()) if d.is_dir()] if path.is_dir() else []
+    subs = [d for d in dirs if is_checkpoint(d)]
     if len(subs) == 1:
         return subs[0]
+    if not subs and (legacy := [d for d in (path, *dirs) if _pickle_only(d)]):
+        raise FileNotFoundError(
+            f"{legacy[0]} has only {' / '.join(PICKLE_WEIGHT_FILES)} (pickle weights, which can "
+            f"execute code when loaded); only {' / '.join(WEIGHT_FILES)} is accepted. Re-save the "
+            "checkpoint with save_pretrained(..., safe_serialization=True)."
+        )
     what = f"{len(subs)} checkpoint folders" if subs else "no checkpoint (config.json + weights)"
     raise FileNotFoundError(
         f"{what} in {path}: unzip the Kaggle verifier_model.zip there "
@@ -85,7 +110,8 @@ def checkpoint_sha(path: Path | str) -> str:
             for block in iter(lambda: fh.read(1 << 20), b""):
                 h.update(block)
     if not found:
-        raise FileNotFoundError(f"no weights ({' / '.join(WEIGHT_FILES)}) in {path}")
+        raise FileNotFoundError(f"no weights ({' / '.join(WEIGHT_FILES)}; "
+                                f"{' / '.join(PICKLE_WEIGHT_FILES)} is not accepted) in {path}")
     return h.hexdigest()
 
 
@@ -102,7 +128,8 @@ def model_id(base_model: str, sha: str) -> str:
 
 class TrainedVerifier(NLIVerifier):
     """A fine-tuned checkpoint as a Verifier. `tokenizer` / `model` / `checkpoint_hash`
-    may be injected (tests); otherwise everything loads from `checkpoint`, offline."""
+    may be injected (tests); otherwise everything loads from `checkpoint`, offline:
+    model.safetensors only, local files only, no remote code (see the module docstring)."""
 
     claim_first = True
 
@@ -130,9 +157,12 @@ class TrainedVerifier(NLIVerifier):
             import torch
             from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
-            tokenizer = tokenizer or AutoTokenizer.from_pretrained(checkpoint)
+            tokenizer = tokenizer or AutoTokenizer.from_pretrained(
+                checkpoint, trust_remote_code=False, local_files_only=True
+            )
             model = model or AutoModelForSequenceClassification.from_pretrained(
-                checkpoint, dtype=torch.float32
+                checkpoint, dtype=torch.float32, use_safetensors=True,
+                trust_remote_code=False, local_files_only=True,
             )
         sha = checkpoint_hash or checkpoint_sha(checkpoint)
         base = base_model or meta.get("base_model") or "unknown"

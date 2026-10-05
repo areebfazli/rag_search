@@ -592,6 +592,7 @@ from openai import APITimeoutError  # noqa: E402
 from app.generate.generator import (  # noqa: E402
     REASK_MAX_TOKENS,
     REASK_NOTE,
+    REASK_NOTE_NO_VERDICT,
     needs_reask,
     reask_display_text,
     reask_prompt_hash,
@@ -632,7 +633,7 @@ def test_reask_after_prose_without_a_verdict_keeps_the_prose():
 
 def test_reask_keeps_a_truncated_prose_answer_and_its_note():
     gen = _reasker([("It reduces risk [1] but", "length")] * 2 + [("Verdict: SUPPORTED", "stop")])
-    ans = gen.generate("claim", _hits(2))
+    ans = gen.generate("Aspirin reduces stroke risk.", _hits(2))
     assert gen.client.chat.completions.calls == 3
     assert ans.text == f"It reduces risk [1] but\n\n{TRUNCATION_NOTE}" and ans.verdict == "SUPPORTED"
 
@@ -654,7 +655,7 @@ def test_reask_never_fires_when_the_reply_has_a_verdict():
 
 def test_an_unparseable_reask_reply_changes_nothing_but_is_recorded():
     gen = _reasker([("No idea.", "stop"), ("I think it is supported by [1].", "stop")])
-    ans = gen.generate("claim", _hits(2))
+    ans = gen.generate("Aspirin reduces stroke risk.", _hits(2))
     assert gen.client.chat.completions.calls == 2
     assert ans.verdict is None and ans.verdict_source is None and ans.text == "No idea."
     assert ans.reask_attempted and ans.reask.raw == "I think it is supported by [1]."
@@ -670,7 +671,7 @@ def test_a_failed_reask_serves_the_first_answer():
 
     gen = _reasker("unused")
     gen.client = SimpleNamespace(chat=SimpleNamespace(completions=Failing([("No idea.", "stop")])))
-    ans = gen.generate("claim", _hits(2))
+    ans = gen.generate("Aspirin reduces stroke risk.", _hits(2))
     assert ans.text == "No idea." and ans.verdict is None
     assert ans.reask_attempted and ans.reask is None and ans.reask_error == "APITimeoutError"
     assert ans.cost_usd is None  # the failed call may have been billed: unknown
@@ -684,7 +685,7 @@ def test_reask_follows_the_setting_by_default(monkeypatch):
         gen = LLMGenerator(model="m", base_url="http://localhost:1", api_key="k", reasoning_effort="")
         gen.client = SimpleNamespace(chat=SimpleNamespace(completions=_FakeCompletions(
             [("No idea.", "stop"), ("Verdict: SUPPORTED", "stop")])))
-        ans = gen.generate("claim", _hits(1))
+        ans = gen.generate("Aspirin reduces stroke risk.", _hits(1))
         assert gen.client.chat.completions.calls == (2 if on else 1)
         assert ans.verdict == ("SUPPORTED" if on else None)
 
@@ -693,7 +694,8 @@ def test_needs_reask_and_display_text():
     assert needs_reask("Aspirin cures stroke.", None)
     assert not needs_reask("Does aspirin cure stroke?", None)
     assert not needs_reask("Aspirin cures stroke.", "SUPPORTED")
-    assert reask_display_text(TRUNCATION_NOTE) == REASK_NOTE == reask_display_text("  ")
+    assert reask_display_text(TRUNCATION_NOTE) == REASK_NOTE
+    assert reask_display_text("  ") == REASK_NOTE_NO_VERDICT  # finished, just empty
     assert reask_display_text("Some prose [1].") == "Some prose [1]."
 
 
@@ -704,3 +706,414 @@ def test_reask_prompt_is_the_frozen_one_and_shares_the_product_context_layout():
     assert msgs[0] == {"role": "system", "content": REASK_SYSTEM}
     assert "[1] T\nbody" in msgs[1]["content"] and "[1] T\nbody" in build_user_prompt("q", hits)
     assert msgs[1]["content"].count('"""') == 2  # the claim is sanitised like a question
+
+
+# --- C1: only claims are re-asked or read for a stance --------------------------------------
+
+from app.generate.generator import (  # noqa: E402
+    CLIENT_MAX_RETRIES,
+    CLIENT_TIMEOUT_S,
+    REASK_MAX_RETRIES,
+    REASK_TIMEOUT_S,
+    looks_like_claim,
+    strip_verdict_lines,
+)
+
+NOT_CLAIMS = [
+    "BRCA1 breast cancer risk", "statins", "breast cancer", "effects of statins on LDL",
+    "statin side effects in elderly patients", "risk factors for breast cancers in women",
+    "Explain how statins lower LDL", "Tell me about statins and LDL",
+    "List the effects of statins", "Describe the role of p53 in cancer.",
+    "Summarise the statin trials.", "Compare statins and ezetimibe", "Define apoptosis",
+    "Outline the role of p53 in cancer", "Please give me the evidence on statins.",
+    "Do statins lower LDL?", "what does aspirin do", "", "   ",
+]
+CLAIMS = [
+    "Statins lower LDL cholesterol.", "Statins decrease blood cholesterol.",
+    "Obesity decreases life quality.", "Mitochondria play a major role in apoptosis.",
+    "CX3CR1 on the Th2 cells impairs T cell survival",  # SciFact test, no final period
+    "RTEL1 interacts with TRF2 through a C4C4 motif",  # SciFact train, no final period
+    "Localization of PIN1 in the roots of Arabidopsis does not require VPS9a",
+    "BRCA1 mutations increase breast cancer risk",
+]
+
+
+@pytest.mark.parametrize("query", NOT_CLAIMS)
+def test_looks_like_claim_rejects_keywords_questions_and_instructions(query):
+    assert not looks_like_claim(query)
+    assert not needs_reask(query, None)
+
+
+@pytest.mark.parametrize("query", CLAIMS)
+def test_looks_like_claim_accepts_sentence_claims(query):
+    assert looks_like_claim(query) and needs_reask(query, None)
+
+
+PROSE = "Statins lower LDL by inhibiting HMG-CoA reductase [1], with a 40% fall in one trial [2]."
+
+
+@pytest.mark.parametrize("query", NOT_CLAIMS)
+def test_a_non_claim_is_never_reasked_nor_given_a_stance_verdict(query):
+    gen = _reasker([(PROSE, "stop"), ("Verdict: SUPPORTED [1]", "stop")])
+    ans = gen.generate(query, _hits(2))
+    assert gen.client.chat.completions.calls == 1 and not ans.reask_attempted
+    assert ans.verdict is None and ans.text == PROSE
+    stance = "The passages support that statins lower LDL [1]."
+    ans = _reasker([(stance, "stop"), ("Verdict: SUPPORTED", "stop")]).generate(query, _hits(2))
+    assert ans.verdict is None and ans.verdict_source is None
+
+
+@pytest.mark.parametrize("query", CLAIMS)
+def test_a_claim_is_still_reasked_and_still_read_for_a_stance(query):
+    gen = _reasker([(PROSE, "stop"), ("Verdict: SUPPORTED [1]", "stop")])
+    ans = gen.generate(query, _hits(2))
+    assert gen.client.chat.completions.calls == 2
+    assert (ans.verdict, ans.verdict_source) == ("SUPPORTED", "reask")
+    stance = "The passages support that statins lower LDL [1]."
+    ans = _reasker([(stance, "stop")]).generate(query, _hits(2))
+    assert (ans.verdict, ans.verdict_source) == ("SUPPORTED", "stance")
+
+
+# --- C7: a stance turned around or away from the claim is not read ------------------------
+
+
+@pytest.mark.parametrize("sentence", [
+    "The passages support neither the claim nor its negation.",
+    "The evidence supports the opposite conclusion.",
+    "No, the passages support a different mechanism.",
+    "No, the passages support a different mechanism [1].",
+    "No, the context supports the reverse.",
+    "No, the passages support the claim [1].",  # "No," with SUPPORTED: halves disagree
+    "No. The passages support the opposite [1].",
+    "Yes, the passages refute it.",
+    "Yes, the context does not provide enough evidence.",
+    "The passages support none of this.",
+    "The passages confirm nothing about the claim.",
+    "The passages refute the idea that the claim is false.",
+    "The passages refute any notion that the claim is false [1].",
+    "The passages confirm that the claim is false [1].",
+    "The passages support the idea that the claim is incorrect [2].",
+    "The passages support the hypothesis that the claim is wrong.",
+    "The evidence supports the claim's negation [1].",
+    "The passages support the claim's opposite.",
+    "The context supports the opposite conclusion: X decreases Y [2].",
+    "The context does not provide support for the opposite [1].",
+    "The claim is supported by no passage.",
+    "The evidence contradicts the null hypothesis, supporting the claim.",
+    "The context does not provide evidence that contradicts the claim; it supports it [1].",
+    "The evidence supports the claim; passage [3] refutes it.",
+    "The passages do not mention X; instead they show the reverse.",
+    "The passages support the claim rather than its alternative [1].",
+    "The context supports this, not the claim [1].",
+])
+def test_stance_with_a_shifted_scope_is_not_a_verdict(sentence):
+    for text in (sentence, f"{sentence} More detail follows [1]."):
+        assert parse_verdict(text, allow_stance=True)[1:] == (None, None)
+
+
+@pytest.mark.parametrize("reply, verdict", [
+    # Shapes of the committed test-run stance rows: these must keep their verdicts.
+    ("The provided context passages do not mention *Escherichia coli*; they study the T6SS "
+     "in *Serratia marcescens* [1].", "NOT ENOUGH EVIDENCE"),
+    ("The provided context passages do not mention IBP, so they neither support nor refute "
+     "the claim [1].", "NOT ENOUGH EVIDENCE"),
+    ("The context does not provide sufficient evidence to support or refute the claim.",
+     "NOT ENOUGH EVIDENCE"),
+    ("Yes, the context supports this claim. Passage [1] identifies Irg1 [1].", "SUPPORTED"),
+    ("No, the passages refute the claim [2].", "REFUTED"),
+    ("No, the context does not provide any data on this [1].", "NOT ENOUGH EVIDENCE"),
+    ("The claim is directly supported by passage [1], which states: \"activation of CLEC-2 "
+     "rearranges the actin cytoskeleton\".", "SUPPORTED"),
+])
+def test_stance_scope_rules_keep_consistent_stances(reply, verdict):
+    assert parse_verdict(reply, allow_stance=True)[1:] == (verdict, "stance")
+
+
+# --- C8: a re-ask verdict never sits next to a contradicting verdict line -----------------
+
+
+@pytest.mark.parametrize("first, shown", [
+    ("Statins lower LDL [1][2].\nVerdict - SUPPORTED (maybe)", "Statins lower LDL [1][2]."),
+    ("Statins lower LDL [1][2].\n**Verdict**: probably supports", "Statins lower LDL [1][2]."),
+    ("Statins lower LDL [1][2].\nVerdict: SUPPORTED (mostly)", "Statins lower LDL [1][2]."),
+    ("Statins lower LDL [1][2].\nVerdict: SUPPORTED\nVerdict: SUPPORTED",
+     "Statins lower LDL [1][2]."),
+    ("Statins lower LDL [1][2]. Final answer: SUPPORTED", "Statins lower LDL [1][2]."),
+    ("Statins lower LDL [1][2].\nFinal answer: probably SUPPORTED.", "Statins lower LDL [1][2]."),
+    ("Statins lower LDL [1] (Verdict: SUPPORTED)", "Statins lower LDL [1]"),
+    ("Statins lower LDL [1].\nVerdict SUPPORTED", "Statins lower LDL [1]."),
+    ("Verdict: SUPPORTED, because statins lower LDL [1].", REASK_NOTE_NO_VERDICT),
+])
+def test_reask_strips_verdict_like_lines_from_the_displayed_text(first, shown):
+    gen = _reasker([(first, "stop"), ("Verdict: REFUTED [2]", "stop")])
+    ans = gen.generate("Statins lower LDL cholesterol.", _hits(2))
+    assert gen.client.chat.completions.calls == 2
+    assert (ans.verdict, ans.verdict_source) == ("REFUTED", "reask")
+    assert ans.text == shown and reask_display_text(first) == shown
+    assert ans.citations == map_citations(shown, _hits(2))
+
+
+@pytest.mark.parametrize("text", [
+    "Some prose [1].",
+    "Statins lower LDL [1]. The verdict of the trial was clear: LDL fell [2].",
+    "We reach a verdict: the data are thin [1].",
+    "Conclusion: the passages show LDL falls [1].",
+    "Final answer: statins lower LDL by 40% [2].",
+    "  Leading space kept as served [1].\n",
+])
+def test_reask_display_text_leaves_prose_that_mentions_a_verdict_alone(text):
+    assert reask_display_text(text) == text
+
+
+def test_reask_display_text_keeps_the_truncation_note():
+    assert reask_display_text(f"It reduces risk [1].\nVerdict: maybe\n\n{TRUNCATION_NOTE}") == (
+        f"It reduces risk [1].\n\n{TRUNCATION_NOTE}"
+    )
+    assert reask_display_text(f"Verdict: SUPPORTED (maybe)\n\n{TRUNCATION_NOTE}") == REASK_NOTE
+    assert reask_display_text(f"It reduces [1] but\n\n{TRUNCATION_NOTE}") == (
+        f"It reduces [1] but\n\n{TRUNCATION_NOTE}"
+    )
+    assert strip_verdict_lines("A [1].\n**Verdict:** **SUPPORTED**\n\n") == "A [1]."
+
+
+# --- C14: one explicit re-ask timeout / retry policy, whoever calls reask_verdict --------
+
+
+class _RawClient:
+    """A stand-in for openai.OpenAI: records its options and with_options copies."""
+
+    def __init__(self, completions, **options):
+        self.options = options
+        self.completions = completions
+        self.chat = SimpleNamespace(completions=completions)
+        self.copies: list[dict] = []
+
+    def with_options(self, **options):
+        self.copies.append(options)
+        return _RawClient(self.completions, **{**self.options, **options})
+
+
+def _guarded_generator(monkeypatch, replies):
+    import app.generate.generator as g
+
+    built = []
+
+    def factory(**kw):
+        kw.pop("base_url"), kw.pop("api_key")
+        built.append(_RawClient(_FakeCompletions(replies), **kw))
+        return built[-1]
+
+    monkeypatch.setattr(g, "OpenAI", factory)
+    gen = LLMGenerator(model="m", base_url="http://localhost:1", api_key="k",
+                       reasoning_effort="", reask=True)
+    return gen, built
+
+
+def test_generation_keeps_its_client_policy_and_the_reask_gets_its_own(monkeypatch):
+    gen, built = _guarded_generator(monkeypatch, [("No idea.", "stop"), ("Verdict: SUPPORTED", "stop")])
+    raw = built[0]
+    assert raw.options == {"timeout": CLIENT_TIMEOUT_S, "max_retries": CLIENT_MAX_RETRIES}
+    assert (CLIENT_TIMEOUT_S, CLIENT_MAX_RETRIES) == (30.0, 5)  # unchanged first-call policy
+    ans = gen.generate("Aspirin reduces stroke risk.", _hits(1))
+    assert ans.verdict_source == "reask"
+    # Exactly one copy, made for the re-ask, with the explicit re-ask policy.
+    assert raw.copies == [{"timeout": REASK_TIMEOUT_S, "max_retries": REASK_MAX_RETRIES}]
+    reqs = raw.completions.requests
+    assert [r["max_tokens"] for r in reqs] == [gen.max_completion_tokens, REASK_MAX_TOKENS]
+    # The policy lives on the client, never in a request field (cache keys stay put).
+    assert all("timeout" not in r and "max_retries" not in r for r in reqs)
+    assert gen.client.calls == 1  # the first call went through the generator's own client
+
+
+def test_reask_verdict_policy_is_the_same_for_every_caller(monkeypatch):
+    # rag_eval calls reask_verdict directly (generator built with reask=False); the API
+    # reaches it through generate(). Both get the same copy.
+    gen, built = _guarded_generator(monkeypatch, [("Verdict: REFUTED", "stop")])
+    gen.reask_enabled = False
+    reply = gen.reask_verdict("Aspirin reduces stroke risk.", _hits(1))
+    assert reply.raw == "Verdict: REFUTED"
+    assert built[0].copies == [{"timeout": REASK_TIMEOUT_S, "max_retries": REASK_MAX_RETRIES}]
+    assert REASK_TIMEOUT_S > CLIENT_TIMEOUT_S and REASK_MAX_RETRIES < CLIENT_MAX_RETRIES
+
+
+def test_reask_through_a_fake_client_without_with_options_uses_it_as_is():
+    gen = _reasker([("No idea.", "stop"), ("Verdict: SUPPORTED", "stop")])
+    ans = gen.generate("Aspirin reduces stroke risk.", _hits(1))
+    assert gen.client.chat.completions.calls == 2 and ans.verdict == "SUPPORTED"
+
+
+# --- stance scope: what follows a colon / a "that" clause describes the finding ----------
+
+
+@pytest.mark.parametrize(
+    "text,want",
+    [
+        # A contrast opening the next sentence takes the stance back.
+        ("The claim is supported. However, only in mice [1].", None),
+        ("The claim is supported [1].\nBut the passages concern mice.", None),
+        ("The passages support the claim [1]. Passage [2] agrees.", "SUPPORTED"),
+        # "NO" is nitric oxide, not a negation.
+        ("The context supports this claim: chronic exercise increased NO levels [1].", "SUPPORTED"),
+        ("The context supports that exercise raises NO production [1].", "SUPPORTED"),
+        # After the colon, contrast words describe the refuting finding.
+        ("The context refutes the claim: X was suppressed, rather than facilitated [1].", "REFUTED"),
+        ("The context supports the claim: X differs across different viruses [1].", "SUPPORTED"),
+        # Inside a "that" clause, a soft word is part of the finding ...
+        ("The context supports that damage-induced fork reversal requires UBC13 [1].", "SUPPORTED"),
+        # ... but as the verb's own object it shifts the stance.
+        ("The passages support a different mechanism [1].", None),
+        ("The context supports the reverse [1].", None),
+        # Strong words still count anywhere before the colon.
+        ("The passages support the idea that the claim is false [1].", None),
+    ],
+)
+def test_stance_scope_clause(text, want):
+    assert parse_verdict(text)[1] == want
+
+
+# --- 3b: the no-explanation note names the actual cause ----------------------------------
+
+
+def test_reask_note_says_truncated_only_when_the_reply_was_cut_off():
+    assert "token budget" in REASK_NOTE and "token budget" not in REASK_NOTE_NO_VERDICT
+    # Cut off to nothing (generation + retry both "length"): the budget note.
+    ans = _reasker([("", "length"), ("", "length"), ("Verdict: REFUTED", "stop")]).generate(
+        "Aspirin cures stroke.", _hits(2))
+    assert ans.truncated and ans.text == REASK_NOTE
+    # Cut off after nothing but a malformed verdict line: still the budget note.
+    assert reask_display_text(f"Verdict: SUPPORTED (maybe)\n\n{TRUNCATION_NOTE}") == REASK_NOTE
+
+
+@pytest.mark.parametrize("first", [
+    "",  # finished ("stop") with an empty reply
+    "Verdict: SUPPORTED, because statins lower LDL [1].",
+    "**Verdict**: probably supports",
+    "Overall: SUPPORTED",
+])
+def test_reask_note_for_a_finished_reply_without_a_usable_verdict_line(first):
+    ans = _reasker([(first, "stop"), ("Verdict: REFUTED [2]", "stop")]).generate(
+        "Statins lower LDL cholesterol.", _hits(2))
+    assert not ans.truncated and (ans.verdict, ans.verdict_source) == ("REFUTED", "reask")
+    assert ans.text == REASK_NOTE_NO_VERDICT and ans.citations == []
+
+
+# --- C7 (round 2): more stances turned away from the claim -------------------------------
+
+
+@pytest.mark.parametrize("sentence", [
+    "The passages support a link, not the causal claim.",
+    "The passages support X, not Y [1].",
+    "The passages support the claim (they do not) [1].",
+    "The passages support the claim weakly at best [1].",
+    "The passages somewhat support the claim [1].",
+    "The passages support the claim in part [1].",
+    "The passages support the claim to some extent [1].",
+    "The passages support the null hypothesis [1].",
+    "The evidence supports a null result [1].",
+    "The passages refute the alternative [1].",
+    "The passages contradict each other [1].",
+    "The passages support one another [1].",
+    "The passages support the claim?",
+    "The passages support the claim. Not really, though [1].",
+    "The passages support the claim. In fact they refute it [1].",
+    "The passages support the claim. Actually, passage [2] refutes it.",
+    "The passages never support the claim [1].",
+    "The claim is supported by passage [1], not passage [2].",
+])
+def test_stance_turned_away_from_the_claim_is_not_a_verdict(sentence):
+    for text in (sentence, f"{sentence} More detail [2]."):
+        assert parse_verdict(text, allow_stance=True)[1:] == (None, None)
+
+
+@pytest.mark.parametrize("reply, verdict", [
+    # Negations and "null" inside the finding ("that ..." / "which ...") are the finding.
+    ("The context refutes the claim that suboptimal nutrition is not predictive of chronic "
+     "disease. Passage [3] identifies dietary risks [3].", "REFUTED"),
+    ("The context supports that people homozygous for the ALDH2 null variant drink "
+     "considerably less [1].", "SUPPORTED"),
+    ('The claim is contradicted by passage [1], which states that E2f1-3 "are dispensable for '
+     'cell division and instead are necessary for cell survival." This means it is not '
+     "limited to terminally differentiated cells.", "REFUTED"),
+    # "Rather than ..." opening the next sentence restates a refutation, not a correction.
+    ("The claim is refuted by passage [1], which states that Ly49Q mediated polarization. "
+     "Rather than preventing polarization, active Ly49Q promotes it.", "REFUTED"),
+    ("The passages support the claim that NO synthase is required [1].", "SUPPORTED"),
+    ("The passages refute the claim that NO is harmful [1].", "REFUTED"),
+])
+def test_stance_keeps_findings_that_contain_negations(reply, verdict):
+    assert parse_verdict(reply, allow_stance=True)[1:] == (verdict, "stance")
+
+
+# --- C8 (round 2): every verdict-only line or trailing statement goes ---------------------
+
+
+@pytest.mark.parametrize("first, shown", [
+    ("Statins lower LDL [1][2].\nThe answer is SUPPORTED.", "Statins lower LDL [1][2]."),
+    ("Statins lower LDL [1][2].\n**SUPPORTED**", "Statins lower LDL [1][2]."),
+    ("Statins lower LDL [1][2]. In conclusion, the claim is supported.", "Statins lower LDL [1][2]."),
+    ("Statins lower LDL [1][2].\nOverall: SUPPORTED", "Statins lower LDL [1][2]."),
+    ("Statins lower LDL [1][2].\nAssessment: SUPPORTED", "Statins lower LDL [1][2]."),
+    ("Statins lower LDL [1][2]. Thus, Verdict: SUPPORTED (high confidence)",
+     "Statins lower LDL [1][2]."),
+    ("Statins lower LDL [1][2].\nVerdict: SUPPORTED.\nNote: limited data [2].",
+     "Statins lower LDL [1][2].\nNote: limited data [2]."),
+    ("Statins lower LDL [1][2].\nConclusion: the claim is supported.", "Statins lower LDL [1][2]."),
+    ("Statins lower LDL [1][2].\n\nVerdict: **SUPPORTED** (based on [1])", "Statins lower LDL [1][2]."),
+    ("Statins lower LDL [1][2].\nFinal verdict - SUPPORTS", "Statins lower LDL [1][2]."),
+    ("Statins lower LDL [1][2].\n- Verdict: SUPPORTED", "Statins lower LDL [1][2]."),
+    ("Statins lower LDL [1][2].\n> Verdict: SUPPORTED", "Statins lower LDL [1][2]."),
+    ("Statins lower LDL [1][2].\n## Verdict\nSUPPORTED", "Statins lower LDL [1][2]."),
+    ("Statins lower LDL [1][2]. Final answer: SUPPORTED\nMore detail [2].",
+     "Statins lower LDL [1][2].\nMore detail [2]."),
+    ('Passage [1] states "LDL fell." Verdict: SUPPORTED', 'Passage [1] states "LDL fell."'),
+])
+def test_reask_display_drops_every_verdict_statement(first, shown):
+    gen = _reasker([(first, "stop"), ("Verdict: REFUTED [2]", "stop")])
+    ans = gen.generate("Statins lower LDL cholesterol.", _hits(2))
+    assert (ans.verdict, ans.verdict_source) == ("REFUTED", "reask")
+    assert ans.text == shown and ans.citations == map_citations(shown, _hits(2))
+
+
+@pytest.mark.parametrize("text", [
+    "In one trial the data supported the hypothesis [1].",
+    "The claim is supported by passage [1], which shows LDL fell 40%.",
+    "Supported by two trials, statins lower LDL [1][2].",
+    "- Statins lower LDL [1].\n- Not supported: a mortality benefit [2].",
+    "The hypothesis is supported in mice [1].",
+    "Results: LDL fell 40% [2].",
+    "Passage [2] says the claim is refuted in rats, but humans differ.",
+    "Statins lower LDL [1].\nNOTE: the claim is supported only in adults [2].",
+])
+def test_reask_display_keeps_prose_that_uses_verdict_words(text):
+    assert reask_display_text(text) == text
+
+
+# --- C1 (round 2): noun phrases are not claims; short claims with a common verb are ------
+
+
+@pytest.mark.parametrize("query", [
+    "effects of smoking on lung function", "TNF-alpha signaling pathways in inflammation",
+    "Effects of exercise on depression.", "Treatment options for multiple sclerosis.",
+    "Stem cells.", "Biomarkers of sepsis.", "Gene therapy for sickle cell disease.",
+    "BRCA1 breast cancer risk.", "cognitive decline in elderly patients",
+    "statin dose increase in elderly", "patients with lower LDL levels",
+    "causes of stroke in young adults", "drugs that lower LDL", "breast cancers risk factors",
+    "risk of stroke in treated patients", "the increase in LDL with age",
+    "aspirin to reduce stroke", "Recent advances in CAR-T therapy",
+])
+def test_looks_like_claim_rejects_noun_phrases(query):
+    assert not looks_like_claim(query)
+
+
+@pytest.mark.parametrize("query", [
+    "Smoking causes lung cancer", "Smoking causes lung cancer.", "Smoking kills.",
+    "Statins lower LDL cholesterol in adults",
+    "statins reduce cardiovascular mortality in elderly patients",
+    "Deamination of cytidine results in G-to-A mutations",
+    "Autophagy declines in aged organisms.", "Exercise improves mood",
+    "Insulin resistance precedes diabetes", "Aspirin is effective",
+    "Macrolides protect against myocardial infarction.",
+    "The genome consists of 7489 base pairs", "Four claim holds.", "Statins work.",
+])
+def test_looks_like_claim_accepts_short_claims_with_a_common_verb(query):
+    assert looks_like_claim(query)

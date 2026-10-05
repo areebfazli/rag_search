@@ -292,3 +292,31 @@ def test_first_pass_blob_undoes_the_canonical_reask():
     assert blob["rows"] == [base] and blob["verdict_sources"]["reask"] == 0
     untouched = {"rows": [base], "run": {}}
     assert sl.first_pass_blob(untouched) is untouched
+
+
+def test_cached_reask_with_an_endpoint_uses_rag_evals_versioned_keys(tmp_path, monkeypatch):
+    from app.core.config import settings
+    from app.core.llm_endpoints import OPENROUTER_BASE_URL, LLMEndpoint
+    from app.eval import rag_eval
+
+    monkeypatch.setattr(settings, "llm_reasoning_effort", "auto")
+    model = rag_eval.default_endpoints()[0][1]
+    canon = LLMEndpoint("generator", "openrouter", OPENROUTER_BASE_URL, model)
+    groq = LLMEndpoint("generator", "groq", "https://api.groq.com/openai/v1", model)
+    msgs = [{"role": "user", "content": "x"}]
+    cache = sl.ReplyCache(tmp_path / "c.json")
+    # A legacy-keyed reply (the frozen test re-run's): a hit on the canonical endpoint only.
+    cache.put(rag_eval.reask_key("1", model, msgs), {"raw": "Verdict: SUPPORTED"})
+    stats = {}
+    hit = sl.cached_call(cache, None, "reask", "1", model, 8192, msgs, stats, endpoint=canon)
+    assert hit["raw"] == "Verdict: SUPPORTED" and stats == {"cache_hits": 1}
+    assert sl.cached_call(cache, None, "reask", "1", model, 8192, msgs, stats, endpoint=groq) is None
+    assert stats["pending_keys"] == [rag_eval.reask_key_v2("1", groq, msgs)]
+    # A fresh reply is written under the v2 key, readable by rag_eval.reask_lookup.
+    c, calls, _ = make_caller([resp("Verdict: REFUTED")])
+    rec = sl.cached_call(cache, c, "reask", "2", model, 8192, msgs, stats, endpoint=canon)
+    assert rec["key_version"] == 2 and len(calls) == 1
+    assert set(cache.entries) == {rag_eval.reask_key("1", model, msgs), rag_eval.reask_key_v2("2", canon, msgs)}
+    assert rag_eval.reask_lookup(cache, "2", canon, msgs)["raw"] == "Verdict: REFUTED"
+    with pytest.raises(ValueError):
+        sl.cached_call(cache, None, "reask", "3", "other", 8192, msgs, stats, endpoint=canon)

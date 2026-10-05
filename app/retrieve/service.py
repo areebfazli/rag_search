@@ -19,7 +19,7 @@ from app.index.vector_store import VectorStore
 from app.retrieve.dense import DenseRetriever
 from app.retrieve.fusion import fuse_hits
 from app.retrieve.semantic_scholar import S2_MAX_LIMIT, S2Error
-from app.retrieve.web_search import WebSearch
+from app.retrieve.web_search import WebResult, WebSearch
 
 LOCAL_MODES = ("bm25", "dense", "hybrid", "hybrid_rerank")
 # Optional, networked (Semantic Scholar) — never the default. `web` is S2 alone;
@@ -49,19 +49,32 @@ def _kinds(value: str) -> tuple[str, ...]:
     return tuple(k.strip() for k in value.split(",") if k.strip()) or ("rewrite",)
 
 
+def api_dense_cap() -> int | None:
+    """The API's embedding cap: web_dense_cap (the measured value, which the eval uses),
+    bounded by web_api_dense_cap — the rerank runs under the API's global retrieval lock,
+    so fewer embeddings per request means less time holding it. 0 disables either."""
+    caps = [c for c in (settings.web_dense_cap, settings.web_api_dense_cap) if c]
+    return min(caps) if caps else None
+
+
 def web_extras(s2) -> dict:
     """WebSearch kwargs for the extra candidate sources enabled in settings (API path:
     short waits and at most one retry, like SemanticScholarRetriever.for_api; caches
-    only with SSR_S2_API_CACHE)."""
+    only with SSR_S2_API_CACHE; a per-request deadline; the API embedding cap)."""
     kw: dict = {
         "multi_query": settings.s2_multi_query,
         "snippets": settings.web_snippets,
         "citation_seeds": settings.web_citation_seeds,
         "citation_cap": settings.web_citation_cap,
-        "dense_cap": settings.web_dense_cap or None,
+        "dense_cap": api_dense_cap(),
         "pubmed_queries": _kinds(settings.web_pubmed_queries),
         "snippet_queries": _kinds(settings.web_snippet_queries),
+        "deadline_s": settings.web_deadline_s or None,
     }
+    if settings.web_snippets and settings.web_snippet_dataset_filter:
+        from app.retrieve.s2_extra import DatasetSnippetFilter
+
+        kw["snippet_filter"] = DatasetSnippetFilter.from_scifact()
     if settings.web_pubmed:
         from app.retrieve.pubmed import PubMedSource
         from app.retrieve.semantic_scholar import ResponseCache
@@ -69,6 +82,8 @@ def web_extras(s2) -> dict:
         kw["pubmed"] = PubMedSource(
             cache=ResponseCache(Path(settings.s2_cache_dir).parent / "web_cache") if settings.s2_api_cache else None,
             rate=settings.pubmed_rate_per_s,
+            email=settings.ncbi_email,
+            api_key=settings.ncbi_api_key,
             max_retries=1,
             max_wait_s=settings.s2_max_wait_s,
             max_backoff_s=settings.s2_max_wait_s,
@@ -173,8 +188,10 @@ class SearchService:
     ) -> list[SearchHit]:
         """Ranked hits for `query`.
 
-        Web modes only: `warnings` (if given) collects human-readable notes, e.g. that
-        Semantic Scholar failed and hybrid_web fell back to local results; `local_lock`
+        Web modes only: `warnings` (if given) collects human-readable notes — that
+        Semantic Scholar failed and hybrid_web fell back to local results, or that an
+        extra web source (PubMed, snippet search, id resolution) failed or ran out of
+        time and was skipped (see retrieve_web); `local_lock`
         (if given) is held around the LOCAL retrieval only, so the S2 network call never
         runs under the API's retrieval lock. `web` raises S2Error when S2 fails — there
         is no local fallback to degrade to — while hybrid_web never raises for it.
@@ -206,17 +223,34 @@ class SearchService:
             top_k=candidate_k,
         )
 
-    def _retrieve_web(
+    def retrieve_web(
         self,
         query: str,
-        mode: str,
-        top_k: int,
-        candidate_k: int | None,
-        warnings: list[str] | None,
-        local_lock: AbstractContextManager | None,
-    ) -> list[SearchHit]:
+        mode: str = "web",
+        top_k: int | None = None,
+        candidate_k: int | None = None,
+        local_lock: AbstractContextManager | None = None,
+    ) -> WebResult:
+        """A web-mode retrieval with its per-request side information, as a WebResult:
+
+            hits      the ranked hits (what retrieve() returns)
+            warnings  human-readable notes for the response — hybrid_web's local-only
+                      fallback when S2 fails, and every extra source (PubMed, S2 snippet
+                      search, id resolution, ...) that failed or ran out of time and was
+                      skipped. Status/reason text only, never keys or headers.
+            errors    the raw "<source>: <reason>" strings behind those warnings
+            entries   the S2 paper/search cache entries behind the search (eval dates)
+
+        retrieve() calls this and appends `warnings` to its `warnings` argument, so the
+        API gets them through the list it already passes. Raises S2Error for `web` when
+        the base S2 search fails (hybrid_web never does).
+        """
+        if mode not in WEB_MODES:
+            raise ValueError(f"not a web mode: {mode!r} (expected one of {WEB_MODES})")
+        top_k = top_k if (top_k and top_k > 0) else settings.rerank_top_k
         if mode == "web":
-            return self._web_search(query, min(top_k, S2_MAX_LIMIT), local_lock)
+            res = self._web_search(query, min(top_k, S2_MAX_LIMIT), local_lock)
+            return WebResult(res.hits[:top_k], res.errors, res.entries, _source_warnings(res.errors))
         # hybrid_web: the local hybrid list and the S2 list, fused with the same RRF.
         # fuse_hits dedupes by doc_id (SciFact ids are S2 corpus ids), and the local list
         # goes first, so a paper in both keeps the local text/title and gains S2's url/year.
@@ -227,21 +261,42 @@ class SearchService:
             SearchHit(h.doc_id, h.score, h.text, {**h.metadata, "source": "local"}) for h in local
         ]
         try:
-            web = self._web_search(query, min(candidate_k, S2_MAX_LIMIT), local_lock)
+            res = self._web_search(query, min(candidate_k, S2_MAX_LIMIT), local_lock)
         except S2Error as e:
-            if warnings is not None:
-                warnings.append(
-                    f"Semantic Scholar unavailable ({e}); showing local results only."
-                )
-            return local[:top_k]
-        return fuse_hits([local, web], k=settings.rrf_k, top_k=candidate_k)[:top_k]
+            return WebResult(
+                local[:top_k], [], [], [f"Semantic Scholar unavailable ({e}); showing local results only."]
+            )
+        fused = fuse_hits([local, res.hits], k=settings.rrf_k, top_k=candidate_k)[:top_k]
+        return WebResult(fused, res.errors, res.entries, _source_warnings(res.errors))
+
+    def _retrieve_web(
+        self,
+        query: str,
+        mode: str,
+        top_k: int,
+        candidate_k: int | None,
+        warnings: list[str] | None,
+        local_lock: AbstractContextManager | None,
+    ) -> list[SearchHit]:
+        res = self.retrieve_web(query, mode, top_k, candidate_k, local_lock)
+        if warnings is not None:
+            warnings.extend(res.warnings)
+        return res.hits
 
     def _web_search(
         self, query: str, k: int, local_lock: AbstractContextManager | None
-    ) -> list[SearchHit]:
+    ) -> WebResult:
         """S2 results for `query`. The pipeline's local rerank (embedder work) runs under
         `local_lock`, like every other use of the shared models; the S2 calls never do.
-        An injected plain retriever (tests) is called as-is."""
+        An injected plain retriever (tests) is called as-is (no errors, no entries)."""
         if isinstance(self.web, WebSearch):
-            return self.web.search(query, k, lock=local_lock)
-        return self.web.search(query, k)
+            return self.web.run(query, k, lock=local_lock)
+        return WebResult(self.web.search(query, k))
+
+
+def _source_warnings(errors: list[str]) -> list[str]:
+    """One response warning per failed extra web source (deduped, in order)."""
+    return [
+        f"Web source skipped ({e}); results may be incomplete."
+        for e in dict.fromkeys(errors)
+    ]

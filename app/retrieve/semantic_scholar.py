@@ -26,6 +26,7 @@ offset), so evals are reproducible and re-runs are free.
 """
 from __future__ import annotations
 
+import contextvars
 import email.utils
 import hashlib
 import json
@@ -34,7 +35,8 @@ import re
 import tempfile
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -53,6 +55,11 @@ S2_MAX_LIMIT = 100  # paper/search: "limit ... Must be <= 100"
 S2_BATCH_MAX_IDS = 500  # paper/batch: "Can only process 500 paper ids at a time"
 SOURCE = "semantic_scholar"
 USER_AGENT = "semantic-search-rag (github.com/areebfazli/rag_search)"
+
+# Largest S2 response body read, enforced while streaming (a declared Content-Length over
+# it is refused before the body is read). paper/batch "Can only return up to 10 MB of data
+# at a time"; a 1000-snippet search was ~2.6 MB, a 100-paper search page ~0.3 MB.
+S2_MAX_RESPONSE_BYTES = 12 * 1024 * 1024
 
 MAX_QUERY_CHARS = 1000
 MAX_TITLE_CHARS = 500
@@ -130,6 +137,117 @@ def parse_retry_after(value: str | None, now: Callable[[], float] = time.time) -
     if when.tzinfo is None:
         when = when.replace(tzinfo=timezone.utc)
     return max(0.0, when.timestamp() - now())
+
+
+class ResponseTooLarge(Exception):
+    """A response body exceeded the caller's byte cap (raised by read_capped)."""
+
+
+class BudgetSpent(Exception):
+    """The current web request's RequestBudget ran out (or the request was abandoned)
+    while a body was still streaming (raised by read_capped)."""
+
+
+def read_capped(response: httpx.Response, max_bytes: int) -> bytes:
+    """The body of a STREAMED response, refusing more than `max_bytes`: a declared
+    Content-Length over the cap is refused before reading, and the stream is cut as soon
+    as the running total passes it — so an oversize (or endless) body never sits in
+    memory whole. Under a RequestBudget (see request_budget) the stream is also cut once
+    the budget is spent, so a slow-drip body cannot outlive the request."""
+    declared = response.headers.get("content-length")
+    if declared is not None and declared.strip().isdigit() and int(declared) > max_bytes:
+        raise ResponseTooLarge(f"declared {declared} bytes")
+    budget = _BUDGET.get()
+    chunks: list[bytes] = []
+    total = 0
+    for chunk in response.iter_bytes():
+        total += len(chunk)
+        if total > max_bytes:
+            raise ResponseTooLarge(f"over {max_bytes} bytes")
+        if budget is not None and budget.expired():
+            raise BudgetSpent(budget.reason())
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+class RequestBudget:
+    """One web request's time budget plus an abandon flag (seconds=None: no time limit,
+    the eval's choice; it can still be cancelled).
+
+    WebSearch installs it with request_budget() for the whole pooled search; worker
+    threads it starts run in a copy of that context, so they see the SAME object. The
+    HTTP layers (SemanticScholarRetriever._request, web_sources.HttpFetcher._request)
+    check it between calls: no attempt starts once it is spent or cancelled, each
+    attempt's limiter wait and httpx timeouts are capped at what is left, a retry sleep
+    that would overrun it ends the call, and read_capped cuts a body still streaming
+    when it runs out. cancel() (WebSearch calls it when the request returns) makes an
+    abandoned worker stop at its next check instead of finishing its remaining calls."""
+
+    def __init__(self, seconds: float | None, clock: Callable[[], float] = time.monotonic):
+        self._clock = clock
+        self.seconds = seconds
+        self._end = None if seconds is None else clock() + max(0.0, float(seconds))
+        self._cancelled = threading.Event()
+
+    def remaining(self) -> float | None:
+        """Seconds left (0.0 once cancelled), or None when there is no time limit."""
+        if self._cancelled.is_set():
+            return 0.0
+        return None if self._end is None else max(0.0, self._end - self._clock())
+
+    def expired(self) -> bool:
+        return self._cancelled.is_set() or (self._end is not None and self._clock() >= self._end)
+
+    def cancel(self) -> None:
+        self._cancelled.set()
+
+    @property
+    def cancelled(self) -> bool:
+        return self._cancelled.is_set()
+
+    def reason(self) -> str:
+        return "request abandoned" if self._cancelled.is_set() else "web deadline reached"
+
+
+_BUDGET: contextvars.ContextVar[RequestBudget | None] = contextvars.ContextVar("web_request_budget", default=None)
+
+
+@contextmanager
+def request_budget(budget: RequestBudget | None) -> Iterator[RequestBudget | None]:
+    """Make `budget` the current request's budget (this thread/context) for the block."""
+    token = _BUDGET.set(budget)
+    try:
+        yield budget
+    finally:
+        _BUDGET.reset(token)
+
+
+def current_budget() -> RequestBudget | None:
+    return _BUDGET.get()
+
+
+def budget_wait(max_wait_s: float | None, remaining: float | None) -> float | None:
+    """A limiter wait bounded by both the caller's own wait budget and the request's."""
+    if remaining is None:
+        return max_wait_s
+    return remaining if max_wait_s is None else min(max_wait_s, remaining)
+
+
+def budget_timeout(client: object, remaining: float | None) -> dict:
+    """`timeout=` kwargs for one streamed attempt: {} (the client's own timeouts) without
+    a time budget, else the client's timeouts each capped at `remaining` seconds."""
+    if remaining is None:
+        return {}
+    base = getattr(client, "timeout", None)
+    rem = max(remaining, 0.001)
+
+    def cap(v: float | None) -> float:
+        return rem if v is None else min(v, rem)
+
+    if not isinstance(base, httpx.Timeout):
+        return {"timeout": httpx.Timeout(rem)}
+    return {"timeout": httpx.Timeout(connect=cap(base.connect), read=cap(base.read),
+                                     write=cap(base.write), pool=cap(base.pool))}
 
 
 class RateLimiter:
@@ -239,6 +357,33 @@ def search_params(query: str, limit: int) -> dict:
     return {"query": normalize_query(query), "limit": limit, "fields": SEARCH_FIELDS, "offset": 0}
 
 
+_ERROR_KEYS = ("error", "message", "code")
+
+
+def is_error_body(payload: object) -> bool:
+    """An S2 error object served with HTTP 200 ({"error": ...}, or {"message": ...} /
+    {"code": ...} with no "data") — never a result, never cached."""
+    return isinstance(payload, dict) and (
+        "error" in payload or ("data" not in payload and any(k in payload for k in _ERROR_KEYS))
+    )
+
+
+def payload_error(payload: object) -> str:
+    """The S2Error message for a refused 200 body (a fixed reason; the body's own text is
+    untrusted and is never echoed)."""
+    return "error object in a 200 response" if is_error_body(payload) else "unexpected response shape"
+
+
+def valid_search_payload(payload: object) -> bool:
+    """paper/search (and match) 200 body: a dict with a "data" list, or the no-results
+    form, which omits "data" but carries "total"; never an error object."""
+    if not isinstance(payload, dict) or is_error_body(payload):
+        return False
+    if "data" in payload:
+        return isinstance(payload["data"], list)
+    return "total" in payload
+
+
 def parse_search(payload: object, top_k: int, keep_no_abstract: bool = False) -> list[SearchHit]:
     """S2 paper/search payload -> SearchHits, best first, deduped by corpusId.
 
@@ -345,32 +490,53 @@ class SemanticScholarRetriever:
         """One logical call: limiter slot per attempt, bounded retries on 429/5xx and
         transport errors, Retry-After honoured (capped by max_backoff_s)."""
         last = "no attempt made"
+        budget = _BUDGET.get()
         for attempt in range(self.max_retries + 1):
-            if not self.limiter.acquire(timeout=self.max_wait_s):
+            if budget is not None and budget.expired():
+                raise S2Error(budget.reason())
+            rem = budget.remaining() if budget is not None else None
+            if not self.limiter.acquire(timeout=budget_wait(self.max_wait_s, rem)):
+                if rem is not None and (self.max_wait_s is None or rem < self.max_wait_s):
+                    raise S2Error(f"{budget.reason()} (no request slot in time)")
                 raise S2RateLimited("local rate limit: no request slot within the wait budget")
+            if budget is not None and budget.expired():
+                raise S2Error(budget.reason())
+            timeout = budget_timeout(self._client, budget.remaining() if budget is not None else None)
             self.requests_sent += 1
+            body = None
             try:
-                r = self._client.request(
-                    method, S2_BASE_URL + path, params=params, json=json_body, headers=self._headers()
-                )
+                with self._client.stream(
+                    method, S2_BASE_URL + path, params=params, json=json_body, headers=self._headers(),
+                    **timeout,
+                ) as r:
+                    status, headers = r.status_code, r.headers
+                    if status == 200:
+                        body = read_capped(r, S2_MAX_RESPONSE_BYTES)
+            except ResponseTooLarge as e:
+                raise S2Error("response too large") from e
+            except BudgetSpent as e:
+                raise S2Error(str(e)) from e
             except httpx.HTTPError as e:  # timeout, connect error, protocol error
                 last = f"network error ({type(e).__name__})"
                 delay = BACKOFF_BASE_S * 2**attempt
             else:
-                if r.status_code == 200:
+                if status == 200:
                     try:
-                        return r.json()
+                        return json.loads(body)
                     except ValueError as e:
                         raise S2Error("malformed JSON response") from e
-                last = f"HTTP {r.status_code}"
-                if r.status_code != 429 and r.status_code < 500:
+                last = f"HTTP {status}"
+                if status != 429 and status < 500:
                     raise S2Error(last)  # 400/401/403/404: retrying cannot help
-                retry_after = parse_retry_after(r.headers.get("retry-after"))
+                retry_after = parse_retry_after(headers.get("retry-after"))
                 delay = retry_after if retry_after is not None else BACKOFF_BASE_S * 2**attempt
             if attempt == self.max_retries:
                 break
             if delay > self.max_backoff_s:
                 last += f"; server asked to wait {delay:.0f}s, over the {self.max_backoff_s:.0f}s budget"
+                break
+            if budget is not None and (r_left := budget.remaining()) is not None and delay >= r_left:
+                last += f"; {budget.reason()} before the retry"
                 break
             self._sleep(delay)
         if last.startswith("HTTP 429"):
@@ -384,10 +550,11 @@ class SemanticScholarRetriever:
         if not params["query"]:
             return {"response": {"data": []}, "fetched_at": None, "params": params}
         if self.cache is not None and (hit := self.cache.get(SEARCH_PATH, params)) is not None:
-            return hit
+            if valid_search_payload(hit.get("response")):
+                return hit  # (a wrong-shaped entry from older code is a miss)
         payload = self._request("GET", SEARCH_PATH, params)
-        if not isinstance(payload, dict) or not isinstance(payload.get("data", []), list):
-            raise S2Error("unexpected response shape")
+        if not valid_search_payload(payload):
+            raise S2Error(payload_error(payload))
         payload.setdefault("data", [])
         if self.cache is not None:
             return self.cache.put(SEARCH_PATH, params, payload)
@@ -403,11 +570,16 @@ class SemanticScholarRetriever:
         if len(ids) > S2_BATCH_MAX_IDS:
             raise ValueError(f"paper/batch takes at most {S2_BATCH_MAX_IDS} ids")
         params = {"fields": fields, "ids": list(ids)}
+
+        def ok(p: object) -> bool:  # one entry (or null) per id, in input order
+            return isinstance(p, list) and len(p) == len(ids)
+
         if self.cache is not None and (hit := self.cache.get(BATCH_PATH, params)) is not None:
-            return hit["response"]
+            if ok(hit.get("response")):
+                return hit["response"]
         payload = self._request("POST", BATCH_PATH, {"fields": fields}, {"ids": list(ids)})
-        if not isinstance(payload, list):
-            raise S2Error("unexpected response shape")
+        if not ok(payload):
+            raise S2Error(payload_error(payload))
         if self.cache is not None:
             self.cache.put(BATCH_PATH, params, payload)
         return payload

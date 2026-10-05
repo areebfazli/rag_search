@@ -29,8 +29,10 @@ Run:
     SSR_S2_API_KEY=... uv run --locked python -m app.eval.web_eval     # or: make web-eval
     SSR_EVAL_LIMIT=2 uv run --locked python -m app.eval.web_eval       # 3-request smoke run
     SSR_EVAL_REFRESH=1 ...   # re-fetch everything, ignoring (and overwriting) the cache
-Outputs eval/results/web_retrieval.{md,json} for the full test split only; any other
-run goes to data/eval_runs/web_<dataset>_<n>/.
+Outputs eval/results/web_retrieval.{md,json} for the full test split only (pooled rows
+on, id mapping enforced); any other run — sampled, SSR_EVAL_LIMIT, another split,
+SSR_WEB_EVAL_POOL=0 or SSR_WEB_EVAL_ALLOW_UNMAPPED=1 — goes to
+data/eval_runs/web_<dataset>_<n>[_nopool][_unmapped]/.
 """
 from __future__ import annotations
 
@@ -45,6 +47,7 @@ from pathlib import Path
 
 from app.core.config import Settings, settings
 from app.core.interfaces import SearchHit
+from app.core.paths import RESULTS
 from app.retrieve.web_sources import SourceError
 from app.retrieve.semantic_scholar import (
     S2_BATCH_MAX_IDS,
@@ -73,7 +76,7 @@ TITLE_MATCH_RATIO = 0.9
 BATCH_FIELDS = "title,corpusId"
 EST_LATENCY_S = 1.0  # rough per-request S2 latency for the up-front time estimate
 
-OUT = Path("eval/results")
+OUT = RESULTS  # canonical run only — the committed artifact (repo-anchored, not cwd)
 RUNS = Path("data/eval_runs")
 CANONICAL_DATASET = Settings.model_fields["eval_dataset"].default
 SEED = 13  # sample seed for SSR_WEB_EVAL_N (rag_eval's shuffle-then-prefix sampling)
@@ -325,11 +328,20 @@ def to_markdown(result: dict, meta: dict) -> str:
     return "\n".join(lines)
 
 
+def allow_unmapped() -> bool:
+    return bool(os.environ.get("SSR_WEB_EVAL_ALLOW_UNMAPPED", "").strip())
+
+
 def output_dir(limit: int, n_queries: int, sampled: bool = False) -> tuple[Path, bool]:
-    if not limit and not sampled and settings.eval_dataset == CANONICAL_DATASET:
+    """(directory, canonical). Only the full test split, with the pooled rows and the id
+    mapping check enforced, may write the committed eval/results/: SSR_WEB_EVAL_POOL=0
+    (pooled rows missing) or SSR_WEB_EVAL_ALLOW_UNMAPPED=1 (possibly unconfirmed ids)
+    goes to data/eval_runs/ like any other non-canonical run."""
+    flags = ("" if pool_enabled() else "_nopool") + ("_unmapped" if allow_unmapped() else "")
+    if not limit and not sampled and not flags and settings.eval_dataset == CANONICAL_DATASET:
         return OUT, True
     slug = "".join(c if c.isalnum() else "-" for c in settings.eval_dataset).strip("-")
-    return RUNS / f"web_{slug}_{n_queries}", False
+    return RUNS / f"web_{slug}_{n_queries}{flags}", False
 
 
 def make_embedder():
@@ -520,7 +532,7 @@ def main() -> int:
         f"Id mapping: {mapping['title_matches']}/{mapping['n_gold_docs']} gold docs match "
         f"by title (rate {mapping['match_rate']:.3f}, need ≥{MAPPING_MIN_MATCH})."
     )
-    if not mapping["confirmed"] and not os.environ.get("SSR_WEB_EVAL_ALLOW_UNMAPPED"):
+    if not mapping["confirmed"] and not allow_unmapped():
         print(
             "SciFact ids do not map to S2 corpus ids well enough to score against gold "
             f"qrels (examples: {mapping['mismatch_examples'][:3]}). Stopping before any "
@@ -537,17 +549,17 @@ def main() -> int:
             # Through SearchService, as the API runs it (web mode, this pipeline).
             service = SearchService(dense=_NoLocalIndex(), lexical=_NoLocalIndex(), web=pipeline)
             try:
-                hits = service.retrieve(text, mode="web", top_k=DEPTH)
+                res = service.retrieve_web(text, mode="web", top_k=DEPTH)
             except (S2Error, SourceError) as e:
                 print(
                     f"\nStopped at claim {i}/{len(queries)} ({key}): {e}. Responses so far are "
                     "cached — re-run the same command to resume."
                 )
                 return 1
-            runs[key][qid] = to_run(hits)
-            fetched += [e["fetched_at"] for e in pipeline.last_entries if e.get("fetched_at")]
+            runs[key][qid] = to_run(res.hits)
+            fetched += [e["fetched_at"] for e in res.entries if e.get("fetched_at")]
             if key == "web_rewrite":
-                fallback_used += len(pipeline.last_entries) > 1
+                fallback_used += len(res.entries) > 1
                 no_terms += not query_rewrite.claim_terms(text)
         dropped += len(runs["web_any"][qid]) - len(runs["web"][qid])
         if i % 20 == 0 or i == len(queries):
@@ -561,6 +573,8 @@ def main() -> int:
         else f"{settings.eval_dataset} ({result['n_queries']} claims"
         + (f", seeded sample (seed {SEED})" if sampled else "")
         + (f", SSR_EVAL_LIMIT={limit}" if limit else "")
+        + ("" if extras else ", no pooled rows")
+        + (", SSR_WEB_EVAL_ALLOW_UNMAPPED" if allow_unmapped() else "")
         + ", non-canonical)"
     )
     meta = {

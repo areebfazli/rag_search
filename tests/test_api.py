@@ -265,3 +265,210 @@ def test_answer_passes_web_hits_to_the_generator_unchanged(monkeypatch):
     assert [h.doc_id for h in seen["hits"]] == ["4983", "d1"]
     assert seen["hits"][0].metadata["source"] == "semantic_scholar"
     assert r.json()["citations"] == ["4983"] and r.json()["hits"][0]["source"] == "semantic_scholar"
+
+
+# --- web-mode guards: stricter shared rate limit + non-blocking concurrency cap ---------
+
+
+def _answer_gen(**extra):
+    """Fake generator: an Answer with optional side-channel attributes (reask_error...)."""
+    from app.core.interfaces import Answer
+
+    class _Gen:
+        def generate(self, q, hits):
+            ans = Answer(text="It does [1].", citations=[hits[0].doc_id], hits=hits)
+            for k, v in extra.items():
+                setattr(ans, k, v)
+            return ans
+
+    return _Gen()
+
+
+def _guarded_client(monkeypatch, service, **settings_overrides):
+    from app.api import main
+
+    client = _client(monkeypatch, service)
+    monkeypatch.setattr(main, "_web_active", 0)
+    monkeypatch.setattr(main, "resolve_endpoint", lambda role: None)
+    monkeypatch.setattr(main, "get_generator", lambda: _answer_gen())
+    for k, v in settings_overrides.items():
+        monkeypatch.setattr(settings, k, v)
+    return client
+
+
+def test_web_modes_have_a_stricter_limit_shared_by_search_and_answer(monkeypatch):
+    client = _guarded_client(monkeypatch, _WebService(), web_rate_limit="2/minute")
+    assert client.get("/search", params={"q": "x", "mode": "web"}).status_code == 200
+    assert client.get("/answer", params={"q": "x", "mode": "hybrid_web"}).status_code == 200
+    # Third web request from this IP, on either endpoint: over the shared web bucket,
+    # though far under /search's own 30/minute.
+    for path in ("/search", "/answer"):
+        r = client.get(path, params={"q": "x", "mode": "hybrid_web"})
+        assert r.status_code == 429, r.text
+        assert int(r.headers["Retry-After"]) >= 1
+    # Local modes for the same IP are untouched by the exhausted web bucket.
+    assert client.get("/search", params={"q": "x", "mode": "hybrid"}).status_code == 200
+    assert client.get("/answer", params={"q": "x", "mode": "bm25"}).status_code == 200
+
+
+def test_local_requests_never_spend_the_web_bucket(monkeypatch):
+    client = _guarded_client(monkeypatch, _WebService(), web_rate_limit="1/minute")
+    for _ in range(5):
+        assert client.get("/search", params={"q": "x", "mode": "dense"}).status_code == 200
+    assert client.get("/search", params={"q": "x", "mode": "web"}).status_code == 200
+    assert client.get("/search", params={"q": "x", "mode": "web"}).status_code == 429
+
+
+def test_local_search_limit_is_unchanged(monkeypatch):
+    client = _guarded_client(monkeypatch, _WebService())
+    codes = [client.get("/search", params={"q": "x"}).status_code for _ in range(31)]
+    assert codes[:30] == [200] * 30 and codes[30] == 429
+
+
+def test_web_concurrency_cap_is_503_with_retry_after_and_never_queues(monkeypatch):
+    import threading
+
+    from app.api import main
+
+    entered, release = threading.Event(), threading.Event()
+
+    class _Blocking(_WebService):
+        def retrieve(self, q, mode, top_k, **kw):
+            if mode in ("web", "hybrid_web"):
+                entered.set()
+                assert release.wait(10)
+            return super().retrieve(q, mode, top_k, **kw)
+
+    client = _guarded_client(monkeypatch, _Blocking(), web_max_concurrent=1)
+    result = {}
+    t = threading.Thread(
+        target=lambda: result.setdefault(
+            "r", client.get("/search", params={"q": "x", "mode": "web"})
+        )
+    )
+    t.start()
+    try:
+        assert entered.wait(10)
+        r = client.get("/search", params={"q": "x", "mode": "hybrid_web"})
+        assert r.status_code == 503 and r.headers["Retry-After"] == "5"
+        assert client.get("/answer", params={"q": "x", "mode": "web"}).status_code == 503
+        # A local request is not held up by, and does not need, a web slot.
+        assert client.get("/search", params={"q": "x", "mode": "hybrid"}).status_code == 200
+    finally:
+        release.set()
+        t.join(10)
+    assert result["r"].status_code == 200
+    assert main._web_active == 0  # released in finally
+    assert client.get("/search", params={"q": "x", "mode": "web"}).status_code == 200
+
+
+def test_held_web_slots_block_web_only_and_free_up_on_release(monkeypatch):
+    from app.api import main
+
+    client = _guarded_client(monkeypatch, _WebService(), web_max_concurrent=2)
+    assert main._try_acquire_web_slot() and main._try_acquire_web_slot()
+    assert not main._try_acquire_web_slot()  # non-blocking: just says no
+    try:
+        assert client.get("/answer", params={"q": "x", "mode": "web"}).status_code == 503
+        assert client.get("/answer", params={"q": "x", "mode": "hybrid"}).status_code == 200
+    finally:
+        main._release_web_slot()
+    assert client.get("/answer", params={"q": "x", "mode": "web"}).status_code == 200
+    main._release_web_slot()
+    assert main._web_active == 0
+
+
+def test_web_slot_is_released_when_retrieval_or_generation_fails(monkeypatch):
+    from openai import APITimeoutError
+
+    from app.api import main
+    from app.retrieve.semantic_scholar import S2RateLimited
+
+    client = _guarded_client(
+        monkeypatch, _WebService(error=S2RateLimited("HTTP 429")), web_max_concurrent=1
+    )
+    assert client.get("/search", params={"q": "x", "mode": "web"}).status_code == 503
+    assert main._web_active == 0
+
+    class _Failing:
+        def generate(self, q, hits):
+            raise APITimeoutError(request=None)
+
+    client = _guarded_client(monkeypatch, _WebService(), web_max_concurrent=1)
+    monkeypatch.setattr(main, "get_generator", lambda: _Failing())
+    assert client.get("/answer", params={"q": "x", "mode": "web"}).status_code == 502
+    assert main._web_active == 0
+
+
+def test_answer_generation_runs_outside_the_web_slot(monkeypatch):
+    from app.api import main
+
+    seen = {}
+
+    class _Gen:
+        def generate(self, q, hits):
+            seen["active"] = main._web_active
+            return _answer_gen().generate(q, hits)
+
+    client = _guarded_client(monkeypatch, _WebService())
+    monkeypatch.setattr(main, "get_generator", lambda: _Gen())
+    assert client.get("/answer", params={"q": "x", "mode": "hybrid_web"}).status_code == 200
+    assert seen["active"] == 0
+
+
+# --- warnings: re-ask failures + hooks for the retrieval layer / answer ----------------
+
+
+def test_failed_reask_surfaces_as_a_warning_without_raw_error_text(monkeypatch):
+    from app.api import main
+
+    client = _guarded_client(monkeypatch, _WebService())
+    monkeypatch.setattr(main, "get_generator", lambda: _answer_gen(reask_error="APITimeoutError"))
+    r = client.get("/answer", params={"q": "Aspirin cures stroke."})
+    assert r.status_code == 200
+    assert r.json()["warnings"] == [
+        "Verdict check failed (APITimeoutError); showing the first answer without a verdict."
+    ]
+    # Anything that is not a bare class name (a raw message, a key fragment) is dropped.
+    monkeypatch.setattr(
+        main, "get_generator", lambda: _answer_gen(reask_error="Error: key sk-or-v1-abc rejected")
+    )
+    w = client.get("/answer", params={"q": "Aspirin cures stroke."}).json()["warnings"]
+    assert w == ["Verdict check failed; showing the first answer without a verdict."]
+    # No re-ask error -> no warning (backward compatible shape).
+    monkeypatch.setattr(main, "get_generator", lambda: _answer_gen(reask_error=None))
+    assert client.get("/answer", params={"q": "x"}).json()["warnings"] == []
+
+
+class _HitsWithWarnings(list):
+    warnings: list[str]
+
+
+class _AnnotatingService(_WebService):
+    """Returns hits carrying a `warnings` attribute (the retrieval-layer hook)."""
+
+    def __init__(self, hit_warnings, **kw):
+        super().__init__(**kw)
+        self.hit_warnings = hit_warnings
+
+    def retrieve(self, q, mode, top_k, **kw):
+        hits = _HitsWithWarnings(super().retrieve(q, mode, top_k, **kw))
+        hits.warnings = list(self.hit_warnings)
+        return hits
+
+
+def test_hit_warnings_hook_reaches_search_and_answer_deduplicated(monkeypatch):
+    from app.api import main
+
+    s2 = "Semantic Scholar unavailable (HTTP 429)"
+    svc = _AnnotatingService([s2, "PubMed skipped", "PubMed skipped"], warning=s2)
+    client = _guarded_client(monkeypatch, svc)
+    for mode in ("hybrid_web", "hybrid"):  # local modes get the hook too
+        r = client.get("/search", params={"q": "x", "mode": mode})
+        expected = [s2, "PubMed skipped"]  # service list first, hook appended, no repeats
+        assert r.status_code == 200 and r.json()["warnings"] == expected
+    monkeypatch.setattr(
+        main, "get_generator", lambda: _answer_gen(warnings=["PubMed skipped", "Answer note"])
+    )
+    r = client.get("/answer", params={"q": "x", "mode": "hybrid_web"})
+    assert r.json()["warnings"] == [s2, "PubMed skipped", "Answer note"]

@@ -82,3 +82,57 @@ def test_invalid_payload_is_refused_and_never_cached(tmp_path):
 def test_host_limiter_is_shared_per_name():
     assert host_limiter("test-host-a", 2.0) is host_limiter("test-host-a", 5.0)
     assert host_limiter("test-host-a", 2.0) is not host_limiter("test-host-b", 2.0)
+
+
+# --- review fixes: streamed size cap, wire-only params, no caching of bad bodies -------
+
+
+def test_an_oversize_body_is_refused_while_streaming_and_not_retried():
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(200, content=iter([b"x" * 600, b"y" * 600]))  # no Content-Length
+
+    f, sleeps = fetcher(handler, max_bytes=1000)
+    with pytest.raises(SourceError, match="too large"):
+        f.get("/p", {}, parse="text")
+    assert len(calls) == 1 and sleeps == []
+    # A declared Content-Length over the cap is refused before the body is read.
+    f, _ = fetcher(lambda r: httpx.Response(200, content=b"z" * 2000), max_bytes=1000)
+    with pytest.raises(SourceError, match="too large"):
+        f.get("/p", {})
+    f, _ = fetcher(lambda r: httpx.Response(200, json={"ok": 1}), max_bytes=1000)
+    assert f.get("/p", {})["response"] == {"ok": 1}
+
+
+def test_wire_params_are_sent_but_never_keyed_or_stored(tmp_path):
+    seen = []
+
+    def handler(request):
+        seen.append(dict(request.url.params))
+        return httpx.Response(200, json={"ok": True})
+
+    cache = ResponseCache(tmp_path)
+    f, _ = fetcher(handler, cache=cache, default_params={"tool": "t"},
+                   wire_params={"email": "dev@example.org", "api_key": "sekrit", "empty": ""})
+    f.get("/p", {"q": "1"})
+    assert seen == [{"tool": "t", "q": "1", "email": "dev@example.org", "api_key": "sekrit"}]
+    # Same key as a fetcher without them: existing caches keep hitting.
+    plain, _ = fetcher(lambda r: pytest.fail("should be a cache hit"), cache=cache, default_params={"tool": "t"})
+    assert plain.get("/p", {"q": "1"})["response"] == {"ok": True}
+    blob = "".join(p.read_text() for p in tmp_path.iterdir())
+    assert "sekrit" not in blob and "dev@example.org" not in blob
+
+
+def test_a_payload_failing_validation_is_not_cached_and_a_bad_cached_one_is_a_miss(tmp_path):
+    cache = ResponseCache(tmp_path)
+    n = []
+    f, _ = fetcher(lambda r: n.append(1) or httpx.Response(200, json={"bad": 1}), cache=cache)
+    for _ in range(2):
+        with pytest.raises(SourceError):
+            f.get("/p", {}, validate=lambda p: "ok" in p)
+    assert len(n) == 2 and list(tmp_path.iterdir()) == []
+    cache.put("https://example.org/api/p", {}, {"bad": 1})  # poisoned by an older version
+    f, _ = fetcher(lambda r: httpx.Response(200, json={"ok": 1}), cache=cache)
+    assert f.get("/p", {}, validate=lambda p: "ok" in p)["response"] == {"ok": 1}

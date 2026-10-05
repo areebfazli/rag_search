@@ -52,25 +52,63 @@ OUTCOMES: tuple[tuple[str, str, Callable[[Mapping], bool]], ...] = (
 )
 REQUIRED_ROW_KEYS = ("query_id", "gold_label", "predicted_label", "answered", "evidence")
 
-# Run settings reported side by side: (label, getter over the rag.json blob).
+
+
+def _run(key: str) -> Callable[[Mapping], object]:
+    """run.<key>, falling back to the top-level copy rag_eval also writes (top_k,
+    sample_seed, the models and providers) for a file whose run block lacks it."""
+    return lambda b: b["run"][key] if key in b["run"] else b.get(key)
+
+
+# Run settings reported side by side: (label, getter over the rag.json blob). Every
+# run-block key that can change a scored outcome is here. Deliberately NOT compared:
+# prose that restates a listed setting (oracle_definition, legacy_oracle[_definition],
+# answered_source, label_source.loader/file, reask.judged — the legacy qrels oracle and
+# the judging note do not enter any outcome below), values derived from listed ones
+# (default_models, canonical), and bookkeeping that cannot move a result (throttle_s,
+# reask_cache — a path — and reask_replies, the cached/fetched/failed counts).
 SETTINGS: tuple[tuple[str, Callable[[Mapping], object]], ...] = (
     ("dataset", lambda b: b["run"].get("dataset")
      or (b["run"].get("label_source") or {}).get("dataset")),
     ("n (scored claims)", lambda b: b.get("n")),
     ("n_requested", lambda b: b["run"].get("n_requested")),
-    ("sample_seed", lambda b: b["run"].get("sample_seed")),
-    ("generator_provider", lambda b: b["run"].get("generator_provider")),
-    ("generator_model", lambda b: b["run"].get("generator_model")),
-    ("judge_provider", lambda b: b["run"].get("judge_provider")),
-    ("judge_model", lambda b: b["run"].get("judge_model")),
+    ("n_sample", lambda b: b["run"].get("n_sample")),
+    ("eval_limit", lambda b: b["run"].get("eval_limit")),
+    ("sample_seed", _run("sample_seed")),
+    # The SciFact label file the gold labels were read from.
+    ("label_source.source_zip_sha256",
+     lambda b: (b["run"].get("label_source") or {}).get("source_zip_sha256")),
+    ("oracle", lambda b: b["run"].get("oracle")),
+    ("generator_provider", _run("generator_provider")),
+    ("generator_model", _run("generator_model")),
+    ("generator_base_url", lambda b: b["run"].get("generator_base_url")),
+    ("judge_provider", _run("judge_provider")),
+    ("judge_model", _run("judge_model")),
+    ("judge_base_url", lambda b: b["run"].get("judge_base_url")),
     ("prompt_hash", lambda b: b["run"].get("prompt_hash")),
     ("judge_prompt_hash", lambda b: b["run"].get("judge_prompt_hash")),
     ("mode", lambda b: b["run"].get("mode")),
-    ("top_k", lambda b: b["run"].get("top_k")),
+    ("top_k", _run("top_k")),
     ("reranker_model", lambda b: b["run"].get("reranker_model")),
     ("generator_max_completion_tokens", lambda b: b["run"].get("generator_max_completion_tokens")),
     ("generator_reasoning_effort", lambda b: b["run"].get("generator_reasoning_effort")),
+    # What was actually sent: the reasoning parameter, the temperature (None = not sent)
+    # and the provider routing / extra request body of each role.
+    ("generator_reasoning_param", lambda b: b["run"].get("generator_reasoning_param")),
+    ("generator_temperature", lambda b: b["run"].get("generator_temperature")),
+    ("generator_extra_body", lambda b: b["run"].get("generator_extra_body")),
+    ("judge_extra_body", lambda b: b["run"].get("judge_extra_body")),
+    # The verdict-only re-ask changes predicted labels: whether it ran, its prompt and
+    # budget. (A run from before the re-ask has no run.reask block: all three are None.)
+    ("reask.enabled", lambda b: (b["run"].get("reask") or {}).get("enabled")),
+    ("reask.prompt_hash", lambda b: (b["run"].get("reask") or {}).get("prompt_hash")),
+    ("reask.max_tokens", lambda b: (b["run"].get("reask") or {}).get("max_tokens")),
+    ("reask.trigger", lambda b: (b["run"].get("reask") or {}).get("trigger")),
+    # True for a rag_rescore output (same replies, re-read by a newer parser).
+    ("rescored", lambda b: b["run"].get("rescored")),
     ("git_sha", lambda b: b["run"].get("git_sha")),
+    # rag_eval's resume-checkpoint key: a hash over the settings that define a run.
+    ("checkpoint_signature", lambda b: b["run"].get("checkpoint_signature")),
 )
 
 

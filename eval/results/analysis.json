@@ -2,7 +2,7 @@
   "dataset": "beir/scifact/test",
   "n_queries": 300,
   "candidate_depth": 100,
-  "stat_test": "student (paired, two-sided, via ranx)",
+  "stat_test": "student (paired, two-sided, via ranx); Recall@100 significance from an exact two-sided sign test on W/L (`sign_p`)",
   "max_p": 0.05,
   "label_distribution": {
     "SUPPORT": {
@@ -62,7 +62,8 @@
               "W": 53,
               "T": 213,
               "L": 34
-            }
+            },
+            "sign_p": 0.05300311301096222
           },
           "recall@100": {
             "delta": 0.023333333333333317,
@@ -71,7 +72,8 @@
               "W": 9,
               "T": 289,
               "L": 2
-            }
+            },
+            "sign_p": 0.0654296875
           }
         },
         "hybrid_vs_bm25": {
@@ -82,7 +84,8 @@
               "W": 72,
               "T": 202,
               "L": 26
-            }
+            },
+            "sign_p": 3.6886460339466603e-06
           },
           "recall@100": {
             "delta": 0.05233333333333323,
@@ -91,7 +94,8 @@
               "W": 18,
               "T": 281,
               "L": 1
-            }
+            },
+            "sign_p": 7.62939453125e-05
           }
         }
       }
@@ -123,7 +127,8 @@
               "W": 25,
               "T": 145,
               "L": 18
-            }
+            },
+            "sign_p": 0.3603776529357674
           },
           "recall@100": {
             "delta": 0.0,
@@ -132,7 +137,8 @@
               "W": 0,
               "T": 188,
               "L": 0
-            }
+            },
+            "sign_p": null
           }
         },
         "hybrid_vs_bm25": {
@@ -143,7 +149,8 @@
               "W": 36,
               "T": 139,
               "L": 13
-            }
+            },
+            "sign_p": 0.001402688503695515
           },
           "recall@100": {
             "delta": 0.019680851063829774,
@@ -152,7 +159,8 @@
               "W": 5,
               "T": 183,
               "L": 0
-            }
+            },
+            "sign_p": 0.0625
           }
         }
       }
@@ -184,7 +192,8 @@
               "W": 24,
               "T": 146,
               "L": 18
-            }
+            },
+            "sign_p": 0.44079906734259566
           },
           "recall@100": {
             "delta": 0.0,
@@ -193,7 +202,8 @@
               "W": 0,
               "T": 188,
               "L": 0
-            }
+            },
+            "sign_p": null
           }
         },
         "hybrid_vs_bm25": {
@@ -204,7 +214,8 @@
               "W": 34,
               "T": 142,
               "L": 12
-            }
+            },
+            "sign_p": 0.0016414913408482334
           },
           "recall@100": {
             "delta": 0.019680851063829663,
@@ -213,7 +224,8 @@
               "W": 5,
               "T": 183,
               "L": 0
-            }
+            },
+            "sign_p": 0.0625
           }
         }
       }
@@ -245,7 +257,8 @@
               "W": 28,
               "T": 68,
               "L": 16
-            }
+            },
+            "sign_p": 0.09614175442061423
           },
           "recall@100": {
             "delta": 0.0625,
@@ -254,7 +267,8 @@
               "W": 9,
               "T": 101,
               "L": 2
-            }
+            },
+            "sign_p": 0.0654296875
           }
         },
         "hybrid_vs_bm25": {
@@ -265,7 +279,8 @@
               "W": 36,
               "T": 63,
               "L": 13
-            }
+            },
+            "sign_p": 0.001402688503695515
           },
           "recall@100": {
             "delta": 0.1071428571428571,
@@ -274,7 +289,8 @@
               "W": 13,
               "T": 98,
               "L": 1
-            }
+            },
+            "sign_p": 0.0018310546875
           }
         }
       }
@@ -416,7 +432,8 @@
               "W": 27,
               "T": 241,
               "L": 32
-            }
+            },
+            "sign_p": 0.6029232012571503
           },
           "recall@100": {
             "delta": 0.0,
@@ -425,7 +442,8 @@
               "W": 0,
               "T": 300,
               "L": 0
-            }
+            },
+            "sign_p": null
           }
         }
       },
@@ -445,7 +463,8 @@
               "W": 24,
               "T": 246,
               "L": 30
-            }
+            },
+            "sign_p": 0.4966174353179338
           },
           "recall@100": {
             "delta": 0.0,
@@ -454,7 +473,8 @@
               "W": 0,
               "T": 300,
               "L": 0
-            }
+            },
+            "sign_p": null
           }
         }
       },
@@ -474,7 +494,8 @@
               "W": 22,
               "T": 256,
               "L": 22
-            }
+            },
+            "sign_p": 1.0
           },
           "recall@100": {
             "delta": 0.0,
@@ -483,7 +504,8 @@
               "W": 0,
               "T": 300,
               "L": 0
-            }
+            },
+            "sign_p": null
           }
         }
       },
@@ -503,7 +525,8 @@
               "W": 21,
               "T": 265,
               "L": 14
-            }
+            },
+            "sign_p": 0.31050465907901525
           },
           "recall@100": {
             "delta": 0.0,
@@ -512,7 +535,8 @@
               "W": 0,
               "T": 300,
               "L": 0
-            }
+            },
+            "sign_p": null
           }
         }
       },
@@ -532,7 +556,8 @@
               "W": 13,
               "T": 277,
               "L": 10
-            }
+            },
+            "sign_p": 0.6776394844055176
           },
           "recall@100": {
             "delta": 0.0,
@@ -541,7 +566,8 @@
               "W": 0,
               "T": 300,
               "L": 0
-            }
+            },
+            "sign_p": null
           }
         }
       },
@@ -571,7 +597,8 @@
               "W": 1,
               "T": 295,
               "L": 4
-            }
+            },
+            "sign_p": 0.375
           },
           "recall@100": {
             "delta": 0.0,
@@ -580,7 +607,8 @@
               "W": 0,
               "T": 300,
               "L": 0
-            }
+            },
+            "sign_p": null
           }
         }
       },
@@ -600,7 +628,8 @@
               "W": 34,
               "T": 225,
               "L": 41
-            }
+            },
+            "sign_p": 0.48868297090314333
           },
           "recall@100": {
             "delta": -0.03733333333333322,
@@ -609,7 +638,8 @@
               "W": 1,
               "T": 286,
               "L": 13
-            }
+            },
+            "sign_p": 0.0018310546875
           }
         }
       },
@@ -629,7 +659,8 @@
               "W": 29,
               "T": 247,
               "L": 24
-            }
+            },
+            "sign_p": 0.5831321542611763
           },
           "recall@100": {
             "delta": -0.013333333333333308,
@@ -638,11 +669,12 @@
               "W": 2,
               "T": 292,
               "L": 6
-            }
+            },
+            "sign_p": 0.2890625
           }
         }
       }
     ]
   },
-  "interpretation": "Fusion's significant Recall@100 gain over dense on the full set (+0.0233, p = 0.0346, W/T/L 9/289/2) comes from the **NEI** claims: 11 of the 11 queries where the two differ are NEI, and on that stratum hybrid gains +0.0625 (p = 0.0342, W/T/L 9/101/2). On the 188 evidence-bearing claims, hybrid and dense are **identical at Recall@100** \u2014 every query tied, against either relevant set (0.9947 on rationale docs, 0.9920 on qrels) \u2014 and their nDCG@10 on rationale docs differs by +0.0003 (p = 0.9771). For an NEI claim the qrels doc is a cited abstract in which annotators found no rationale, so the recall fusion adds is recall of documents that cannot ground a SUPPORT or CONTRADICT verdict. It still widens the candidate pool, which is why hybrid stays the default, but it is not evidence that fusion finds more supporting or refuting abstracts than dense alone; on this corpus it does not. Of the 11 gold docs hybrid misses, 9 belong to NEI claims and 8 were in neither retriever's top-100, so no fusion rule over these two candidate pools could have recovered them. All p-values are uncorrected; p = 0.0342 on 11 discordant queries is suggestive, not settled."
+  "interpretation": "Fusion's Recall@100 gain over dense on the full set (+0.0233, W/T/L 9/289/2; sign-test p = 0.0654, t-test p = 0.0346) is not significant under the exact sign test this report uses for Recall@100 (p < 0.05), and it comes entirely from the **NEI** claims: 11 of the 11 queries where the two differ are NEI, and on that stratum hybrid gains +0.0625 (W/T/L 9/101/2; sign-test p = 0.0654, t-test p = 0.0342). On the 188 evidence-bearing claims, hybrid and dense are **identical at Recall@100** \u2014 every query tied, against either relevant set (0.9947 on rationale docs, 0.9920 on qrels) \u2014 and their nDCG@10 on rationale docs differs by +0.0003 (p = 0.9771). For an NEI claim the qrels doc is a cited abstract in which annotators found no rationale, so the recall fusion adds is recall of documents that cannot ground a SUPPORT or CONTRADICT verdict. It still widens the candidate pool, which is why hybrid stays the default, but it is not evidence that fusion finds more supporting or refuting abstracts than dense alone; on this corpus it does not. Of the 11 gold docs hybrid misses, 9 belong to NEI claims and 8 were in neither retriever's top-100, so no fusion rule over these two candidate pools could have recovered them. All p-values are uncorrected; a 9\u20132 split on 11 discordant queries is suggestive, not settled."
 }

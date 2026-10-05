@@ -15,7 +15,9 @@ If the input is a claim and the reply still carries no parseable verdict (cut of
 nothing, or prose without a verdict line), generate() makes exactly ONE more call: the
 verdict-only re-ask (prompts.reask_messages, REASK_MAX_TOKENS; settings.llm_reask, on by
 default). Its verdict fills Answer.verdict (verdict_source "reask"); the displayed text
-stays the first reply's prose. Questions are never re-asked.
+stays the first reply's prose, minus any verdict-like line that would contradict it
+(reask_display_text). Only claims are re-asked (looks_like_claim): never a question, a
+keyword query or an instruction.
 """
 from __future__ import annotations
 
@@ -33,6 +35,7 @@ from openai import OpenAI
 from app.core.config import settings
 from app.core.llm_endpoints import (
     EmptyCompletionError,
+    GuardedClient,
     LLMEndpoint,
     build_client,
     completion_choice,
@@ -117,8 +120,12 @@ def split_verdict(text: str) -> tuple[str, str | None]:
 #   verb must be quote-free, so "Passage [2] says 'the context supports ...'" can't
 #   match; a first sentence with a hedge outside quotes (partially, but, however, ...),
 #   or a reply with any "verdict:" mention, is not read at all.
-#   It is off for questions (looks_like_question): an answer to a question may well say
-#   "the passages support X" without the input being a claim to judge.
+#   It is on only for claims (looks_like_claim): an answer to a question, a keyword query
+#   or an instruction may well say "the passages support X" without the input being a
+#   claim to judge. A match is also rejected when the rest of the sentence turns the
+#   stance around or away from the claim (_STANCE_SCOPE: "support neither ... nor",
+#   "supports the opposite", "a different mechanism", "the claim is false", a ';' clause
+#   with a competing stance verb), and when a leading "No," / "Yes," contradicts it.
 VERDICT_SOURCES = ("line", "inline", "stance")
 _QUOTE_CHARS = "\"“”«»„"
 _INLINE_MARKUP = r"[\s*_`]*"  # no quotes: a quoted "Verdict: X" is a passage's, not ours
@@ -162,7 +169,10 @@ _STANCE = (
 )
 _HEDGE = re.compile(
     r"\b(?:partial(?:ly)?|partly|but|however|although|though|whereas|while|only|mixed|"
-    r"indirect(?:ly)?|suggests?|may|might)\b",
+    r"indirect(?:ly)?|suggests?|may|might|"
+    # degree hedges ("supports the claim weakly at best", "somewhat supports")
+    r"weak(?:ly)?|at\s+best|somewhat|arguably|tentative(?:ly)?|in\s+part|"
+    r"to\s+(?:some|a\s+limited)\s+(?:extent|degree))\b",
     re.IGNORECASE,
 )
 # The prompt's own "Answer (cite with [n]):" marker, which a model sometimes echoes.
@@ -183,18 +193,254 @@ def looks_like_question(query: str) -> bool:
     return q.endswith("?") or bool(_QUESTION_START.match(q))
 
 
+# --- is the input a claim? -----------------------------------------------------------------
+#
+# Gates both claim-only behaviours: the verdict-only re-ask (needs_reask) and the
+# first-sentence stance fallback. A deliberately simple heuristic, checked to accept all
+# 300 beir/scifact/test and all 809 beir/scifact/train claims:
+#   1. not a question (looks_like_question) and not an instruction (_IMPERATIVE_START:
+#      "Explain ...", "Tell me ...", "List ...", "Please ...");
+#   2. a finite verb, found by _verb_signal, at one of two strengths:
+#      strong — an auxiliary/modal/"not" anywhere ("is", "does not", "can"), or a common
+#        claim verb (_CLAIM_VERBS) in its base or -s form ("Statins lower LDL", "Smoking
+#        causes lung cancer"), not as the first word, not right after a determiner or
+#        preposition ("an increase", "to reduce", "with lower") and not right before
+#        "of" / "in" / "for" / ... unless that pair is the verb's own ("results in",
+#        "consists of": _VERB_PREPOSITIONS);
+#      weak — a later word ending in -s / -ed. An -s word right before a preposition or
+#        conjunction, or at the very end, reads as a plural noun ("effects of statins on
+#        LDL", "... in elderly patients"), and an -ed word right after a determiner or
+#        preposition as an adjective ("in treated patients"); neither counts.
+#      -ing words never count: without an auxiliary they are gerunds or modifiers
+#      ("effects of smoking on lung function", "TNF-alpha signaling pathways").
+#   3. enough words for that signal: with a final '.', two or more words and any signal
+#      ("Statins decrease blood cholesterol."); without, three or more with a strong one,
+#      or at least CLAIM_MIN_WORDS with a weak one.
+# Keyword queries ("BRCA1 breast cancer risk", "statins") and noun phrases, with or
+# without a period ("Effects of exercise on depression.", "Stem cells."), are never
+# claims. Known misses, by design on the safe side: a claim whose only verb is outside
+# _CLAIM_VERBS and has no -s/-ed ending ("Statins help."); it gets no re-ask and no stance
+# verdict, just as a question. Known false positive: a noun phrase whose noun is also a
+# claim verb in the -s form before its own preposition ("trial results in elderly
+# patients").
+_IMPERATIVE_START = re.compile(
+    r"^(?:please|kindly|explain|tell|list|describe|summari[sz]e|compare|contrast|show|find|"
+    r"give|define|outline|discuss|identify|name|provide|search|look|review|elaborate|"
+    r"clarify|help|suggest|recommend|enumerate|detail|write|get|fetch|lookup)\b",
+    re.IGNORECASE,
+)
+_AUXILIARIES = frozenset(
+    "is are was were be been being am has have had do does did can could may might must "
+    "shall should will would cannot not".split()
+)
+_CLAIM_VERBS = frozenset(
+    "accelerate act activate affect allow alter ameliorate arise associate attenuate bind "
+    "block cause compensate confer consist contain contribute control correlate cure decline decrease "
+    "delay deplete depend derive determine develop differ display drink drive elevate encode "
+    "enforce enhance exacerbate exceed exhibit express extend facilitate form impair improve "
+    "increase induce influence inhibit interact kill lack lead limit localize lower maintain "
+    "mediate modulate need occur originate outperform participate persist play precede "
+    "predict prevent produce promote protect raise range receive reduce regulate rely repress require "
+    "reside restrict result shorten stimulate suppress sustain switch target trigger worsen "
+    # intransitive ones a claim can end on ("The association holds.", "Statins work.")
+    "die exist fail hold matter survive vary work"
+    .split()
+)
+# A claim verb followed by its own preposition is still a verb ("results in", "consists of",
+# "develops from"), where the same word before another preposition reads as a noun ("an
+# increase in", "causes of").
+_VERB_PREPOSITIONS = frozenset({
+    ("result", "in"), ("consist", "of"), ("occur", "in"), ("develop", "from"),
+    ("develop", "in"), ("allow", "for"), ("switch", "from"), ("depend", "on"), ("rely", "on"),
+    ("account", "for"), ("participate", "in"), ("compensate", "for"), ("differ", "from"),
+    ("differ", "in"), ("arise", "from"), ("arise", "in"), ("derive", "from"),
+    ("originate", "from"), ("originate", "in"), ("reside", "in"), ("persist", "in"),
+    ("act", "on"), ("localize", "in"), ("range", "from"), ("play", "in"),
+})
+# Pairs that read as a verb only in the -s form ("Autophagy declines in aged organisms",
+# but "cognitive decline in elderly patients" is a noun phrase).
+_VERB_S_PREPOSITIONS = frozenset({("decline", "in")})
+_WORD = re.compile(r"[A-Za-z][A-Za-z'-]*")
+_VERB_SUFFIX = re.compile(r"[a-z]{2,}(?:s|ed)")
+_NOT_VERB_ENDING = re.compile(r"(?:ss|us|is|ics|ous)$")  # class, virus, analysis, ...
+_NOUN_CONTEXT = frozenset("of in on for among at from and or versus vs".split())
+# Words a verb never follows directly: a determiner or preposition makes the next word a
+# noun or adjective ("the increase", "a decrease", "to reduce", "with lower", "in treated").
+_NOT_BEFORE_VERB = frozenset(
+    "the a an this that these those its their his her our my your no any each every some "
+    "of in on for with by to from at among than as into per via".split()
+)
+CLAIM_MIN_WORDS = 5  # without a final period, for a weak (-s / -ed) verb signal
+
+
+def _claim_verb_stem(word: str) -> str | None:
+    """The _CLAIM_VERBS stem `word` is a base or -s/-es form of ("causes" -> "cause",
+    "suppresss" -> "suppress", "relies" -> "rely"), or None."""
+    candidates = [word, word[:-1], word[:-2]] if word.endswith("s") else [word]
+    if word.endswith("ies"):
+        candidates.append(word[:-3] + "y")
+    return next((c for c in candidates if c in _CLAIM_VERBS), None)
+
+
+def _verb_signal(words: Sequence[str]) -> str | None:
+    """"strong", "weak" or None: the best finite-verb evidence in `words` (see above)."""
+    low = [w.lower() for w in words]
+    weak = False
+    for i, w in enumerate(low):
+        if w in _AUXILIARIES:
+            return "strong"
+        if i == 0:  # the first word is the subject ("Statins", "Increased", "Increase of")
+            continue
+        prev = low[i - 1]
+        nxt = low[i + 1] if i + 1 < len(low) else None
+        last = w.rsplit("-", 1)[-1]  # "up-regulates" -> "regulates"
+        stem = _claim_verb_stem(last)
+        if stem is not None and prev not in _NOT_BEFORE_VERB and (
+            nxt not in _NOUN_CONTEXT or (stem, nxt) in _VERB_PREPOSITIONS
+            or (last != stem and (stem, nxt) in _VERB_S_PREPOSITIONS)
+        ):
+            return "strong"
+        if weak or not _VERB_SUFFIX.fullmatch(last) or _NOT_VERB_ENDING.search(last):
+            continue
+        if last.endswith("s") and (nxt is None or nxt in _NOUN_CONTEXT):
+            continue  # a plural noun, not a verb
+        if last.endswith("ed") and prev in _NOT_BEFORE_VERB:
+            continue  # an adjective ("in treated patients")
+        weak = True
+    return "weak" if weak else None
+
+
+def looks_like_claim(query: str) -> bool:
+    """True for an input that reads as a claim to judge (see the heuristic above): the
+    only inputs that get a verdict-only re-ask or a first-sentence stance verdict."""
+    q = query.strip()
+    if not q or looks_like_question(q) or _IMPERATIVE_START.match(q):
+        return False
+    n_words = len(q.split())
+    signal = _verb_signal(_WORD.findall(q))
+    if signal is None or n_words < 2:
+        return False
+    if q.endswith("."):
+        return True
+    return n_words >= (3 if signal == "strong" else CLAIM_MIN_WORDS)
+
+
+# After the matched subject + stance verb, words that turn the stance around or point it
+# away from the claim ("support neither the claim nor its negation", "supports the
+# opposite conclusion", "a different mechanism", "the claim is false", "confirm nothing").
+# Checked only on the stance clause: the rest of the sentence up to the first ':', since
+# what follows a colon is the evidence being described ("The context refutes the claim:
+# X was suppressed, rather than facilitated [1]" is a refutation, not a reversal of it).
+# Quotes included (being stricter is the safe side).
+# * strong words, anywhere in that clause. The bare negations are matched lowercase only,
+#   so the abbreviation "NO" (nitric oxide) in a biomedical answer is never read as "no".
+_SCOPE_STRONG = (
+    r"(?i:opposite|contrary|negat(?:ion|e|es|ed|ing)|wrong|false|incorrect|untrue|"
+    r"not\s+(?:the|this|that)\s+(?:claim|statement))"
+)
+_SCOPE_NEGATIONS = r"neither|nor|none|nothing|no"
+_STANCE_SCOPE = {
+    "SUPPORTED": re.compile(rf"\b(?:{_SCOPE_NEGATIONS}|{_SCOPE_STRONG})\b"),
+    "REFUTED": re.compile(rf"\b(?:{_SCOPE_NEGATIONS}|{_SCOPE_STRONG})\b"),
+    # "do not mention X, so they neither support nor refute the claim" / "nor do they
+    # discuss Y" restate NOT ENOUGH EVIDENCE: the negations alone don't shift it.
+    "NOT ENOUGH EVIDENCE": re.compile(rf"\b(?:{_SCOPE_STRONG})\b"),
+}
+# * softer words only as the verb's own object ("support a different mechanism",
+#   "supports the reverse", "an inverse association"): within the first few words after
+#   the verb, and not inside a "that ..." content clause, where they describe the finding
+#   ("supports that damage-induced fork reversal requires ...").
+_SCOPE_SOFT = re.compile(
+    r"\b(?:different(?:ly)?|revers(?:e|ed|al)|inverse|converse|instead|rather)\b", re.IGNORECASE
+)
+_SCOPE_SOFT_WORDS = 4
+_THAT_CLAUSE = re.compile(r"^\s*that\b", re.IGNORECASE)
+
+
+# * in the verb's own object — the clause up to its first "that" / "which" / "who", after
+#   which the words describe the finding ("refutes the claim that X is not Y", "supports
+#   that ... the ALDH2 null variant ...") — for SUPPORTED / REFUTED:
+#   - a negation, which points the stance away from (part of) the claim: "support a link,
+#     not the causal claim", "support X, not Y", "support the claim (they do not)", "never"
+#     (lowercase only, as above);
+#   - an object other than the claim: "support the null hypothesis", "a null result",
+#     "refute the alternative", "contradict each other".
+_SCOPE_OBJECT = re.compile(
+    r"\b(?:not|never|null|alternatives?|each\s+other|one\s+another|themselves)\b|n't\b"
+)
+_CONTENT_CLAUSE = re.compile(r"\b(?:that|which|who|whom|whose|where|whereby)\b", re.IGNORECASE)
+
+
+def _scope_shifted(verdict: str, rest: str) -> bool:
+    """True when the words after the matched stance verb turn it around (see above)."""
+    clause = rest.split(":", 1)[0]
+    if _STANCE_SCOPE[verdict].search(clause):
+        return True
+    if _THAT_CLAUSE.match(clause):
+        return False
+    head_clause = _CONTENT_CLAUSE.split(clause, 1)[0]
+    if verdict != "NOT ENOUGH EVIDENCE" and _SCOPE_OBJECT.search(head_clause):
+        return True
+    head = " ".join(clause.split()[:_SCOPE_SOFT_WORDS])
+    return bool(_SCOPE_SOFT.search(head))
+
+
+# The opposite stance verb later in the same sentence competes with the first ("The
+# evidence contradicts the null hypothesis, supporting the claim").
+_COMPETING_STANCE = {
+    "SUPPORTED": re.compile(r"\b(?:refut|contradict|disprov)", re.IGNORECASE),
+    "REFUTED": re.compile(r"\b(?:support|confirm)", re.IGNORECASE),
+}
+# A ';' clause carrying its own stance verb competes with the first one ("...does not
+# provide evidence that contradicts the claim; it supports it"). A ';' clause without one
+# just continues the thought ("...do not mention E. coli; they study Serratia").
+_SEMICOLON_STANCE = re.compile(
+    r";.*\b(?:support|refut|contradict|confirm|disprov)", re.IGNORECASE | re.DOTALL
+)
+_LEADING_YES_NO = re.compile(r"^(yes|no)\b", re.IGNORECASE)
+# The sentence right after the stance one opening with a contrast takes it back ("The
+# claim is supported. However, the passages only show it in mice."): not read.
+_CONTRAST_NEXT = re.compile(
+    r"^[\s*_`]*(?:however|but|although|though|yet|nevertheless|nonetheless|that said|"
+    # a correction ("Not really, though.", "In fact they refute it.", "Actually, ...")
+    r"not|in\s+fact|actually|on\s+the\s+contrary|or\s+rather|wait)\b",
+    re.IGNORECASE,
+)
+# A leading "No," never goes with SUPPORTED, and a leading "Yes," never with REFUTED or
+# NOT ENOUGH EVIDENCE: the two halves disagree, so the sentence is not read.
+_YES_NO_CONFLICT = {"no": {"SUPPORTED"}, "yes": {"REFUTED", "NOT ENOUGH EVIDENCE"}}
+
+
 def _stance_verdict(text: str) -> str | None:
     first_line = next((ln for ln in text.splitlines() if ln.strip()), "")
     first_line = _ANSWER_MARKER.sub("", first_line.strip().lstrip("*_` "))
     m = _FIRST_SENTENCE.match(first_line)
     sentence = m.group(1) if m else first_line.strip()
+    after = first_line[m.end():] if m else ""
+    if not after.strip():  # the next sentence may start on the next non-empty line
+        later = [ln for ln in text.splitlines() if ln.strip()][1:2]
+        after = later[0] if later else ""
+    if _CONTRAST_NEXT.match(after.strip()):
+        return None
+    if sentence.rstrip("*_` ").endswith("?"):  # "The passages support the claim?" asks
+        return None
     # Hedges count only in the model's own words, not inside a span it quotes.
     if _HEDGE.search(_QUOTED_SPAN.sub(" ", sentence)):
+        return None
+    if _SEMICOLON_STANCE.search(sentence):
         return None
     for verdict, pattern in _STANCE:
         # The anchored match must itself be quote-free: the stance is the model's own
         # subject and verb, never words it is quoting (a later quoted span is fine).
         if (hit := pattern.match(sentence)) and not any(c in hit.group(0) for c in _QUOTE_CHARS):
+            rest = sentence[hit.end():]
+            if _scope_shifted(verdict, rest):
+                return None
+            if verdict in _COMPETING_STANCE and _COMPETING_STANCE[verdict].search(rest):
+                return None
+            yn = _LEADING_YES_NO.match(sentence)
+            if yn and verdict in _YES_NO_CONFLICT[yn.group(1).lower()]:
+                return None
             return verdict
     return None
 
@@ -298,19 +544,54 @@ TRUNCATION_RETRY_FACTOR = 2  # one retry, at twice the configured budget
 # replies that needed a re-ask had spent all 4,096 retry tokens reasoning; Ling's endpoint
 # allows 32,768 completion tokens. Frozen with the prompt (prompts.REASK_SYSTEM).
 REASK_MAX_TOKENS = 8192
+# Timeout / retry policy. Every generation request goes through the generator's client,
+# built in __init__ with CLIENT_TIMEOUT_S / CLIENT_MAX_RETRIES: 30 s per attempt keeps a
+# hung request from tying up an API worker for minutes, and the SDK's 5 retries back off
+# through transient free-tier 429s.
+CLIENT_TIMEOUT_S = 30.0
+CLIENT_MAX_RETRIES = 5
+# The re-ask has its own explicit policy, applied per call in reask_verdict (a copy of the
+# same client via with_options: same connection pool, endpoint and spend policy), and it
+# is the SAME for both callers — the API's generate() and rag_eval's re-ask post-step
+# both send it through LLMGenerator.reask_verdict. It differs from the first call's on
+# purpose: the re-ask may spend up to REASK_MAX_TOKENS (4x the default first-call
+# budget) reasoning, and a 30 s timeout would cut off exactly those long replies, then
+# silently resend them up to 5 times, each a request against the free daily cap. A 4,096-
+# token first-call retry fits inside 30 s on Ling, so 8,192 tokens needs ~60 s: 120 s is
+# 2x that; and one SDK retry absorbs a transient 429/5xx while bounding a timed-out
+# resend to one extra request (worst case ~4 min). (rag_secondlook, which fetched the
+# committed re-ask replies, sends with no SDK retry and a 300 s timeout, counting every
+# request itself.) None of these values is a request field: no cache key or prompt hash
+# depends on them.
+# What differs between the two callers is only the layer ABOVE this call, deliberately:
+# the API is interactive, so a re-ask that still fails is dropped and the first answer is
+# served (reask_error recorded, a warning returned); rag_eval is a batch that must give
+# every claim the same treatment, so it additionally waits out 429s and empty
+# completions (rag_eval.with_rate_limit_retries) and stops resumably on the daily cap.
+REASK_TIMEOUT_S = 120.0
+REASK_MAX_RETRIES = 1
 # Shown instead of the bare truncation note when the first reply had no prose at all and
 # the re-ask supplied the verdict: the reader gets a verdict with no explanation, and is
-# told why rather than shown "answer truncated" next to a confident verdict badge.
+# told why rather than shown "answer truncated" next to a confident verdict badge. The
+# wording follows the actual cause: REASK_NOTE when the first reply was cut off (it ends in
+# TRUNCATION_NOTE), REASK_NOTE_NO_VERDICT when it finished but carried nothing besides
+# verdict-like lines that did not parse (or nothing at all).
 REASK_NOTE = (
     "[No explanation available: the model's answer ran out of its token budget, so this "
     "verdict comes from a second, verdict-only check of the same passages.]"
 )
+REASK_NOTE_NO_VERDICT = (
+    "[No explanation available: the model's answer had no usable verdict line, so this "
+    "verdict comes from a second, verdict-only check of the same passages.]"
+)
+REASK_NOTES = (REASK_NOTE, REASK_NOTE_NO_VERDICT)
 
 
 def needs_reask(query: str, verdict: str | None) -> bool:
-    """A claim whose reply yielded no verdict. A question never is (it gets no verdict by
-    design), and a reply that did yield one — even a truncated one — is left alone."""
-    return verdict is None and not looks_like_question(query)
+    """A claim (looks_like_claim) whose reply yielded no verdict. A question, keyword
+    query or instruction never is (it gets no verdict by design), and a reply that did
+    yield one — even a truncated one — is left alone."""
+    return verdict is None and looks_like_claim(query)
 
 
 def parse_reask(raw: str | None) -> tuple[str | None, str | None]:
@@ -320,10 +601,109 @@ def parse_reask(raw: str | None) -> tuple[str | None, str | None]:
     return verdict, source
 
 
+# Verdict-like lines in a first reply that yielded no parseable verdict ("Verdict -
+# SUPPORTED (maybe)", "**Verdict**: probably supports", a doubled "Verdict:" line, a
+# trailing "Final answer: SUPPORTED"). Once the re-ask supplies the verdict they would sit
+# next to the verdict badge and could contradict it, so reask_display_text drops them.
+# All shapes are conservative — a whole line, or a whole trailing sentence, that does
+# nothing but state a verdict:
+#  * a line labelled "verdict" (any value, any separator, markdown / bullet / blockquote /
+#    heading markers allowed: "- Verdict: X", "> Verdict: X", "## Verdict"), or labelled
+#    "final answer" / "conclusion" / "label" with a verdict-ish value;
+#  * a line that is a bare verdict value ("**SUPPORTED**", "REFUTED."), or any short label
+#    (one to three words) with exactly a verdict value ("Overall: SUPPORTED", "Assessment:
+#    REFUTED (high confidence)"), or a short verdict statement ("The answer is SUPPORTED.",
+#    "Conclusion: the claim is supported.");
+#  * the label + verdict-ish value, or the verdict statement, closing a line after a
+#    finished sentence ("... [1][2]. Final answer: SUPPORTED", "... [2]. Thus, Verdict:
+#    SUPPORTED (high confidence)", "... [1]. In conclusion, the claim is supported."), the
+#    label form at most _TRAILING_VERDICT_MAX chars long.
+# A sentence that merely mentions a verdict or uses the word in prose ("the data supported
+# the hypothesis", "The verdict of the trial was clear: ...") stays.
+_VERDICTISH = (
+    r"(?:supported|supports?|refuted|refutes?|contradict\w*|not\s+enough|nei\b|"
+    r"insufficient|true|false|probably|likely|yes\b|no\b)"
+)
+# Markdown emphasis, quotes, and heading / blockquote / bullet markers opening a line.
+_LINE_LEAD = r"[\s*_`'\"#>•+\-–—]*"
+_LABEL_SEP = rf"{_MARKUP}\s*(?:[:=\-–—]|\s(?={_MARKUP}{_VERDICTISH}))"
+_LABEL_PREFIX = r"(?:(?:the|my|final|overall)\s+)*"
+_VERDICT_LABEL_LINE = re.compile(
+    rf"^{_LINE_LEAD}\(?{_MARKUP}{_LABEL_PREFIX}verdict{_LABEL_SEP}",
+    re.IGNORECASE,
+)
+_VERDICT_HEADING = re.compile(rf"^{_LINE_LEAD}{_LABEL_PREFIX}verdict{_MARKUP}:?{_MARKUP}$", re.IGNORECASE)
+_OTHER_LABEL = rf"{_LABEL_PREFIX}(?:final\s+answer|conclusion|label)"
+_OTHER_LABEL_LINE = re.compile(
+    rf"^{_LINE_LEAD}\(?{_MARKUP}{_OTHER_LABEL}{_LABEL_SEP}{_MARKUP}{_VERDICTISH}",
+    re.IGNORECASE,
+)
+# Exactly a verdict value, then only markup, [n] markers, one short parenthetical, a period.
+_VERDICT_VALUE = (
+    r"(?:supported|refuted|not\s+enough\s+evidence|not\s+supported|insufficient\s+evidence|"
+    r"nei|supports|refutes)"
+)
+_VALUE_TAIL = (
+    rf"{_MARKUP}(?:\s*\[\d+\])*(?:\s*\([^()\n]{{0,60}}\))?{_MARKUP}(?:\s*\[\d+\])*\.?{_MARKUP}"
+)
+_SHORT_LABEL = rf"(?:[a-z]+\s+){{0,2}}[a-z]+{_MARKUP}\s*[:=\-–—]{_MARKUP}\s*"
+_CONNECTOR = r"(?:(?:so|thus|hence|therefore|overall|in\s+(?:conclusion|summary|short|sum))\s*,?\s+)?"
+_VERDICT_STATEMENT = (
+    rf"{_CONNECTOR}{_LABEL_PREFIX}(?:answer|verdict|label|conclusion|result|assessment|claim|"
+    rf"statement)\s+is\s+(?:(?:therefore|thus|hence|then)\s+)?{_VERDICT_VALUE}{_VALUE_TAIL}"
+)
+_VERDICT_ONLY_LINES = (
+    re.compile(rf"^{_LINE_LEAD}{_VERDICT_VALUE}{_VALUE_TAIL}$", re.IGNORECASE),
+    re.compile(rf"^{_LINE_LEAD}{_SHORT_LABEL}{_VERDICT_VALUE}{_VALUE_TAIL}$", re.IGNORECASE),
+    re.compile(rf"^{_LINE_LEAD}(?:{_SHORT_LABEL})?{_VERDICT_STATEMENT}$", re.IGNORECASE),
+)
+_TRAILING_VERDICT_MAX = 60
+_SENTENCE_END = r"(?<=[.!?)\]\"”])"
+_TRAILING_VERDICT = re.compile(
+    rf"{_SENTENCE_END}\s+\(?{_MARKUP}{_CONNECTOR}(?:{_LABEL_PREFIX}verdict|{_OTHER_LABEL})"
+    rf"{_LABEL_SEP}{_MARKUP}{_VERDICTISH}[^\n]{{0,{_TRAILING_VERDICT_MAX}}}$",
+    re.IGNORECASE,
+)
+_TRAILING_STATEMENT = re.compile(rf"{_SENTENCE_END}\s+{_VERDICT_STATEMENT}$", re.IGNORECASE)
+
+
+def _verdict_only_line(line: str) -> bool:
+    return bool(
+        _VERDICT_LABEL_LINE.match(line) or _OTHER_LABEL_LINE.match(line)
+        or _VERDICT_HEADING.match(line) or any(p.match(line) for p in _VERDICT_ONLY_LINES)
+    )
+
+
+def strip_verdict_lines(text: str) -> str:
+    """text without its verdict-like lines, and without a verdict statement closing any
+    remaining line; see the shapes above."""
+    kept = [
+        _TRAILING_STATEMENT.sub("", _TRAILING_VERDICT.sub("", ln)).rstrip() if ln.strip() else ln
+        for ln in text.splitlines()
+        if not (ln.strip() and _verdict_only_line(ln))
+    ]
+    while kept and not kept[-1].strip():
+        kept.pop()
+    return "\n".join(kept).strip()
+
+
 def reask_display_text(text: str) -> str:
     """The answer text to show once the re-ask supplied the verdict: the first reply's
-    prose as served (truncation note included), or REASK_NOTE if it had none."""
-    return REASK_NOTE if text.strip() in ("", TRUNCATION_NOTE) else text
+    prose as served (truncation note kept), minus any verdict-like line that could
+    contradict the re-ask's verdict (strip_verdict_lines). If no prose is left, a note
+    saying why, by cause: REASK_NOTE for a reply cut off by its token budget (it ends in
+    TRUNCATION_NOTE), REASK_NOTE_NO_VERDICT for one that finished without a usable
+    verdict line."""
+    body = text.rstrip()
+    truncated = body.endswith(TRUNCATION_NOTE)
+    if truncated:
+        body = body[: -len(TRUNCATION_NOTE)]
+    stripped = strip_verdict_lines(body)
+    if not stripped:
+        return REASK_NOTE if truncated else REASK_NOTE_NO_VERDICT
+    if stripped == body.strip():
+        return text  # nothing verdict-like: served exactly as before
+    return f"{stripped}\n\n{TRUNCATION_NOTE}" if truncated else stripped
 
 
 def reask_prompt_hash() -> str:
@@ -493,11 +873,23 @@ class LLMGenerator:
         self.client = build_client(
             endpoint,
             factory=OpenAI,
-            max_retries=5,  # backoff through transient free-tier 429s
-            timeout=30.0,  # don't let a hung request tie up a worker for minutes
+            max_retries=CLIENT_MAX_RETRIES,  # backoff through transient free-tier 429s
+            timeout=CLIENT_TIMEOUT_S,  # don't let a hung request tie up a worker for minutes
         )
 
-    def _complete(self, messages: list[dict], max_tokens: int):
+    def _reask_client(self):
+        """self.client with the re-ask policy (REASK_TIMEOUT_S / REASK_MAX_RETRIES): a
+        GuardedClient over the SDK client's with_options copy. A client without that
+        shape (a test fake, or one a caller swapped in) is used as it is."""
+        raw = getattr(self.client, "_client", None)
+        with_options = getattr(raw, "with_options", None)
+        if not isinstance(self.client, GuardedClient) or not callable(with_options):
+            return self.client
+        return GuardedClient(
+            with_options(timeout=REASK_TIMEOUT_S, max_retries=REASK_MAX_RETRIES), self.endpoint
+        )
+
+    def _complete(self, messages: list[dict], max_tokens: int, client=None):
         # Reasoning rides in extra_body and only when resolved, in the provider's own
         # form: it is a passthrough, and a backend that doesn't know it must never see
         # it. OpenRouter requests also carry the endpoint's pinned provider routing, and
@@ -511,7 +903,7 @@ class LLMGenerator:
         # key (not even as null); every other model gets exactly what it always did.
         if (temperature := generation_temperature(self.model)) is not None:
             extra["temperature"] = temperature
-        return self.client.chat.completions.create(
+        return (client or self.client).chat.completions.create(
             model=self.model,
             messages=messages,
             max_tokens=max_tokens,
@@ -521,9 +913,11 @@ class LLMGenerator:
     def reask_verdict(self, query: str, hits: Sequence[SearchHit]) -> ReaskReply:
         """Exactly one verdict-only call (prompts.reask_messages, REASK_MAX_TOKENS) through
         the same _complete as generation: same endpoint, spend-policy check, provider
-        routing and model-aware params (temperature / reasoning). Raises like any call
-        (EmptyCompletionError for a 200 with no completion)."""
-        resp = self._complete(reask_messages(query, hits), REASK_MAX_TOKENS)
+        routing and model-aware params (temperature / reasoning), with the re-ask's own
+        timeout / retry policy (REASK_TIMEOUT_S, REASK_MAX_RETRIES) whichever caller sends
+        it. Raises like any call (EmptyCompletionError for a 200 with no completion); what
+        happens then is the caller's (see REASK_TIMEOUT_S)."""
+        resp = self._complete(reask_messages(query, hits), REASK_MAX_TOKENS, self._reask_client())
         cost = response_cost(resp)
         choice = _choice_or_raise(resp, [cost])
         completion_tokens, reasoning_tokens = _usage_counts(resp)
@@ -561,7 +955,7 @@ class LLMGenerator:
         raw = normalize_citations((choice.message.content or "").strip())
         # A cut-off reply can't have been cut inside a valid verdict line (the whole line
         # must match a full verdict value), so the parse is safe on a truncated reply.
-        text, verdict, verdict_source = parse_verdict(raw, allow_stance=not looks_like_question(query))
+        text, verdict, verdict_source = parse_verdict(raw, allow_stance=looks_like_claim(query))
         if truncated:
             text = f"{text}\n\n{TRUNCATION_NOTE}" if text else TRUNCATION_NOTE
         completion_tokens, reasoning_tokens = _usage_counts(resp)

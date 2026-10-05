@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -149,6 +149,56 @@ class Settings(BaseSettings):
     web_citation_cap: int = Field(default=30, ge=1, le=1000)
     web_dense_cap: int = Field(default=50, ge=0)
     pubmed_rate_per_s: float = Field(default=2.0, gt=0, le=3.0)
+    # API guards for web modes (web / hybrid_web) only, on top of the per-endpoint limits
+    # (/search 30/minute, /answer 10/minute), which still apply. One web request fans out
+    # to several S2 + PubMed calls, so: a stricter per-IP limit, ONE bucket shared by
+    # /search and /answer (a limits-library string, e.g. "6/minute"), and a process-wide
+    # cap on concurrent web retrievals — when every slot is busy the request gets 503 +
+    # Retry-After at once instead of queueing a worker thread. Per process, like the
+    # rate limiter's in-memory storage. Local modes never touch either.
+    web_rate_limit: str = "6/minute"
+    web_max_concurrent: int = Field(default=2, ge=1)
+
+    @field_validator("web_rate_limit")
+    @classmethod
+    def _valid_web_rate_limit(cls, v: str) -> str:
+        """Fail at startup, not as a 500 on the first web request."""
+        from limits import parse
+
+        try:
+            parse(v)
+        except ValueError as e:
+            raise ValueError(f"SSR_WEB_RATE_LIMIT is not a rate limit string: {v!r}") from e
+        return v
+
+    # API web-request bounds (WebSearch / service.web_extras). The eval sets neither, so
+    # the committed web numbers (eval/results/web_retrieval.*) were measured WITHOUT them:
+    # no deadline, and dense cap 50 (web_pool_live) / 100 (web_pool_offline) per
+    # web_eval.POOL_VARIANTS — never the API's 30. API results can therefore differ.
+    #   web_deadline_s: per-request budget for a pooled web search (0 = none); an extra
+    #     source still pending or running when it runs out is abandoned and reported in
+    #     `warnings`, and its HTTP calls stop. The base S2 failure path never waits.
+    #     Unmeasured on the gold qrels (API-only latency guard).
+    #   web_api_dense_cap: the API embeds at most this many candidates per request (the
+    #     rerank runs under the global retrieval lock). Unmeasured at 30: the eval rows
+    #     use 50 / 100. 0 = no extra cap.
+    web_deadline_s: float = Field(default=20.0, ge=0)
+    web_api_dense_cap: int = Field(default=30, ge=0)
+    # NCBI E-utilities identification (NBK25497, https://www.ncbi.nlm.nih.gov/books/
+    # NBK25497/): `email` "should be a complete and valid e-mail address of the software
+    # developer", and an `api_key` raises the limit from 3 to 10 requests/second. Both
+    # optional and empty by default; sent only to eutils.ncbi.nlm.nih.gov, only when set,
+    # and never part of a cache key or cache file.
+    ncbi_email: str = ""
+    ncbi_api_key: str = ""
+    # API only: drop S2 snippets that look like a dataset dump ("Claim: ..." / "Evidence:"
+    # formatting) whose claim text overlaps a SciFact claim (token Jaccard >= 0.6)
+    # (s2_extra.DatasetSnippetFilter). OFF in web_eval (the committed numbers). Measured
+    # offline on the cached 300-claim test pools (2026-10-05, filter on vs off): it drops
+    # 2 snippet papers (2 claims) from web_pool_live and 4 (4 claims) from
+    # web_pool_offline, none of them gold; R@5 / R@10 / R@100 / nDCG@10 are identical
+    # (live .2283 / .2661 / .3843 / .2030). A contamination guard, not a recall change.
+    web_snippet_dataset_filter: bool = True
 
     # --- LLM providers (generator and RAG-eval judge) ---
     # Each role picks a provider; the PROVIDER decides the base URL, the API key and

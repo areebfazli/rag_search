@@ -10,12 +10,15 @@ ids are and what the local index, fusion and the gold qrels use.
 HttpFetcher is the non-S2 counterpart of SemanticScholarRetriever._request: a host-pinned
 GET client with a process-wide per-host RateLimiter (no bursts, retries included), bounded
 retries on 429/5xx/transport errors honouring Retry-After (capped), a response-size cap,
-and the same on-disk ResponseCache (raw payload + fetch time, keyed by URL + params).
+the same on-disk ResponseCache (raw payload + fetch time, keyed by URL + params), and the
+current web request's RequestBudget (semantic_scholar.request_budget: no attempt after the
+deadline or once the request is abandoned; waits and timeouts capped at what is left).
 It adds no credentials itself; a caller that needs one (OpenAlex's optional key)
 supplies a host-checked httpx auth hook on its own client.
 """
 from __future__ import annotations
 
+import json
 import threading
 import time
 from collections.abc import Callable
@@ -26,12 +29,19 @@ import httpx
 from app.retrieve.semantic_scholar import (
     BACKOFF_BASE_S,
     USER_AGENT,
+    BudgetSpent,
     RateLimiter,
     ResponseCache,
+    ResponseTooLarge,
+    budget_timeout,
+    budget_wait,
+    current_budget,
     parse_retry_after,
+    read_capped,
 )
 
-MAX_RESPONSE_BYTES = 8 * 1024 * 1024  # an abstract page is ~10-500 KB; refuse anything absurd
+# An abstract page is ~10-500 KB; refuse anything absurd. Enforced while streaming.
+MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 
 
 class SourceError(RuntimeError):
@@ -101,7 +111,10 @@ class HttpFetcher:
     """Host-pinned GET client: limiter slot per attempt, bounded retries, cache.
 
     `base_url` is fixed per source (never a setting). `default_params` are merged into
-    every request and are part of the cache key. `parse` is "json" or "text".
+    every request and are part of the cache key. `wire_params` (e.g. NCBI's email /
+    api_key) are sent with every request but are NOT part of the cache key and never
+    written to a cache entry, so adding them cannot invalidate a cache or put a key on
+    disk. `parse` is "json" or "text". Bodies are streamed and cut at `max_bytes`.
     """
 
     def __init__(
@@ -116,6 +129,8 @@ class HttpFetcher:
         max_wait_s: float | None = None,
         max_backoff_s: float = 30.0,
         default_params: dict | None = None,
+        wire_params: dict | None = None,
+        max_bytes: int = MAX_RESPONSE_BYTES,
         sleep: Callable[[float], None] = time.sleep,
     ):
         self.base_url = base_url.rstrip("/")
@@ -126,6 +141,8 @@ class HttpFetcher:
         self.max_wait_s = max_wait_s
         self.max_backoff_s = max_backoff_s
         self.default_params = dict(default_params or {})
+        self._wire_params = {k: v for k, v in (wire_params or {}).items() if v}
+        self.max_bytes = max_bytes
         self._sleep = sleep
         self.requests_sent = 0
 
@@ -133,13 +150,15 @@ class HttpFetcher:
         self, path: str, params: dict, parse: str = "json", validate: Callable[[object], bool] | None = None
     ) -> dict:
         """Cache-entry shape {"response": payload, "fetched_at": ..., "params": ...}.
-        With `validate`, a fresh payload that fails it raises SourceError and is NOT
-        cached (so a wrong-shaped 200 cannot poison every later read)."""
+        With `validate`, a fresh payload that fails it (returns False or raises
+        SourceError) raises SourceError and is NOT cached, so a wrong-shaped 200 cannot
+        poison every later read; a cached entry that fails it is treated as a miss."""
         full = {**self.default_params, **params}
         endpoint = self.base_url + path
         if self.cache is not None and (hit := self.cache.get(endpoint, full)) is not None:
-            return hit
-        payload = self._request(endpoint, full, parse)
+            if validate is None or _valid(validate, hit.get("response")):
+                return hit
+        payload = self._request(endpoint, {**full, **self._wire_params}, parse)
         if validate is not None and not validate(payload):
             raise SourceError("unexpected response shape")
         if self.cache is not None:
@@ -149,36 +168,64 @@ class HttpFetcher:
     def _request(self, url: str, params: dict, parse: str) -> object:
         last = "no attempt made"
         headers = {"User-Agent": USER_AGENT, "Accept": "application/json" if parse == "json" else "*/*"}
+        budget = current_budget()  # the web request's deadline / abandon flag, if any
         for attempt in range(self.max_retries + 1):
-            if not self.limiter.acquire(timeout=self.max_wait_s):
+            if budget is not None and budget.expired():
+                raise SourceError(budget.reason())
+            rem = budget.remaining() if budget is not None else None
+            if not self.limiter.acquire(timeout=budget_wait(self.max_wait_s, rem)):
+                if rem is not None and (self.max_wait_s is None or rem < self.max_wait_s):
+                    raise SourceError(f"{budget.reason()} (no request slot in time)")
                 raise SourceRateLimited("local rate limit: no request slot within the wait budget")
+            if budget is not None and budget.expired():
+                raise SourceError(budget.reason())
+            timeout = budget_timeout(self._client, budget.remaining() if budget is not None else None)
             self.requests_sent += 1
+            body = b""
             try:
-                r = self._client.get(url, params=params, headers=headers)
+                with self._client.stream("GET", url, params=params, headers=headers, **timeout) as r:
+                    status, rheaders, encoding = r.status_code, r.headers, r.encoding or "utf-8"
+                    if status == 200:
+                        body = read_capped(r, self.max_bytes)
+            except ResponseTooLarge as e:
+                raise SourceError("response too large") from e
+            except BudgetSpent as e:
+                raise SourceError(str(e)) from e
             except httpx.HTTPError as e:
                 last = f"network error ({type(e).__name__})"
                 delay = BACKOFF_BASE_S * 2**attempt
             else:
-                if r.status_code == 200:
-                    if len(r.content) > MAX_RESPONSE_BYTES:
-                        raise SourceError("response too large")
+                if status == 200:
                     if parse == "text":
-                        return r.text
+                        try:
+                            return body.decode(encoding, errors="replace")
+                        except LookupError:  # unknown charset label
+                            return body.decode("utf-8", errors="replace")
                     try:
-                        return r.json()
+                        return json.loads(body)
                     except ValueError as e:
                         raise SourceError("malformed JSON response") from e
-                last = f"HTTP {r.status_code}"
-                if r.status_code != 429 and r.status_code < 500:
+                last = f"HTTP {status}"
+                if status != 429 and status < 500:
                     raise SourceError(last)
-                retry_after = parse_retry_after(r.headers.get("retry-after"))
+                retry_after = parse_retry_after(rheaders.get("retry-after"))
                 delay = retry_after if retry_after is not None else BACKOFF_BASE_S * 2**attempt
             if attempt == self.max_retries:
                 break
             if delay > self.max_backoff_s:
                 last += f"; server asked to wait {delay:.0f}s, over the {self.max_backoff_s:.0f}s budget"
                 break
+            if budget is not None and (r_left := budget.remaining()) is not None and delay >= r_left:
+                last += f"; {budget.reason()} before the retry"
+                break
             self._sleep(delay)
         if last.startswith("HTTP 429"):
             raise SourceRateLimited(last)
         raise SourceError(last)
+
+
+def _valid(validate: Callable[[object], bool], payload: object) -> bool:
+    try:
+        return bool(validate(payload))
+    except SourceError:
+        return False
