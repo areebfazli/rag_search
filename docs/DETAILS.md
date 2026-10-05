@@ -260,7 +260,7 @@ difference:
 | **Cites at least one passage** | **0.42** | **0.94** | **1** | **27** | **< 0.0001** |
 
 On those claims 28 gpt-oss replies were a bare `Verdict:` line against 0 for Ling, and the run
-cost $0.0049 against $0. Same-model Ling-vs-Ling repeats flip 7 of 50 verdicts (3 one way, 4 the
+cost $0.0049 against $0. Same-model Ling-vs-Ling repeats change 9 of 50 predicted labels, flipping correctness on 7 (3 one way, 4 the
 other; p = 1.00), the noise floor for 50 claims: the generator is not deterministic, which the
 Wilson interval on a single run does not capture.
 
@@ -400,7 +400,7 @@ the results file) add nothing significant. Web search still trails local hybrid 
 open-web retrieval can find the gold paper at all, not which ranker is better.
 
 These rows were measured with the eval's web settings, not the API's: the pooled row embeds the
-top 50 candidates (`SSR_WEB_DENSE_CAP`), has no per-request deadline and keeps every S2 snippet.
+top 50 candidates (`SSR_WEB_DENSE_CAP`), has no per-request deadline and does not apply the dataset-dump snippet filter.
 The API instead embeds at most 30 (`SSR_WEB_API_DENSE_CAP`), abandons extra sources still
 pending after 20 s (`SSR_WEB_DEADLINE_S`) and drops dataset-dump snippets that overlap a SciFact
 claim (`SSR_WEB_SNIPPET_DATASET_FILTER`, on), so its web results can differ from the table; those

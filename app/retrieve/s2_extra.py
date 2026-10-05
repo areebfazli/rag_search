@@ -650,10 +650,17 @@ class S2IdResolver:
         for start in range(0, len(missing), S2_BATCH_MAX_IDS):
             chunk = missing[start : start + S2_BATCH_MAX_IDS]
             batch = self._batch_split(chunk)
-            got = {i: _slim(p) for i, p in zip(chunk, batch) if p is not _UNRESOLVED}
-            # Ids whose lookup failed (persistent HTTP 400) are unresolved for this call
-            # only: reported as None, never cached, retried next time.
-            out.update({i: None for i, p in zip(chunk, batch) if p is _UNRESOLVED})
+            # Cached: None (S2's documented "not found") and a valid slimmed paper. Anything
+            # else is unresolved for this call only (a persistent HTTP 400, or an entry
+            # like {"error": ...} with no corpusId): reported as None, never cached,
+            # retried next time.
+            got: dict[str, dict | None] = {}
+            for i, p in zip(chunk, batch):
+                slim = None if p is None or p is _UNRESOLVED else _slim(p)
+                if p is None or slim is not None:
+                    got[i] = slim
+                else:
+                    out[i] = None
             self._disk_put(got)
             with self._lock:
                 self._mem.update(got)

@@ -134,9 +134,17 @@ PAIRS = [(k, "hybrid") for k, _ in ROWS[1:]] + [
 ] + [("web_pool_offline", "web_pool_live")]
 
 
+def env_flag(name: str, default: bool) -> bool:
+    """Boolean env var: "0", "false", "no", "off" or "" (any case) is off, anything else on."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in ("0", "false", "no", "off", "")
+
+
 def pool_enabled() -> bool:
     """SSR_WEB_EVAL_POOL=0 skips the pooled rows (no PubMed / snippet requests)."""
-    return os.environ.get("SSR_WEB_EVAL_POOL", "1").strip() not in ("0", "", "false")
+    return env_flag("SSR_WEB_EVAL_POOL", True)
 
 Run_ = dict[str, dict[str, float]]
 
@@ -329,7 +337,7 @@ def to_markdown(result: dict, meta: dict) -> str:
 
 
 def allow_unmapped() -> bool:
-    return bool(os.environ.get("SSR_WEB_EVAL_ALLOW_UNMAPPED", "").strip())
+    return env_flag("SSR_WEB_EVAL_ALLOW_UNMAPPED", False)
 
 
 def output_dir(limit: int, n_queries: int, sampled: bool = False) -> tuple[Path, bool]:

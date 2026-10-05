@@ -186,7 +186,10 @@ class Settings(BaseSettings):
     web_api_dense_cap: int = Field(default=30, ge=0)
     # NCBI E-utilities identification (NBK25497, https://www.ncbi.nlm.nih.gov/books/
     # NBK25497/): `email` "should be a complete and valid e-mail address of the software
-    # developer", and an `api_key` raises the limit from 3 to 10 requests/second. Both
+    # developer", and an `api_key` raises the limit from 3 to 10 requests/second. This
+    # app still caps PubMed at 3 req/s (pubmed_rate_per_s, default 2, bound le=3.0): to
+    # use the key's higher limit, set SSR_PUBMED_RATE_PER_S and raise that bound (the
+    # PubMedSource limiter itself allows up to 10 with a key). Both
     # optional and empty by default; sent only to eutils.ncbi.nlm.nih.gov, only when set,
     # and never part of a cache key or cache file.
     ncbi_email: str = ""
@@ -195,8 +198,8 @@ class Settings(BaseSettings):
     # formatting) whose claim text overlaps a SciFact claim (token Jaccard >= 0.6)
     # (s2_extra.DatasetSnippetFilter). OFF in web_eval (the committed numbers). Measured
     # offline on the cached 300-claim test pools (2026-10-05, filter on vs off): it drops
-    # 2 snippet papers (2 claims) from web_pool_live and 4 (4 claims) from
-    # web_pool_offline, none of them gold; R@5 / R@10 / R@100 / nDCG@10 are identical
+    # 2 snippet papers (2 claims) from web_pool_live and 4 drops covering 3 distinct
+    # papers across 4 claims from web_pool_offline, none of them gold; R@5 / R@10 / R@100 / nDCG@10 are identical
     # (live .2283 / .2661 / .3843 / .2030). A contamination guard, not a recall change.
     web_snippet_dataset_filter: bool = True
 

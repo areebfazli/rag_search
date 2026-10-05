@@ -23,7 +23,7 @@ back when the papers lack evidence. A second model (Nemotron 3 Ultra) checks fai
 ## Results
 
 All on the 300 SciFact test claims, default settings. The web row used the evaluation's web
-settings, which differ slightly from the API's ([details](docs/DETAILS.md#web-search-semantic-scholar-and-pubmed)).
+settings, which differ from the API's ([details](docs/DETAILS.md#web-search-semantic-scholar-and-pubmed)).
 
 | What is measured | Result | Source |
 |---|---|---|

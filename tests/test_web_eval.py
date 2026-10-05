@@ -101,6 +101,26 @@ def test_output_dir_refuses_the_committed_artifact_without_pool_or_with_unmapped
     assert not canonical and out == web_eval.RUNS / f"web_beir-scifact-test_300{suffix}"
 
 
+@pytest.mark.parametrize("value", ["0", "false", "False", "NO", "off", "", "  "])
+def test_pool_and_unmapped_flags_treat_falsy_words_as_off(monkeypatch, value):
+    monkeypatch.setenv("SSR_WEB_EVAL_POOL", value)
+    monkeypatch.setenv("SSR_WEB_EVAL_ALLOW_UNMAPPED", value)
+    assert not web_eval.pool_enabled() and not web_eval.allow_unmapped()
+
+
+@pytest.mark.parametrize("value", ["1", "true", "yes", "on"])
+def test_pool_and_unmapped_flags_treat_truthy_words_as_on(monkeypatch, value):
+    monkeypatch.setenv("SSR_WEB_EVAL_POOL", value)
+    monkeypatch.setenv("SSR_WEB_EVAL_ALLOW_UNMAPPED", value)
+    assert web_eval.pool_enabled() and web_eval.allow_unmapped()
+
+
+def test_pool_and_unmapped_flag_defaults(monkeypatch):
+    monkeypatch.delenv("SSR_WEB_EVAL_POOL", raising=False)
+    monkeypatch.delenv("SSR_WEB_EVAL_ALLOW_UNMAPPED", raising=False)
+    assert web_eval.pool_enabled() and not web_eval.allow_unmapped()
+
+
 CLAIM_ONE = "Zeta kinase activates macrophages via lysosomal cathepsin."
 CLAIM_TWO = "Omega receptor binds ligand."
 

@@ -367,6 +367,18 @@ def test_per_id_disk_cache_including_nulls(tmp_path):
     assert router.bodies()[-1] == {"ids": ["PMID:3"]}
 
 
+def test_batch_entry_without_corpus_id_is_unresolved_and_not_cached(tmp_path):
+    table = {"PMID:1": {"error": "boom"}, "PMID:3": s2paper(101)}
+    router = Router({("POST", "/paper/batch"): batch_handler(table)})
+    r = S2IdResolver(make(router), tmp_path)
+    out = r.lookup(["PMID:1", "PMID:2", "PMID:3"])
+    assert out["PMID:1"] is None and out["PMID:2"] is None and out["PMID:3"]["corpusId"] == 101
+    # a fresh resolver: the not-found null and the paper come from disk, the error entry is retried
+    fresh = S2IdResolver(make(router), tmp_path)
+    fresh.lookup(["PMID:1", "PMID:2", "PMID:3"])
+    assert router.bodies()[-1] == {"ids": ["PMID:1"]}
+
+
 def test_corrupt_cache_entry_or_file_is_a_miss(tmp_path):
     table = {"PMID:1": s2paper(101)}
     router = Router({("POST", "/paper/batch"): batch_handler(table)})

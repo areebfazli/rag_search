@@ -7,7 +7,7 @@ Sources (each cached on disk, rate-limited per host, bounded retries; no LLM):
   s2_multi  extra deterministic S2 keyword queries (query_rewrite.multi_queries)
   snip_claim / snip_rw   S2 snippet search with the claim / the primary rewrite
   pm_claim / pm_rw       PubMed E-utilities Best Match with the claim / the rewrite
-  oa_claim / oa_rw       OpenAlex works search with the claim / the rewrite
+  oa_sem / oa_rw         OpenAlex semantic search with the claim / works search with the rewrite
   cites     references + citations of the top seeds of the base pool (S2 graph)
 
 External ids (PMID/DOI) are resolved to S2 corpus ids with one paper/batch call per
