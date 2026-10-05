@@ -1,6 +1,6 @@
 # RAG verdicts under the SciFact label audit (secondary artifact)
 
-Source run: `eval/results/rag.json` (git e367318, generator `inclusionai/ling-3.0-flash-sante:free`). Same stored answers, re-scored offline — no LLM calls.
+Source run: `eval/results/rag.json` (git a8a67c6, generator `inclusionai/ling-3.0-flash-sante:free`). Same stored answers, re-scored offline — no LLM calls.
 
 **The headline stays the original SciFact labels** (`eval/results/rag.md`). This page is a sensitivity check against one published label audit, whose corrections come from a **single annotator** and have not been independently ratified; the audit's own authors recommend a multi-annotator re-audit before any corrected release.
 
@@ -17,7 +17,7 @@ Audit: Sylvestre, J. (2026). Gold Label Errors in the SciFact Benchmark: An LLM-
 ## Caveats — read before quoting the corrected numbers
 
 - **Single annotator.** Every correction and every debatable call is one person's judgement (with an LLM second opinion in chat), not an adjudicated re-annotation.
-- **LLM-assisted.** 8 of the 11 errors come from the 57 pairs an LLM screen (GPT-5.4-mini) flagged, adjudicated with a frontier-LLM (GPT-5.4) second opinion; the other 3 from the same annotator's review of the 152 unflagged pairs (paper, Stage 2). The corrections therefore lean toward how an LLM reads the evidence, so an LLM generator agreeing with them is expected in part — read the gain as an upper-side sensitivity, not as hidden accuracy.
+- **LLM-assisted.** 8 of the 11 errors come from the 57 pairs an LLM screen (GPT-5.4-mini) flagged, adjudicated with a frontier-LLM (GPT-5.4) second opinion; the other 3 from the same annotator's review of the 152 unflagged pairs (paper, Stage 2). The corrections therefore lean toward how an LLM reads the evidence, so an LLM generator agreeing with them is expected in part — read the gain as a one-sided sensitivity check, not as hidden accuracy.
 - **One direction only.** Only the 188 evidence-bearing claims (209 pairs) were audited; the 112 NEI claims were not, so a label can move to NEI or flip, but an NEI claim can never be corrected to SUPPORT/CONTRADICT.
 - **Not a model comparison.** Same predictions, different key: the delta measures the labels, not the pipeline. Compare pipelines under one key (`rag_compare --labels`).
 

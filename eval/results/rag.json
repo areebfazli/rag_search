@@ -69,12 +69,18 @@
       "verdict_accuracy": null
     },
     "no_quote": {
+      "n": 0,
+      "verdict_accuracy": null
+    },
+    "unknown": {
       "n": 300,
       "verdict_accuracy": 0.8
     }
   },
   "judge_verdict_agreement": 0.8796,
-  "faithfulness_answered": 0.969,
+  "faithfulness_answered": 0.9841,
+  "faithfulness_n": 192,
+  "faithfulness_unjudged_reask": 3,
   "context_relevance": 0.717,
   "by_label": {
     "SUPPORT": {
@@ -109,7 +115,7 @@
     "judge_reported_usd": 0.0
   },
   "run": {
-    "git_sha": "e367318e8ac6dd8ccbfad5d50037b7cd67641842",
+    "git_sha": "a8a67c632d483a7d1e06733193dbf811f9959b25",
     "dataset": "beir/scifact/test",
     "prompt_hash": "d0921f4e69fc32f9da7ab88f4f7c88bc3cb25591bc5db11793807133c4bbd78b",
     "judge_prompt_hash": "62bb62544847d70bb5839669e2974f9e79aca5311745d5660a6746261448d86f",
@@ -1132,7 +1138,8 @@
         "abstention_class_qrels": "false_abstention",
         "answer": "[Answer truncated: the model ran out of its token budget.]",
         "cited_doc_ids": []
-      }
+      },
+      "judge_scored_placeholder": true
     },
     {
       "query_id": "811",
@@ -1523,7 +1530,8 @@
         "abstention_class_qrels": "correct_abstention",
         "answer": "[Answer truncated: the model ran out of its token budget.]",
         "cited_doc_ids": []
-      }
+      },
+      "judge_scored_placeholder": true
     },
     {
       "query_id": "597",
@@ -4026,7 +4034,8 @@
         "abstention_class_qrels": "false_abstention",
         "answer": "[Answer truncated: the model ran out of its token budget.]",
         "cited_doc_ids": []
-      }
+      },
+      "judge_scored_placeholder": true
     },
     {
       "query_id": "72",
@@ -5983,7 +5992,8 @@
         "cited_doc_ids": [
           "17755060"
         ]
-      }
+      },
+      "judge_scored_placeholder": false
     },
     {
       "query_id": "1029",
@@ -6303,7 +6313,7 @@
       "evidence_qrels": true,
       "abstention_class": "answered_with_evidence",
       "abstention_class_qrels": "answered_with_evidence",
-      "answer": "The context supports this claim; passage [1] explicitly states that \"Treg-cell-specific deletion of integrin \u03b1v\u03b28 did not result in a spontaneous inflammatory phenotype.\" Verdict: SUPPORTED",
+      "answer": "The context supports this claim; passage [1] explicitly states that \"Treg-cell-specific deletion of integrin \u03b1v\u03b28 did not result in a spontaneous inflammatory phenotype.\"",
       "cited_doc_ids": [
         "17997584"
       ],
@@ -6345,7 +6355,8 @@
         "cited_doc_ids": [
           "17997584"
         ]
-      }
+      },
+      "judge_scored_placeholder": false
     },
     {
       "query_id": "544",
@@ -7162,7 +7173,8 @@
         "abstention_class_qrels": "correct_abstention",
         "answer": "[Answer truncated: the model ran out of its token budget.]",
         "cited_doc_ids": []
-      }
+      },
+      "judge_scored_placeholder": true
     },
     {
       "query_id": "832",
@@ -7643,7 +7655,8 @@
         "cited_doc_ids": [
           "1215116"
         ]
-      }
+      },
+      "judge_scored_placeholder": false
     },
     {
       "query_id": "1104",
@@ -8209,7 +8222,8 @@
         "abstention_class_qrels": "false_abstention",
         "answer": "[Answer truncated: the model ran out of its token budget.]",
         "cited_doc_ids": []
-      }
+      },
+      "judge_scored_placeholder": true
     },
     {
       "query_id": "362",
@@ -8354,7 +8368,8 @@
         "abstention_class_qrels": "correct_abstention",
         "answer": "[Answer truncated: the model ran out of its token budget.]",
         "cited_doc_ids": []
-      }
+      },
+      "judge_scored_placeholder": true
     },
     {
       "query_id": "384",
@@ -10981,7 +10996,8 @@
         "cited_doc_ids": [
           "8426046"
         ]
-      }
+      },
+      "judge_scored_placeholder": false
     },
     {
       "query_id": "399",
@@ -11465,7 +11481,8 @@
         "abstention_class_qrels": "false_abstention",
         "answer": "[Answer truncated: the model ran out of its token budget.]",
         "cited_doc_ids": []
-      }
+      },
+      "judge_scored_placeholder": true
     },
     {
       "query_id": "684",
@@ -11904,7 +11921,8 @@
         "cited_doc_ids": [
           "5912283"
         ]
-      }
+      },
+      "judge_scored_placeholder": false
     },
     {
       "query_id": "770",
@@ -12007,7 +12025,8 @@
         "abstention_class_qrels": "false_abstention",
         "answer": "[Answer truncated: the model ran out of its token budget.]",
         "cited_doc_ids": []
-      }
+      },
+      "judge_scored_placeholder": true
     },
     {
       "query_id": "516",
@@ -12569,7 +12588,8 @@
         "abstention_class_qrels": "false_abstention",
         "answer": "[Answer truncated: the model ran out of its token budget.]",
         "cited_doc_ids": []
-      }
+      },
+      "judge_scored_placeholder": true
     },
     {
       "query_id": "380",

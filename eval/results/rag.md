@@ -2,13 +2,13 @@
 
 300 SciFact claims (random sample, seed=13) · top_k=5 · generator=inclusionai/ling-3.0-flash-sante:free (openrouter) · judge=nvidia/nemotron-3-ultra-550b-a55b:free (openrouter)
 
-11 answers truncated at the token budget (scored as written, with no verdict line).
+11 answers truncated at the token budget (of those, 9 got a verdict from the verdict-only re-ask, 1 kept a verdict parsed from the text before the cut-off, 1 was scored with no verdict).
 
 ## Answer quality (LLM judge)
 
 | Metric | Score |
 |---|---|
-| Faithfulness (over answered) | 0.97 |
+| Faithfulness (over answered, n=192; 3 answered only via the re-ask excluded — the first reply hit the token budget with no text left, so the judge saw no answer text) | 0.98 |
 | Context relevance (all) | 0.72 |
 
 ## Claim verdicts, scored against the gold label (no judge)

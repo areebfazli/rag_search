@@ -3,7 +3,7 @@
   "headline": "original",
   "source_run": "eval/results/rag.json",
   "run": {
-    "git_sha": "e367318e8ac6dd8ccbfad5d50037b7cd67641842",
+    "git_sha": "a8a67c632d483a7d1e06733193dbf811f9959b25",
     "dataset": "beir/scifact/test",
     "generator_model": "inclusionai/ling-3.0-flash-sante:free",
     "judge_model": "nvidia/nemotron-3-ultra-550b-a55b:free",
