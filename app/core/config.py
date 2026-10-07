@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     # --- Reranker ---
     # CPU-friendly default (22M). Note the eval found that reranking does NOT pay off on
     # SciFact with either model tested: this one costs 0.027 nDCG@10 vs plain hybrid, and
-    # BAAI/bge-reranker-base (278M) merely ties it at 32.3 s/query. Swap via
+    # BAAI/bge-reranker-base (278M) merely ties it at 23.4 s/query. Swap via
     # SSR_RERANKER_MODEL, but measure before assuming a bigger reranker helps.
     reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
@@ -88,10 +88,12 @@ class Settings(BaseSettings):
     #                      URL, so SSR_LLM_API_KEY can never be sent to OpenRouter.
     # So each key only ever travels to its own provider, and a model name pinned in .env
     # (SSR_LLM_MODEL) cannot leak into an OpenRouter run: the harnesses print which
-    # settings were set but ignored for the provider in use.
+    # settings were set but ignored for the provider in use (names only, never values).
+    # Both API keys are SecretStr, so repr(settings), tracebacks and logs show '**********';
+    # only llm_endpoints unwraps them (secret_value) when it builds an LLMEndpoint.
     llm_provider: Literal["openai_compat", "openrouter"] = "openrouter"
     judge_provider: Literal["openai_compat", "openrouter"] = "openrouter"
-    openrouter_api_key: str = ""
+    openrouter_api_key: SecretStr = SecretStr("")
     # Generator: a free model (`:free` is appended if missing), sent with
     # llm_endpoints.FREE_ROUTING ($0 max_price, no fallbacks). Ling 3.0 Flash Sante: on the
     # 2026-09-24 bench of 10 free models it served 22/22 calls with the fastest p50 (1.1 s);
@@ -116,7 +118,7 @@ class Settings(BaseSettings):
     # Key via SSR_LLM_API_KEY.
     llm_base_url: str = "https://api.groq.com/openai/v1"
     llm_model: str = "openai/gpt-oss-120b"
-    llm_api_key: str = ""
+    llm_api_key: SecretStr = SecretStr("")
     # Completion budget per generation call (sent as `max_tokens`, the name OpenRouter,
     # Groq, Ollama and OpenAI chat models all honour). On a reasoning model the HIDDEN
     # reasoning tokens are spent from this same budget before any answer text, so it must
@@ -146,6 +148,13 @@ class Settings(BaseSettings):
     # RAG-eval judge on the "openai_compat" provider. Deliberately a different model FAMILY from the generator,
     # not just a smaller size: same-family judging compounds shared preferences.
     judge_model: str = "qwen/qwen3.8-27b"
+
+
+def secret_value(value: SecretStr | str) -> str:
+    """The raw string behind a key setting. Accepts a plain str as well, since attribute
+    assignment on a BaseSettings instance (e.g. pytest monkeypatch) is not validated.
+    Compare the result, never the SecretStr: SecretStr("") is truthy."""
+    return value.get_secret_value() if isinstance(value, SecretStr) else value
 
 
 settings = Settings()

@@ -29,8 +29,9 @@ Provider-routing field names, units and failure semantics are from
 https://openrouter.ai/docs/features/provider-routing (``allow_fallbacks``, ``max_price``
 in USD per million tokens).
 
-Secrets: API keys live only in ``LLMEndpoint.api_key``, which is excluded from repr and
-from ``metadata()``; error messages name the env var, never its value.
+Secrets: the key settings are ``SecretStr`` (masked in repr); they are unwrapped only
+here, into ``LLMEndpoint.api_key``, which is excluded from repr and from ``metadata()``;
+error messages name the env var, never its value.
 """
 from __future__ import annotations
 
@@ -40,7 +41,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Literal
 
-from app.core.config import Settings, settings
+from app.core.config import Settings, secret_value, settings
 
 Provider = Literal["openai_compat", "openrouter"]
 Role = Literal["generator", "judge"]
@@ -215,9 +216,9 @@ def resolve_endpoint(
     s = settings if s is None else s
     provider = provider or provider_of(role, s)
     if provider == "openrouter":
-        url, key = OPENROUTER_BASE_URL, s.openrouter_api_key
+        url, key = OPENROUTER_BASE_URL, secret_value(s.openrouter_api_key)
     elif provider == "openai_compat":
-        url, key = s.llm_base_url, s.llm_api_key
+        url, key = s.llm_base_url, secret_value(s.llm_api_key)
         if is_openrouter(url):
             raise EndpointConfigError(
                 f"SSR_LLM_BASE_URL points at openrouter.ai but the {role} provider is "
@@ -249,7 +250,7 @@ def endpoint_for_url(
     provider's key."""
     s = settings if s is None else s
     provider: Provider = "openrouter" if is_openrouter(base_url) else "openai_compat"
-    key = api_key if api_key is not None else (
+    key = api_key if api_key is not None else secret_value(
         s.openrouter_api_key if provider == "openrouter" else s.llm_api_key
     )
     ep = LLMEndpoint(role, provider, base_url, model, key)

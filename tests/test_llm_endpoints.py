@@ -126,6 +126,17 @@ def test_explicit_url_picks_that_providers_key():
         le.endpoint_for_url("generator", OPENROUTER_BASE_URL, "openai/gpt-oss-120b", s=s)
 
 
+def test_keys_are_masked_in_settings_repr_but_reach_the_endpoint():
+    s = Settings(_env_file=None, openrouter_api_key="sk-or-SECRET", llm_api_key="gsk-SECRET")
+    for text in (repr(s), str(s), repr(s.openrouter_api_key), str(s.llm_api_key)):
+        assert "SECRET" not in text
+    assert resolve_endpoint("generator", s).api_key == "sk-or-SECRET"
+    compat = _settings(llm_provider="openai_compat", llm_api_key="gsk-SECRET")
+    assert resolve_endpoint("generator", compat).api_key == "gsk-SECRET"
+    ep = le.endpoint_for_url("generator", "http://localhost:11434/v1", "m", s=s)
+    assert ep.api_key == "gsk-SECRET" and "SECRET" not in repr(ep)
+
+
 @pytest.mark.parametrize(("provider", "var"), [("openrouter", "SSR_OPENROUTER_API_KEY"),
                                                ("openai_compat", "SSR_LLM_API_KEY")])
 def test_missing_key_error_names_the_var_and_no_key(provider, var):
