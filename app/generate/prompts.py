@@ -44,42 +44,6 @@ SYSTEM = (
     "the claim. For an ordinary question, do not add a verdict line."
 )
 
-# --- opt-in prompt variant "finding" (settings.llm_prompt_variant) ------------------------
-#
-# One sentence block inserted into SYSTEM right after its NOT ENOUGH EVIDENCE rule, worded
-# as pre-registered (train-only screening; never the default). SYSTEM itself is untouched:
-# the default prompt hash, and every cache key built on it, stay exactly as they were.
-FINDING_RULE = (
-    "Judge a claim by its main finding, not its exact wording: if a passage reports that "
-    "finding, the claim is supported even when the passage uses different terms, synonyms, "
-    "abbreviations or a more specific description (such as a particular species, cell type, "
-    "residue or patient group), and a minor detail that is not restated word for word is not "
-    "by itself a reason for NOT ENOUGH EVIDENCE. If no passage reports the finding itself, "
-    "only a related, partial or merely compatible result, use NOT ENOUGH EVIDENCE."
-)
-_FINDING_ANCHOR = (
-    "Use NOT ENOUGH EVIDENCE whenever the context neither supports nor refutes the claim. "
-    "For an ordinary question"
-)
-assert SYSTEM.count(_FINDING_ANCHOR) == 1, "the finding rule's insertion point moved"
-SYSTEM_FINDING = SYSTEM.replace(
-    _FINDING_ANCHOR,
-    _FINDING_ANCHOR.replace(" For an ordinary question", f" {FINDING_RULE} For an ordinary question"),
-)
-PROMPT_VARIANTS = {"default": SYSTEM, "finding": SYSTEM_FINDING}
-
-
-def system_prompt(variant: str) -> str:
-    """The product system prompt for `variant` (PROMPT_VARIANTS); KeyError on an unknown
-    name, so a typo can never silently fall back to another prompt."""
-    try:
-        return PROMPT_VARIANTS[variant]
-    except KeyError:
-        raise KeyError(
-            f"unknown prompt variant {variant!r}; expected one of {sorted(PROMPT_VARIANTS)}"
-        ) from None
-
-
 def context_block(hits: Sequence[SearchHit]) -> str:
     """The numbered context passages, ``[n] title\\ntext``, as every generator prompt
     renders them (the product prompt and the verdict-only re-ask alike)."""

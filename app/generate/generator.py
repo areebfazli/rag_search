@@ -18,20 +18,13 @@ default). Its verdict fills Answer.verdict (verdict_source "reask"); the display
 stays the first reply's prose, minus any verdict-like line that would contradict it
 (reask_display_text). Only claims are re-asked (looks_like_claim): never a question, a
 keyword query or an instruction.
-
-Opt-in self-consistency vote (settings.llm_votes = k > 1, claims only): generate() draws
-up to k samples, each through the full single-sample pipeline above (truncation retry and,
-if on, its own re-ask), and serves the plurality verdict (combine_votes). It stops early
-once one verdict holds a strict majority of k, which cannot change the outcome.
 """
 from __future__ import annotations
 
-import dataclasses
 import hashlib
 import json
 import re
 import unicodedata
-from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
@@ -50,7 +43,7 @@ from app.core.llm_endpoints import (
     response_provider,
 )
 from app.core.interfaces import Answer, SearchHit, hit_passage
-from app.generate.prompts import VERDICTS, build_user_prompt, reask_messages, system_prompt
+from app.generate.prompts import SYSTEM, VERDICTS, build_user_prompt, reask_messages
 
 _CITE = re.compile(r"\[(\d+)\]")
 # Grouped markers the model also writes: "[1, 2]", "[1,3]", "[3-4]", "[2–4]", "[1, 3-5]".
@@ -800,66 +793,8 @@ class GeneratedAnswer(Answer):
     reask_attempted: bool = False
     reask: ReaskReply | None = None
     reask_error: str | None = None
-    # The self-consistency vote (settings.llm_votes > 1, claims only; defaults = no vote).
-    # votes is the k requested; vote_verdicts the per-sample verdicts of the samples that
-    # returned, in draw order (an early stop draws fewer than k; a failed sample is left
-    # out and its error type listed in vote_errors); vote_chosen the 0-based index, in
-    # vote_verdicts, of the sample whose text and citations are served; vote_counts /
-    # vote_split as combine_votes reports them. The fields above (finish_reason, tokens,
-    # attempts, re-ask, ...) are the chosen sample's, except cost_usd: the sum over every
-    # drawn sample (None if any is unknown).
-    votes: int = 1
-    vote_verdicts: list[str | None] | None = None
-    vote_counts: dict[str, int] | None = None
-    vote_split: str | None = None
-    vote_chosen: int | None = None
-    vote_errors: list[str] = field(default_factory=list)
     # Short notes for the API response (main.py merges getattr(ans, "warnings")).
     warnings: list[str] = field(default_factory=list)
-
-
-# --- self-consistency vote ------------------------------------------------------------------
-#
-# Pre-registered (train-only screening; opt-in, default off). The rule is frozen and shared
-# by the product (LLMGenerator.generate) and the eval (rag_eval), so both apply exactly one
-# definition:
-#   plurality over the samples that have a verdict; a tie among the top count goes to the
-#   verdict of the LOWEST-INDEX sample among the tied verdicts (so sample #1 whenever it is
-#   tied, i.e. a tie never moves the verdict away from the single-sample answer); the
-#   served sample is the lowest-index one whose verdict is the winner; no verdict in any
-#   sample -> verdict None and sample #1 is served unchanged.
-VOTE_RULE = (
-    "plurality of non-missing per-sample verdicts; tie -> lowest-index tied sample; "
-    "served = lowest-index sample with the winning verdict; none -> sample 1"
-)
-
-
-@dataclass(frozen=True)
-class VoteResult:
-    """combine_votes' outcome. chosen is 0-based; split is the verdict counts sorted
-    descending and joined by '-' ("3", "2-1", "1-1-1", "" when no sample has a verdict);
-    tie is True when more than one verdict shares the top count; abstained counts the
-    samples with no verdict."""
-
-    verdict: str | None
-    chosen: int
-    counts: dict[str, int]
-    split: str
-    tie: bool
-    abstained: int
-
-
-def combine_votes(verdicts: Sequence[str | None]) -> VoteResult:
-    """The frozen vote rule (VOTE_RULE) over per-sample verdicts in draw order."""
-    counts = Counter(v for v in verdicts if v is not None)
-    abstained = sum(v is None for v in verdicts)
-    split = "-".join(str(c) for c in sorted(counts.values(), reverse=True))
-    if not counts:
-        return VoteResult(None, 0, {}, split, False, abstained)
-    top = max(counts.values())
-    tied = {v for v, c in counts.items() if c == top}
-    chosen = next(i for i, v in enumerate(verdicts) if v in tied)
-    return VoteResult(verdicts[chosen], chosen, dict(counts), split, len(tied) > 1, abstained)
 
 
 # Model families "auto" sends reasoning effort "medium" to (substring match on the id, so
@@ -945,8 +880,6 @@ class LLMGenerator:
         reask: bool | None = None,
         max_retries: int = CLIENT_MAX_RETRIES,
         reask_max_retries: int = API_REASK_MAX_RETRIES,
-        votes: int | None = None,
-        prompt_variant: str | None = None,
     ):
         # Where requests go. An explicit endpoint wins; an explicit base_url builds one
         # whose provider (and default key) follows that URL; otherwise the settings
@@ -977,14 +910,6 @@ class LLMGenerator:
         # generate() re-asks a claim with no verdict (settings.llm_reask). rag_eval turns
         # it off here and applies the same re-ask as a cached post-step instead.
         self.reask_enabled = settings.llm_reask if reask is None else reask
-        # Self-consistency vote over k samples for claims (settings.llm_votes; 1 = off), and
-        # the product system prompt variant (settings.llm_prompt_variant). rag_eval builds
-        # its generator with votes=1 and draws the extra samples itself.
-        self.votes = settings.llm_votes if votes is None else votes
-        if self.votes < 1:
-            raise ValueError(f"votes must be >= 1, got {self.votes}")
-        self.prompt_variant = settings.llm_prompt_variant if prompt_variant is None else prompt_variant
-        self.system = system_prompt(self.prompt_variant)
         # SDK retry counts (see CLIENT_MAX_RETRIES): the defaults are the API's; rag_eval
         # passes the batch policy (BATCH_MAX_RETRIES, REASK_MAX_RETRIES).
         self.reask_max_retries = reask_max_retries
@@ -1063,69 +988,12 @@ class LLMGenerator:
         )
 
     def generate(self, query: str, hits: list[SearchHit]) -> Answer:
-        """One grounded answer (_generate_one) — or, with self.votes = k > 1 and a CLAIM
-        (looks_like_claim), the self-consistency vote over up to k samples.
-
-        Vote cost: each sample is a full _generate_one (up to 2 attempts + 1 re-ask when
-        the re-ask is on), so a claim costs up to k x the calls and latency of a single
-        answer. Samples are drawn one after another and the draw stops as soon as one
-        verdict holds a strict majority of k (count * 2 > k) — the full vote could not
-        change it — so k = 3 typically takes ~2 samples. A sample that fails (OpenAIError,
-        EmptyCompletionError) is recorded in vote_errors and skipped, with a warning; if
-        every drawn sample fails, the last error is raised as a single answer's would be.
-        The served text and citations are the chosen sample's (combine_votes)."""
+        """One grounded answer: generation (+ one truncation retry) and, for a claim with
+        no verdict, the verdict-only re-ask when it is on."""
         if not hits:
             return GeneratedAnswer(text="No relevant documents were found.", citations=[], hits=[])
-        if self.votes <= 1 or not looks_like_claim(query):
-            return self._generate_one(query, hits)  # a question never gets extra calls
-        k = self.votes
-        samples: list[GeneratedAnswer] = []
-        errors: list[str] = []
-        costs: list[float | None] = []
-        last_error: Exception | None = None
-        for _ in range(k):
-            try:
-                ans = self._generate_one(query, hits)
-            except (OpenAIError, EmptyCompletionError) as e:
-                errors.append(type(e).__name__)
-                costs.append(getattr(e, "cost_usd", None))  # may have been billed
-                last_error = e
-                continue
-            samples.append(ans)
-            costs.append(ans.cost_usd)
-            counts = Counter(s.verdict for s in samples if s.verdict is not None)
-            if counts and max(counts.values()) * 2 > k:
-                break  # a strict majority of k: the remaining samples cannot change it
-        if not samples:
-            assert last_error is not None
-            raise last_error
-        verdicts = [s.verdict for s in samples]
-        vote = combine_votes(verdicts)
-        warnings = []
-        if errors:
-            warnings.append(
-                f"{len(errors)} of {len(errors) + len(samples)} vote samples failed "
-                f"({', '.join(sorted(set(errors)))}); the verdict is the vote of the "
-                f"{len(samples)} that returned."
-            )
-        return dataclasses.replace(
-            samples[vote.chosen],
-            verdict=vote.verdict,
-            cost_usd=None if any(c is None for c in costs) else sum(costs),
-            votes=k,
-            vote_verdicts=verdicts,
-            vote_counts=vote.counts,
-            vote_split=vote.split,
-            vote_chosen=vote.chosen,
-            vote_errors=errors,
-            warnings=[*samples[vote.chosen].warnings, *warnings],
-        )
-
-    def _generate_one(self, query: str, hits: list[SearchHit]) -> GeneratedAnswer:
-        """One sample: generation (+ one truncation retry) and, for a claim with no
-        verdict, the verdict-only re-ask when it is on."""
         messages = [
-            {"role": "system", "content": self.system},
+            {"role": "system", "content": SYSTEM},
             {"role": "user", "content": build_user_prompt(query, hits)},
         ]
         # finish_reason "length" means the budget ran out mid-reply (on a reasoning model

@@ -254,13 +254,3 @@ def test_settings_fall_back_to_top_level_copies_for_an_old_run_block():
         del blob["run"]["sample_seed"]
         blob["sample_seed"] = k
     assert [d[0] for d in rag_compare.settings_diff(a, b)[0]] == ["sample_seed"]
-
-
-def test_settings_diff_lists_the_opt_in_experiment_switches():
-    plain = run([row("1")])  # a file from before the switches existed: the defaults
-    explicit = run([row("1")], prompt_variant="default", judge_skipped=False)
-    assert rag_compare.compare(plain, explicit)["settings_differ"] == []
-    exp = run([row("1")], prompt_variant="finding", judge_skipped=True, votes={"k": 3})
-    differ = {k: (va, vb) for k, va, vb in rag_compare.compare(plain, exp)["settings_differ"]}
-    assert differ == {"prompt_variant": ("default", "finding"), "votes.k": (1, 3),
-                      "judge_skipped": (False, True)}

@@ -117,49 +117,10 @@ plus the re-asks resumed rows still miss in the cache) and the wall-clock estima
 free requests for today (GET /api/v1/key, which is not an LLM call and is not counted
 against the quota) and aborts before any LLM call if they are fewer than needed.
 
-Opt-in experiments (all default off; each makes a run non-canonical and names its run dir):
-
-* ``SSR_LLM_PROMPT_VARIANT=finding`` — the product prompt with prompts.FINDING_RULE added.
-  prompt_hash() renders the variant's system prompt, so the hash, the checkpoint signature
-  and the run dir (``..._<hash8>``) all move with it; the default variant's hash is
-  unchanged. The re-ask prompt is the same for every variant, so a re-ask reply already in
-  the re-ask cache for the same claim + passages + endpoint is reused (an identical request).
-* ``SSR_RAG_SKIP_JUDGE=1`` (eval only) — no judge call at all: judge_answered, faithfulness
-  and context_relevance are None, a reply with no verdict even after the re-ask is
-  ``answered`` with answered_source "no_judge" and so scores NO_VERDICT (conservative: no
-  judge fallback can credit it as an NEI abstention). The aggregates average the judge
-  metrics over rows that have them (None here); the request estimate counts 0 judge
-  calls. Its signature gains ``judge_skipped`` (only then), its dir ends in ``_nojudge``.
-* ``SSR_RAG_CONTEXT=oracle_cited`` (eval only, a DIAGNOSTIC — never a product mode) — the
-  generator gets the claim's SciFact-cited abstract(s) (oracle_cited_ids: its BEIR qrels
-  docs plus any rationale doc) instead of the retrieved top-k, rendered exactly like
-  retrieved passages; no retrieval runs. It separates open-corpus vs closed-corpus
-  mismatch (SciFact labels a claim against its cited abstract only) from the model's own
-  judgement; its accuracy is a closed-corpus ceiling, not a deployable number. The re-ask
-  policy is the default's. Its signature gains ``context`` (only then), its dir ends in
-  ``_oracle-cited``, and rag.md opens with a DIAGNOSTIC banner.
-* ``SSR_LLM_VOTES=k`` (k > 1) — the pre-registered self-consistency vote
-  (generator.combine_votes, VOTE_RULE). Sample #1 of each claim is its ordinary row under
-  the UNCHANGED signature (existing checkpoints and re-ask replies are reused) after the
-  re-ask post-step; samples 2..k are drawn afterwards with the same passages and request,
-  each with its own re-ask when it has no verdict, and cached in
-  ``CACHE/<signature>.samples.json`` (atomic, after every record; nested across k; resumed
-  after a daily-cap stop; SSR_EVAL_REFRESH ignores it). The eval draws all k samples (the
-  product's early stop would not change the vote, but the full split is the measurement).
-  Each row is then the served sample's row (sample #1's whenever it is served, its judge
-  scores included; another sample's reply is judged once, cached in its record) plus a
-  ``vote`` block; aggregate() adds ``votes`` (splits, ties, changes vs sample #1, each
-  sample's single-sample accuracy, and the EXPLORATORY "any disagreement -> NEI" accuracy).
-  A sample that fails (not a daily cap / fatal error) is not cached: the claim is voted over
-  the samples it has and listed in ``missing_vote_samples`` until a re-run draws it. The
-  row-level counts (truncated, re-asked, verdict sources) then describe the SERVED samples.
-  The run dir ends in ``_votes<k>``.
-
 Run:
     uv run python -m app.eval.rag_eval
     SSR_RAG_N=all uv run python -m app.eval.rag_eval --check-quota     # full 300-claim test
     SSR_RAG_DATASET=beir/scifact/train SSR_RAG_N=100 uv run python -m app.eval.rag_eval
-    SSR_RAG_DATASET=beir/scifact/train SSR_RAG_N=100 SSR_LLM_VOTES=3 uv run python -m app.eval.rag_eval
     uv run python -m app.eval.rag_compare A.json B.json                 # McNemar, paired
 """
 from __future__ import annotations
@@ -175,7 +136,6 @@ import subprocess
 import sys
 import time
 import urllib.request
-from types import SimpleNamespace
 from collections.abc import Callable, Collection, Mapping, Sequence
 from pathlib import Path
 
@@ -204,9 +164,7 @@ from app.generate.generator import (
     REASK_MAX_TOKENS,
     REASK_NOTE,
     TRUNCATION_NOTE,
-    VOTE_RULE,
     LLMGenerator,
-    combine_votes,
     generation_temperature,
     looks_like_claim,
     map_citations,
@@ -222,7 +180,6 @@ from app.generate.prompts import (
     VERDICTS,
     build_user_prompt,
     reask_messages,
-    system_prompt,
 )
 from app.ingest.corpus import (
     ClaimLabel,
@@ -320,50 +277,25 @@ def _is_fatal(e: Exception) -> bool:
     return isinstance(e, APIStatusError) and e.status_code in (401, 402)
 
 
-def free_requests_per_query(
-    gen: LLMEndpoint, judge: LLMEndpoint, judge_skipped: bool = False
-) -> tuple[int, int]:
+def free_requests_per_query(gen: LLMEndpoint, judge: LLMEndpoint) -> tuple[int, int]:
     """(typical, worst) requests one query makes against OpenRouter's free-tier caps:
-    the judge's one call if it is a free OpenRouter model (none with the judge skipped),
-    plus 1 for a free OpenRouter generator — 2 in the worst case (the truncation retry)."""
-    judge_free = int(judge.provider == "openrouter" and not judge.paid and not judge_skipped)
+    the judge's one call if it is a free OpenRouter model, plus 1 for a free OpenRouter
+    generator — 2 in the worst case (the truncation retry)."""
+    judge_free = int(judge.provider == "openrouter" and not judge.paid)
     gen_free = int(gen.provider == "openrouter" and not gen.paid)
     return judge_free + gen_free, judge_free + 2 * gen_free
 
 
-def default_throttle_s(
-    gen: LLMEndpoint | None = None, judge: LLMEndpoint | None = None, judge_skipped: bool = False
-) -> float:
-    """Per-query sleep for this provider mix (see THROTTLE_S); a skipped judge makes no
-    request, so neither its provider nor its free-cap share counts."""
+def default_throttle_s(gen: LLMEndpoint | None = None, judge: LLMEndpoint | None = None) -> float:
+    """Per-query sleep for this provider mix (see THROTTLE_S)."""
     if THROTTLE_S is not None:
         return THROTTLE_S
     gen = gen or resolve_endpoint("generator", require_key=False)
     judge = judge or resolve_endpoint("judge", require_key=False)
-    if "groq" in (gen.provider, *(() if judge_skipped else (judge.provider,))):
+    if "groq" in (gen.provider, judge.provider):
         return GROQ_THROTTLE_S
-    _, worst = free_requests_per_query(gen, judge, judge_skipped)
+    _, worst = free_requests_per_query(gen, judge)
     return max(OPENROUTER_MIN_THROTTLE_S, worst * OPENROUTER_S_PER_FREE_REQUEST)
-
-
-# Free OpenRouter requests one vote sample can make at worst (generation + its truncation
-# retry; its own re-ask is rare): the per-sample sleep in the vote-sample pass is that x
-# OPENROUTER_S_PER_FREE_REQUEST (8 s), like a query's (SSR_RAG_THROTTLE_S overrides).
-VOTE_SAMPLE_WORST_FREE_REQUESTS = 2
-# Expected share of claims whose vote serves a sample other than #1, so that sample gets
-# its own (single) judge call: for the up-front estimate only.
-EXPECTED_VOTE_REJUDGE_RATE = 0.15
-
-
-def vote_sample_throttle_s(gen: LLMEndpoint) -> float:
-    """Sleep after each drawn vote sample (and each vote re-judge)."""
-    if THROTTLE_S is not None:
-        return THROTTLE_S
-    if gen.provider == "groq":
-        return GROQ_THROTTLE_S
-    if gen.provider == "openrouter" and not gen.paid:
-        return VOTE_SAMPLE_WORST_FREE_REQUESTS * OPENROUTER_S_PER_FREE_REQUEST
-    return OPENROUTER_MIN_THROTTLE_S
 
 
 def worst_case_generation_cost(gen: LLMEndpoint) -> float:
@@ -425,20 +357,6 @@ ORACLE_DEFINITIONS = {
         "legacy: evidence = any BEIR qrels-relevant doc is in the retrieved top-k; BEIR "
         "marks a cited abstract relevant for NEI claims too, so abstaining on an NEI "
         "claim is scored as a false abstention"
-    ),
-}
-# The generator's context (SSR_RAG_CONTEXT). "retrieved" (default) is the product: the
-# top-k of MODE over the whole corpus. "oracle_cited" is a DIAGNOSTIC, never a product
-# mode and never canonical: the claim's SciFact-cited abstract(s) — the docs its label was
-# annotated against — in place of retrieval, so open-corpus vs closed-corpus mismatch can
-# be told apart from the model's own judgement. A ceiling for the closed-corpus task.
-CONTEXT_DEFAULT = "retrieved"
-CONTEXT_DEFINITIONS = {
-    "retrieved": f"the top-{TOP_K} of the retrieval mode over the whole corpus (the product)",
-    "oracle_cited": (
-        "DIAGNOSTIC, not a deployable mode: the claim's cited abstract(s) only (BEIR qrels "
-        "docs, which mark every cited doc relevant incl. NEI claims', plus any rationale "
-        "doc), in doc-id order, rendered like retrieved passages — no retrieval at all"
     ),
 }
 LABELS = ("SUPPORT", "CONTRADICT", "NEI")
@@ -585,14 +503,9 @@ def evidence_flags(retrieved: list[str], label: ClaimLabel, gold_qrels: set[str]
 def resolve_answered(verdict: str | None, judge_answered: bool | None) -> tuple[bool, str]:
     """(answered, source). A parsed verdict decides deterministically — anything but
     NOT ENOUGH EVIDENCE is an attempt, a rebuttal included. Only a reply with no
-    parseable verdict line falls back to the judge's call. With no judge call at all
-    (judge_answered None: SSR_RAG_SKIP_JUDGE, or a vote sample nobody judged) such a reply
-    counts as answered, source "no_judge" — so predicted_label scores it NO_VERDICT
-    (always wrong): conservative, never credited as an abstention on an NEI claim."""
+    parseable verdict line falls back to the judge's call."""
     if verdict is not None:
         return verdict != "NOT ENOUGH EVIDENCE", "verdict"
-    if judge_answered is None:
-        return True, "no_judge"
     return judge_answered, "judge"
 
 
@@ -853,7 +766,7 @@ def _file_sha256(path: Path) -> str | None:
         return None
 
 
-def prompt_hash(variant: str | None = None) -> str:
+def prompt_hash() -> str:
     """sha256 of the generator's system prompt + user-prompt template.
 
     The template is a function, so it is hashed by *rendering* it on fixed placeholders
@@ -861,15 +774,9 @@ def prompt_hash(variant: str | None = None) -> str:
     changes the hash, while a comment or refactor that leaves the prompt identical
     does not. (A change confined to the question sanitizer won't move it — that alters
     only how real queries are cleaned, not the template.)
-
-    The system prompt is the one ``variant`` names (default: settings.llm_prompt_variant,
-    as LLMGenerator sends it); the "default" variant is SYSTEM itself, so its hash — and
-    every checkpoint signature built on it — is unchanged.
     """
-    variant = settings.llm_prompt_variant if variant is None else variant
-    system = SYSTEM if variant == "default" else system_prompt(variant)
     ph = SearchHit("{doc_id}", 0.0, "{text}", {"title": "{title}"})
-    return _sha256(system + "\n\x00\n" + build_user_prompt("{question}", [ph, ph]))
+    return _sha256(SYSTEM + "\n\x00\n" + build_user_prompt("{question}", [ph, ph]))
 
 
 def _git_sha() -> str | None:
@@ -901,13 +808,9 @@ def run_metadata(
     judge_ep: LLMEndpoint | None = None,
     dataset: str | None = None,
     n_requested: int | str | None = None,
-    judge_skipped: bool = False,
-    votes: Mapping | None = None,
-    context: str = CONTEXT_DEFAULT,
 ) -> dict:
     """Provenance for rag.json: enough to tell whether two runs are comparable. Records
-    each role's provider, base URL, model id and the provider fields sent — never a key.
-    ``votes``: the self-consistency vote block (k > 1 only; absent otherwise)."""
+    each role's provider, base URL, model id and the provider fields sent — never a key."""
     gen = gen or resolve_endpoint("generator", require_key=False)
     judge_ep = judge_ep or resolve_endpoint("judge", require_key=False)
     effort = resolve_reasoning_effort(gen.model, settings.llm_reasoning_effort)
@@ -916,12 +819,7 @@ def run_metadata(
         "git_sha": _git_sha(),
         "dataset": dataset,
         "prompt_hash": prompt_hash(),
-        # Which product system prompt (prompts.PROMPT_VARIANTS) the hash above is of.
-        "prompt_variant": settings.llm_prompt_variant,
         "judge_prompt_hash": _sha256(JUDGE_SYSTEM),
-        # SSR_RAG_SKIP_JUDGE: no judge call at all (no faithfulness / context relevance; a
-        # reply with no verdict scores NO_VERDICT).
-        "judge_skipped": judge_skipped,
         "generator_model": gen.model,
         "generator_provider": gen.provider,
         "generator_base_url": gen.base_url,
@@ -970,11 +868,6 @@ def run_metadata(
             "trigger": "a claim (not a question) whose reply has no parseable verdict",
             "judged": "not re-judged: faithfulness / context relevance are the first reply's",
         },
-        **({"votes": dict(votes)} if votes else {}),
-        # SSR_RAG_CONTEXT diagnostic only (absent on a default run, so its rag.json is
-        # unchanged): what the generator was given instead of retrieval.
-        **({"context": context, "context_definition": CONTEXT_DEFINITIONS[context]}
-           if context != CONTEXT_DEFAULT else {}),
     }
 
 
@@ -1047,16 +940,13 @@ def aggregate(
     judge_model: str | None = None,
     gen_provider: str | None = None,
     judge_provider: str | None = None,
-    judge_skipped: bool = False,
 ) -> dict:
     """Cross the answered/abstained call with whether evidence was actually retrieved,
     so abstention is scored rather than assumed correct — under the rationale oracle
     (headline, top-level keys) and the legacy qrels oracle (``qrels_oracle``).
 
-    Judge fields may be None (SSR_RAG_SKIP_JUDGE, or a vote's chosen sample whose judge
-    call failed): the faithfulness / context-relevance means and the judge-verdict
-    agreement are then over the rows that have a judge value. ``judge_skipped`` adds the
-    keys a no-judge run reports; rows with ``vote`` blocks add ``votes`` (_vote_stats)."""
+    A row whose judge fields are None (an older run file) is left out of the
+    faithfulness / context-relevance means and the judge-verdict agreement."""
     headline = _abstention(rows, "evidence")
     answered = [r for r in rows if r["answered"]]
     with_verdict = [r for r in rows if r["verdict"] is not None]
@@ -1069,13 +959,6 @@ def aggregate(
               and r.get("faithfulness") is not None]
     ctx_rows = [r for r in rows if r.get("context_relevance") is not None]
     judge_rows = [r for r in with_verdict if r.get("judge_answered") is not None]
-    extra: dict = {}
-    if judge_skipped:
-        extra["judge_skipped"] = True
-        # Replies with no verdict even after the re-ask: no judge fallback, scored NO_VERDICT.
-        extra["no_judge_no_verdict"] = sum(r.get("answered_source") == "no_judge" for r in rows)
-    if (votes := _vote_stats(rows)) is not None:
-        extra["votes"] = votes
     return {
         "n": len(rows),
         "evidence_rate": headline.pop("evidence_rate"),
@@ -1132,49 +1015,6 @@ def aggregate(
         "judge_provider": judge_provider or JUDGE_PROVIDER,
         "top_k": TOP_K,
         "sample_seed": SEED,
-        **extra,
-    }
-
-
-def _tie_nei_label(row: Mapping) -> str:
-    """EXPLORATORY rule (pre-registered as such, never eligible for adoption): any
-    disagreement among a vote's non-missing verdicts -> NEI; otherwise the row's label."""
-    verdicts = {v for v in row["vote"]["verdicts"] if v is not None}
-    return "NEI" if len(verdicts) > 1 else row["predicted_label"]
-
-
-def _vote_stats(rows: Sequence[Mapping]) -> dict | None:
-    """The vote summary for rows carrying ``vote`` blocks (None when none do): split
-    distribution, ties, verdicts changed vs sample #1, each sample's own single-sample
-    accuracy (its predicted label as a row; a sample a claim lacks is left out of that
-    sample's n), and the exploratory tie->NEI rule's accuracy."""
-    voted = [r for r in rows if isinstance(r.get("vote"), Mapping)]
-    if not voted:
-        return None
-    k = max(int(r["vote"]["k"]) for r in voted)
-    splits: dict[str, int] = {}
-    for r in voted:
-        splits[r["vote"]["split"]] = splits.get(r["vote"]["split"], 0) + 1
-    sample_acc, sample_n = [], []
-    for j in range(k):
-        have = [r for r in voted if j < len(r["vote"]["predicted_labels"])
-                and r["vote"]["predicted_labels"][j] is not None]
-        sample_n.append(len(have))
-        sample_acc.append(_rate(
-            sum(r["vote"]["predicted_labels"][j] == r["gold_label"] for r in have), len(have)
-        ))
-    return {
-        "k": k,
-        "n": len(voted),
-        "splits": dict(sorted(splits.items(), key=lambda kv: (-kv[1], kv[0]))),
-        "ties": sum(bool(r["vote"]["tie"]) for r in voted),
-        "changed_vs_sample1": sum(bool(r["vote"]["changed"]) for r in voted),
-        "chosen_not_sample1": sum(r["vote"]["chosen"] != 1 for r in voted),
-        "claims_missing_samples": sum(bool(r["vote"].get("missing")) for r in voted),
-        "sample_accuracy": sample_acc,
-        "sample_n": sample_n,
-        "tie_nei_accuracy": _rate(sum(_tie_nei_label(r) == r["gold_label"] for r in voted), len(voted)),
-        "rule": VOTE_RULE,
     }
 
 
@@ -1299,26 +1139,13 @@ def _markdown(
             f"A reply with no verdict line counts as NEI if it abstained and as "
             f"`{NO_VERDICT}` (always wrong) if it answered."
         )
-    skipped_judge = bool(agg.get("judge_skipped"))
-    if skipped_judge:
-        no_verdict_rule += (
-            f" The judge was skipped (SSR_RAG_SKIP_JUDGE), so a reply with no verdict even "
-            f"after the re-ask has no judge fallback and counts as `{NO_VERDICT}` "
-            f"({agg.get('no_judge_no_verdict', 0)} of {agg['n']} here)."
-        )
-        judge_label = "skipped (SSR_RAG_SKIP_JUDGE)"
-        quality = (
-            "## Answer quality (LLM judge)\n\nJudge skipped (SSR_RAG_SKIP_JUDGE=1): no "
-            "faithfulness or context-relevance scores in this run.\n\n"
-        )
-    else:
-        judge_label = f"{agg['judge_model']} ({agg['judge_provider']})"
-        quality = (
-            f"## Answer quality (LLM judge)\n\n"
-            f"| Metric | Score |\n|---|---|\n"
-            f"| Faithfulness (over answered{faith_scope}) | {_fmt(agg['faithfulness_answered'])} |\n"
-            f"| Context relevance (all) | {_fmt(agg['context_relevance'])} |\n\n"
-        )
+    judge_label = f"{agg['judge_model']} ({agg['judge_provider']})"
+    quality = (
+        f"## Answer quality (LLM judge)\n\n"
+        f"| Metric | Score |\n|---|---|\n"
+        f"| Faithfulness (over answered{faith_scope}) | {_fmt(agg['faithfulness_answered'])} |\n"
+        f"| Context relevance (all) | {_fmt(agg['context_relevance'])} |\n\n"
+    )
     k = agg["top_k"]
     cols = (*LABELS, NO_VERDICT)
     confusion = "".join(
@@ -1366,43 +1193,6 @@ def _markdown(
         f"traceable; same answers as above, different oracle.\n\n"
         f"{_quadrant_md(agg['qrels_oracle']['quadrants'])}\n"
         f"{_abstention_md(agg['qrels_oracle'], agg['answered_rate'])}"
-        f"{_votes_md(agg.get('votes'))}"
-    )
-
-
-def _votes_md(v: Mapping | None) -> str:
-    """The self-consistency vote section (SSR_LLM_VOTES > 1); empty without a vote."""
-    if not v:
-        return ""
-    splits = ", ".join(f"{s or 'no verdict'}: {c}" for s, c in v["splits"].items())
-    per_sample = " · ".join(
-        f"#{j + 1} {_fmt(a)} (n={n})" for j, (a, n) in enumerate(zip(v["sample_accuracy"], v["sample_n"]))
-    )
-    missing = (
-        f" {v['claims_missing_samples']} claim(s) lack a sample and were voted over the "
-        f"samples they have." if v.get("claims_missing_samples") else ""
-    )
-    return (
-        f"\n## Self-consistency vote (k={v['k']})\n\n"
-        f"Rule: {v['rule']}. The verdict accuracy above is the vote's.{missing}\n\n"
-        f"| Metric | Value |\n|---|---|\n"
-        f"| Splits | {splits} |\n"
-        f"| Ties | {v['ties']} of {v['n']} |\n"
-        f"| Verdict changed vs sample #1 | {v['changed_vs_sample1']} of {v['n']} |\n"
-        f"| Served sample other than #1 | {v['chosen_not_sample1']} of {v['n']} |\n"
-        f"| Single-sample verdict accuracy | {per_sample} |\n"
-        f"| Exploratory: any disagreement -> NEI | {_fmt(v['tie_nei_accuracy'])} |\n"
-    )
-
-
-def _context_banner(context: str | None) -> str:
-    """The line rag.md opens with on an SSR_RAG_CONTEXT diagnostic run ('' by default)."""
-    if not context or context == CONTEXT_DEFAULT:
-        return ""
-    return (
-        f"> **DIAGNOSTIC — context `{context}`, not retrieval.** "
-        f"{CONTEXT_DEFINITIONS[context]}. A ceiling for the closed-corpus task, not a "
-        f"deployable mode; never comparable to a headline number.\n\n"
     )
 
 
@@ -1412,7 +1202,7 @@ def markdown_from_json(blob: Mapping) -> str:
     run = blob.get("run") if isinstance(blob.get("run"), Mapping) else {}
     rows = blob.get("rows") if isinstance(blob.get("rows"), list) else None
     missing = blob.get("missing_query_ids")
-    return _context_banner(run.get("context")) + _markdown(blob, int(blob.get("skipped") or 0), int(blob.get("judge_parse_failures") or 0),
+    return _markdown(blob, int(blob.get("skipped") or 0), int(blob.get("judge_parse_failures") or 0),
                      run.get("dataset"), rows, missing=len(missing) if isinstance(missing, list) else 0,
                      no_verdict_scoring=run.get("no_verdict_scoring"))
 
@@ -1425,19 +1215,15 @@ def render_markdown(path: Path) -> Path:
     return md_path
 
 
-def _estimate_line(
-    n: int, gen: LLMEndpoint, judge_ep: LLMEndpoint, throttle: float, judge_skipped: bool = False
-) -> str:
+def _estimate_line(n: int, gen: LLMEndpoint, judge_ep: LLMEndpoint, throttle: float) -> str:
     """The up-front spend / request / time estimate, per provider (the first pass only:
-    _request_line adds re-asks and vote samples)."""
+    _request_line adds re-asks)."""
     parts = []
     for role, ep, toks in (
         ("generator", gen, EST_GEN_TOKENS_PER_QUERY),
         ("judge", judge_ep, EST_JUDGE_TOKENS_PER_QUERY),
     ):
-        if role == "judge" and judge_skipped:
-            parts.append("  judge: skipped (SSR_RAG_SKIP_JUDGE): 0 requests")
-        elif ep.provider == "groq":
+        if ep.provider == "groq":
             parts.append(
                 f"  {role}: ~{n * toks:,} tokens on {ep.model} (Groq free tier caps tokens "
                 f"per day: 200k/day for gpt-oss-120b)"
@@ -1453,7 +1239,7 @@ def _estimate_line(
         else:
             count = f"{n}" if role == "judge" else f"{n}-{2 * n}"  # generator may retry once
             parts.append(f"  {role}: {count} free requests to {ep.model} ($0)")
-    typical, worst = free_requests_per_query(gen, judge_ep, judge_skipped)
+    typical, worst = free_requests_per_query(gen, judge_ep)
     if worst:
         both = "both roles are free: $0 run; " if typical == 2 else ""
         total = f"{n * typical}" if typical == worst else f"{n * typical}-{n * worst}"
@@ -1489,21 +1275,6 @@ def parse_n(raw: str | None) -> int | None:
 def rag_dataset(env: Mapping[str, str] | None = None) -> str:
     env = os.environ if env is None else env
     return env.get("SSR_RAG_DATASET") or settings.eval_dataset
-
-
-def rag_context(env: Mapping[str, str] | None = None) -> str:
-    """SSR_RAG_CONTEXT: "retrieved" (unset = the default) or the "oracle_cited" diagnostic."""
-    env = os.environ if env is None else env
-    raw = (env.get("SSR_RAG_CONTEXT") or CONTEXT_DEFAULT).strip().lower()
-    if raw not in CONTEXT_DEFINITIONS:
-        raise ValueError(f"SSR_RAG_CONTEXT must be one of {sorted(CONTEXT_DEFINITIONS)}, got {raw!r}")
-    return raw
-
-
-def oracle_cited_ids(qrels_ids: Collection[str], label: ClaimLabel) -> list[str]:
-    """The claim's cited abstracts for the oracle_cited diagnostic: its BEIR qrels docs
-    (SciFact's cited docs, NEI claims included) plus any rationale doc, in doc-id order."""
-    return sorted(set(qrels_ids) | label.rationale_doc_ids, key=lambda d: (len(d), d))
 
 
 def sample_claims(query_ids: Collection[str], n: int | None, seed: int = SEED) -> list[str]:
@@ -1554,10 +1325,6 @@ def output_dir(
     judge_ep: LLMEndpoint | None = None,
     reask: bool = True,
     split_size: int | None = None,
-    prompt_variant: str = "default",
-    votes: int = 1,
-    judge_skipped: bool = False,
-    context: str = CONTEXT_DEFAULT,
 ) -> tuple[Path, bool]:
     """Where this run's rag.{md,json} go, and whether it is the canonical run.
 
@@ -1572,18 +1339,11 @@ def output_dir(
     collide and can never overwrite the committed free-model artifact. (gen/judge_ep
     None = the defaults, for callers that only vary the sample.) A run with the re-ask
     off (SSR_LLM_REASK=false) is not what the product serves: never canonical either,
-    and its directory ends in ``_noreask``. Neither is a run with a non-default prompt
-    variant (its prompt hash already names the directory apart), a self-consistency vote
-    (SSR_LLM_VOTES = k > 1: ``_votes<k>``), no judge (SSR_RAG_SKIP_JUDGE: ``_nojudge``)
-    or the oracle-context diagnostic (SSR_RAG_CONTEXT=oracle_cited: ``_oracle-cited``).
+    and its directory ends in ``_noreask``.
     """
     changed = non_default_roles(gen, judge_ep) if gen and judge_ep else []
     whole_split = split_size is not None and n_sample == split_size
-    defaults = (
-        reask and prompt_variant == "default" and votes == 1 and not judge_skipped
-        and context == CONTEXT_DEFAULT
-    )
-    if not limit and dataset == CANONICAL_DATASET and whole_split and not changed and defaults:
+    if not limit and dataset == CANONICAL_DATASET and whole_split and not changed and reask:
         return OUT, True
     name = f"rag_{_slug(dataset)}_{n_sample}_{phash[:8]}"
     if changed:
@@ -1592,12 +1352,6 @@ def output_dir(
             name += f"_judge-{_slug(judge_ep.model)}"
     if not reask:
         name += "_noreask"
-    if votes > 1:
-        name += f"_votes{votes}"
-    if judge_skipped:
-        name += "_nojudge"
-    if context != CONTEXT_DEFAULT:
-        name += f"_{_slug(context)}"
     return assert_outside(RUNS / name), False
 
 
@@ -1664,22 +1418,13 @@ _CHECKPOINT_ROW_KEYS = (
 )
 
 
-def signature_fields(
-    dataset: str, n_sample: int, gen: LLMEndpoint, judge_ep: LLMEndpoint,
-    judge_skipped: bool = False, context: str = CONTEXT_DEFAULT,
-) -> dict:
+def signature_fields(dataset: str, n_sample: int, gen: LLMEndpoint, judge_ep: LLMEndpoint) -> dict:
     """Everything that changes a row's content. Nothing git-specific: a commit that
     leaves every one of these alone must not invalidate hours of rate-limited work.
 
     The sample is fixed by (dataset, n_sample, seed); each row by the two endpoints
-    (provider, base URL, model id, routing fields), both prompts (the generator's per
-    settings.llm_prompt_variant, via prompt_hash), the generator's token budget and
-    reasoning setting, and the retrieval that produced its context. ``judge_skipped``
-    (SSR_RAG_SKIP_JUDGE: rows carry no judge scores) adds a key ONLY when set, so every
-    default signature — and the checkpoint it names — is unchanged; so does ``context``
-    (SSR_RAG_CONTEXT, only when not the default "retrieved"). The vote's k is not
-    here: sample #1 is the ordinary row, and the extra samples live in their own cache
-    (samples_path) under this same signature, so runs with different k share them.
+    (provider, base URL, model id, routing fields), both prompts, the generator's token
+    budget and reasoning setting, and the retrieval that produced its context.
     """
     reranker = reranker_in_effect(MODE)
     fields: dict = {
@@ -1703,10 +1448,6 @@ def signature_fields(
     }
     if (index := _index_fingerprint()) is not None:
         fields["index_manifest"] = index
-    if judge_skipped:
-        fields["judge_skipped"] = True
-    if context != CONTEXT_DEFAULT:
-        fields["context"] = context
     return fields
 
 
@@ -1761,62 +1502,6 @@ def save_checkpoint(path: Path, sig: str, fields: Mapping, rows: Mapping, stats:
     os.replace(tmp, path)
 
 
-# --- self-consistency vote: extra samples (SSR_LLM_VOTES = k > 1) -------------------------
-#
-# Sample #1 of every claim is its ordinary row: the checkpointed first pass under the
-# UNCHANGED signature, then the re-ask post-step — so existing checkpoints are reused as-is.
-# Samples 2..k are drawn afterwards with the same request (same passages, prompt, budget,
-# truncation retry) and stored in their own cache next to the checkpoint:
-#   CACHE/<signature>.samples.json = {"signature": sig, "samples": {qid: {"2": rec, ...}}}
-# keyed by the base signature + sample index, so the samples NEST (k=3 and k=5 share
-# samples 2-3) and a stopped run resumes, drawing only what is missing. Each rec holds what
-# a row records about its generation (generation_fields), plus "sample", "requests"
-# (attempts + its re-ask calls), "fetched_at", and:
-#   "reask": the sample's OWN verdict-only re-ask reply (None = not needed; absent = still
-#            to fetch). Not the shared re-ask ReplyCache: its key is per claim, which would
-#            hand every sample of a claim the same re-ask reply.
-#   "judge": the judge's scores, set only once the vote serves this sample (judge on).
-# A sample is complete when it has a rec and its re-ask is not pending.
-
-
-def samples_path(sig: str) -> Path:
-    return CACHE / f"{sig}.samples.json"
-
-
-def load_samples(path: Path, sig: str) -> dict[str, dict[str, dict]]:
-    """{qid: {"<j>": rec}} for this signature; {} with SSR_EVAL_REFRESH, no file, or a
-    corrupt / wrong-signature / wrong-shaped file (degrades to redraw, like the
-    checkpoint). A malformed rec is dropped on its own."""
-    if os.environ.get("SSR_EVAL_REFRESH") or not path.exists():
-        return {}
-    try:
-        blob = json.loads(path.read_text())
-    except (ValueError, OSError) as e:
-        print(f"  (unreadable vote-samples cache, redrawing: {type(e).__name__})", flush=True)
-        return {}
-    if not (isinstance(blob, dict) and blob.get("signature") == sig
-            and isinstance(blob.get("samples"), dict)):
-        return {}
-    out: dict[str, dict[str, dict]] = {}
-    for qid, recs in blob["samples"].items():
-        if isinstance(recs, dict):
-            good = {j: r for j, r in recs.items()
-                    if isinstance(r, dict) and str(r.get("sample")) == j
-                    and all(key in r for key in GEN_FIELD_KEYS)
-                    and isinstance(r.get("retrieved_doc_ids"), list)}
-            if good:
-                out[qid] = good
-    return out
-
-
-def save_samples(path: Path, sig: str, samples: Mapping) -> None:
-    """Atomic like save_checkpoint: a kill mid-write keeps the previous good file."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps({"signature": sig, "samples": samples}))
-    os.replace(tmp, path)
-
-
 def generation_fields(ans, hits: Sequence[SearchHit]) -> dict:
     """What a row records about one generation (a GeneratedAnswer, or a plain Answer from
     another Generator: None / 1 / False for the side-channel fields)."""
@@ -1840,21 +1525,12 @@ def generation_fields(ans, hits: Sequence[SearchHit]) -> dict:
     }
 
 
-GEN_FIELD_KEYS = tuple(generation_fields(
-    SimpleNamespace(verdict=None, text="", citations=[]), ()
-))
-_NO_JUDGE = {"answered": None, "faithfulness": None, "context_relevance": None}
-
-
 def build_row(
     qid: str, query: str, label: ClaimLabel, qrels_ids: Collection[str], flags: Mapping,
-    gen: Mapping, scores: Mapping | None,
+    gen: Mapping, s: Mapping,
 ) -> dict:
     """One first-pass row from a generation (generation_fields) and the judge's scores
-    (None: no judge call — every judge field None, answered_source "no_judge" for a reply
-    with no verdict), re-read by reparse_row. The single construction used for the main
-    pass and for every vote sample."""
-    s = scores or _NO_JUDGE
+    ``s``, re-read by reparse_row."""
     answered, answered_source = resolve_answered(gen["verdict"], s["answered"])
     return reparse_row({
         "query_id": qid,
@@ -1900,52 +1576,6 @@ def build_row(
     }, query)
 
 
-def sample_row(
-    sample1: Mapping, query: str, label: ClaimLabel, rec: Mapping, reask_on: bool,
-    scores: Mapping | None = None,
-) -> dict | None:
-    """Vote sample `rec` as a final row, through the main rows' own logic: build_row on the
-    claim's sample-#1 passages / evidence flags (judge fields from `scores`, else None),
-    then its own re-ask (apply_reask) when it needs one. None while that re-ask is still
-    pending (not fetched yet, or it failed): the sample is incomplete."""
-    row = build_row(
-        sample1["query_id"], query, label, sample1.get("qrels_doc_ids") or (),
-        sample1, rec, scores,
-    )
-    if reask_on and needs_reask(query, row["verdict"]):
-        reask = rec.get("reask")
-        return apply_reask(row, reask) if isinstance(reask, Mapping) else None
-    return {**row, "reask_attempted": False}
-
-
-def combine_sample_rows(k: int, rows_by_sample: Mapping[int, Mapping]) -> tuple[int, dict]:
-    """(chosen sample number, 1-based; the row's ``vote`` block) for one claim, from its
-    final per-sample rows ({1: sample #1's row, j: sample j's}; a missing sample is left
-    out and listed under "missing"). The rule is generator.combine_votes over the samples
-    present, in sample order."""
-    present = sorted(rows_by_sample)
-    vote = combine_votes([rows_by_sample[j]["verdict"] for j in present])
-    chosen = present[vote.chosen]
-
-    def per_sample(key: str) -> list:
-        return [rows_by_sample[j].get(key) if j in rows_by_sample else None
-                for j in range(1, k + 1)]
-
-    return chosen, {
-        "k": k,
-        "verdicts": per_sample("verdict"),
-        "verdict_sources": per_sample("verdict_source"),
-        "predicted_labels": per_sample("predicted_label"),
-        "counts": vote.counts,
-        "split": vote.split,
-        "tie": vote.tie,
-        "abstained": vote.abstained,
-        "chosen": chosen,
-        "changed": vote.verdict != rows_by_sample[1]["verdict"],
-        "missing": [j for j in range(1, k + 1) if j not in rows_by_sample],
-    }
-
-
 def _stat(stats: Mapping, key: str, default: float = 0) -> float:
     v = stats.get(key, default)
     return v if isinstance(v, int | float) and not isinstance(v, bool) else default
@@ -1963,28 +1593,17 @@ def observed_retry_rate(rows: Sequence[Mapping]) -> float | None:
 def request_estimate(
     remaining: int, gen: LLMEndpoint, judge_ep: LLMEndpoint, throttle: float, retry_rate: float,
     reask_rate: float = 0.0, reask_pending: int = 0, reask: bool = False,
-    judge: bool = True, vote_samples: int = 0, vote_rejudges: int = 0, vote_throttle: float = 0.0,
 ) -> dict:
     """Requests the remaining rows need: per claim, 1 generation + the expected retry
-    rate + 1 judge call (all providers; none with ``judge`` False, SSR_RAG_SKIP_JUDGE),
-    plus — with the re-ask on — the expected re-ask rate per new claim and the re-asks
-    resumed rows still need (`reask_pending`: their exact count of cache misses); and the
-    share of those on OpenRouter's free caps (expected, and worst case with every
-    generation retrying and re-asking).
-
-    The self-consistency vote (SSR_LLM_VOTES > 1) adds ``vote_samples`` extra samples
-    still missing from the samples cache, each 1 generation + the retry rate + the re-ask
-    rate (worst case 2 + 1), and — with the judge on — one judge call for the expected
-    EXPECTED_VOTE_REJUDGE_RATE share of the ``vote_rejudges`` claims that have no judged
-    vote sample yet (worst case all of them), each sample / re-judge followed by
-    ``vote_throttle`` seconds."""
+    rate + 1 judge call (all providers), plus — with the re-ask on — the expected re-ask
+    rate per new claim and the re-asks resumed rows still need (`reask_pending`: their
+    exact count of cache misses); and the share of those on OpenRouter's free caps
+    (expected, and worst case with every generation retrying and re-asking)."""
     gen_free = int(gen.provider == "openrouter" and not gen.paid)
-    judge_free = int(judge_ep.provider == "openrouter" and not judge_ep.paid and judge)
-    _, worst = free_requests_per_query(gen, judge_ep, not judge)
+    judge_free = int(judge_ep.provider == "openrouter" and not judge_ep.paid)
+    _, worst = free_requests_per_query(gen, judge_ep)
     reask_rate = reask_rate if reask else 0.0
     reask_pending = reask_pending if reask else 0
-    rejudges = EXPECTED_VOTE_REJUDGE_RATE * vote_rejudges if judge else 0.0
-    per_sample = 1 + retry_rate + reask_rate
 
     def up(x: float) -> int:  # ceil, without float noise turning 672.0000001 into 673
         return math.ceil(round(x, 6))
@@ -1994,21 +1613,14 @@ def request_estimate(
         "retry_rate": retry_rate,
         "reask_rate": reask_rate,
         "reask_pending": reask_pending,
-        "judge": judge,
-        "vote_samples": vote_samples,
-        "vote_rejudges": rejudges,
-        "requests": up(remaining * (1 + int(judge) + retry_rate + reask_rate) + reask_pending
-                       + vote_samples * per_sample + rejudges),
+        "requests": up(remaining * (2 + retry_rate + reask_rate) + reask_pending),
         "free_requests": up(
             remaining * (gen_free * (1 + retry_rate + reask_rate) + judge_free)
             + gen_free * reask_pending
-            + gen_free * vote_samples * per_sample + judge_free * rejudges
         ),
         "free_requests_worst": remaining * (worst + gen_free * int(reask))
-        + gen_free * reask_pending
-        + vote_samples * gen_free * (2 + int(reask)) + judge_free * vote_rejudges * int(judge),
-        "seconds": remaining * (throttle + EST_QUERY_LATENCY_S) + reask_pending * throttle
-        + vote_samples * (vote_throttle + EST_QUERY_LATENCY_S) + rejudges * vote_throttle,
+        + gen_free * reask_pending,
+        "seconds": remaining * (throttle + EST_QUERY_LATENCY_S) + reask_pending * throttle,
     }
 
 
@@ -2020,24 +1632,15 @@ def _request_line(est: dict, n_total: int, n_done: int, throttle: float, retry_s
             f"expect ~{math.ceil(est['free_requests'] / OPENROUTER_FREE_REQUESTS_PER_DAY)} "
             f"daily-cap stops, each resumed by re-running the same command"
         )
-    judge = " + 1 judge" if est.get("judge", True) else "; judge skipped"
-    votes = ""
-    if est.get("vote_samples") or est.get("vote_rejudges"):
-        votes = (
-            f"\n  self-consistency vote: {est['vote_samples']} extra samples still to draw "
-            f"(each 1 generation + {est['retry_rate']:.2f} retries + {est['reask_rate']:.2f} "
-            f"re-asks expected) + ~{est['vote_rejudges']:.1f} expected re-judges of a served "
-            f"sample other than #1 (included above)"
-        )
     return (
         f"Remaining work: {est['rows']} of {n_total} claims"
         + (f" ({n_done} resumed from checkpoint)" if n_done else "")
         + f"\n  ~{est['requests']} LLM requests (per claim: 1 generation + "
-        f"{est['retry_rate']:.2f} expected truncation retries [{retry_src}]{judge}); "
+        f"{est['retry_rate']:.2f} expected truncation retries [{retry_src}] + 1 judge); "
         f"~{est['free_requests']} on OpenRouter's free caps (worst case "
         f"{est['free_requests_worst']})\n"
         f"  est. wall-clock ~{est['seconds'] / 60:.0f} min ({throttle:.1f}s throttle + "
-        f"~{EST_QUERY_LATENCY_S:.0f}s assumed call latency per claim){days}{votes}"
+        f"~{EST_QUERY_LATENCY_S:.0f}s assumed call latency per claim){days}"
     )
 
 
@@ -2134,20 +1737,14 @@ def main(argv: Sequence[str] = ()) -> None:
     limit = int(os.environ.get("SSR_EVAL_LIMIT", "0") or 0)
     if limit < 0:
         raise ValueError("SSR_EVAL_LIMIT must be >= 0")
-    # Opt-in experiment switches; every one of them makes the run non-canonical.
-    skip_judge = os.environ.get("SSR_RAG_SKIP_JUDGE", "") not in ("", "0")
-    context = rag_context()
-    k_votes = settings.llm_votes
-    variant = settings.llm_prompt_variant
 
     # Resolve both endpoints first: a missing key, a key/URL mismatch or a model the
     # spend policy refuses fails here, before minutes of retrieval.
     gen_ep = resolve_endpoint("generator")
     judge_ep = resolve_endpoint("judge")
     print(describe_with_ignored(gen_ep), describe_with_ignored(judge_ep), sep="\n", flush=True)
-    throttle = default_throttle_s(gen_ep, judge_ep, skip_judge)
-    free_lo, free_hi = free_requests_per_query(gen_ep, judge_ep, skip_judge)
-    vote_throttle = vote_sample_throttle_s(gen_ep)
+    throttle = default_throttle_s(gen_ep, judge_ep)
+    free_lo, free_hi = free_requests_per_query(gen_ep, judge_ep)
     ceiling = settings.rag_max_spend_usd
 
     queries, qrels = load_queries_qrels(dataset)
@@ -2161,25 +1758,12 @@ def main(argv: Sequence[str] = ()) -> None:
     reask_on = settings.llm_reask
     out, canonical = output_dir(
         dataset, limit, len(qids), phash, gen_ep, judge_ep, reask=reask_on, split_size=len(queries),
-        prompt_variant=variant, votes=k_votes, judge_skipped=skip_judge, context=context,
     )
     if changed := non_default_roles(gen_ep, judge_ep):
         print(_non_default_notice(changed, gen_ep, judge_ep), flush=True)
     if not reask_on:
         print(f"SSR_LLM_REASK is off: no verdict-only re-ask, so this run never writes {OUT}",
               flush=True)
-    if variant != "default":
-        print(f"SSR_LLM_PROMPT_VARIANT={variant} (prompt hash {phash[:8]}): this run never "
-              f"writes {OUT}", flush=True)
-    if k_votes > 1:
-        print(f"SSR_LLM_VOTES={k_votes}: self-consistency vote over {k_votes} samples per claim "
-              f"({VOTE_RULE}); this run never writes {OUT}", flush=True)
-    if context != CONTEXT_DEFAULT:
-        print(f"SSR_RAG_CONTEXT={context}: {CONTEXT_DEFINITIONS[context]}; this run "
-              f"never writes {OUT}", flush=True)
-    if skip_judge:
-        print(f"SSR_RAG_SKIP_JUDGE: no judge calls (no faithfulness / context relevance; a reply "
-              f"with no verdict scores {NO_VERDICT}); this run never writes {OUT}", flush=True)
     n_label = "all" if n_req is None else n_req
     print(
         f"Sample: {len(qids)} claims from {dataset} (SSR_RAG_N={n_label}, seed={SEED}"
@@ -2200,9 +1784,7 @@ def main(argv: Sequence[str] = ()) -> None:
         print(replacing, flush=True)
 
     # Resume: rows completed under the same signature are reused, never re-generated.
-    sig_fields = signature_fields(
-        dataset, len(qids), gen_ep, judge_ep, judge_skipped=skip_judge, context=context,
-    )
+    sig_fields = signature_fields(dataset, len(qids), gen_ep, judge_ep)
     sig = rag_signature(sig_fields)
     ckpt = checkpoint_path(sig)
     done, prior = load_checkpoint(ckpt, sig, qids)
@@ -2219,8 +1801,7 @@ def main(argv: Sequence[str] = ()) -> None:
             warn = " — the default MiniLM, which measurably HURTS nDCG@10 on SciFact"
         print(f"MODE={MODE}: reranking with {reranker}{warn}", flush=True)
 
-    # The oracle_cited diagnostic never retrieves (and so never opens Qdrant).
-    service = SearchService() if context == CONTEXT_DEFAULT else None
+    service = SearchService()
     corpus: dict[str, dict] = {}
     skipped = parse_failures = 0
     judge_calls = int(_stat(prior, "judge_calls"))
@@ -2242,15 +1823,9 @@ def main(argv: Sequence[str] = ()) -> None:
     # Resumed rows already carry their evidence flags; only the rest are retrieved.
     position = {q: i for i, q in enumerate(qids, start=1)}
     retrieved: dict[str, list[SearchHit]] = {}
-    if service is None and todo_ids:
-        corpus.update({d["doc_id"]: d for d in load_documents()})
     for qid in todo_ids:
         try:
-            if service is None:  # SSR_RAG_CONTEXT=oracle_cited: the cited abstract(s) only
-                cited = {d for d, rel in qrels.get(qid, {}).items() if rel > 0}
-                retrieved[qid] = reask_hits(oracle_cited_ids(cited, labels[qid]), corpus)
-            else:
-                retrieved[qid] = service.retrieve(queries[qid], mode=MODE, top_k=TOP_K)
+            retrieved[qid] = service.retrieve(queries[qid], mode=MODE, top_k=TOP_K)
         except Exception as e:  # skip a query rather than lose the whole run
             skip(position[qid], qid, e)
     gold = {qid: {d for d, rel in qrels.get(qid, {}).items() if rel > 0} for qid in retrieved}
@@ -2299,38 +1874,13 @@ def main(argv: Sequence[str] = ()) -> None:
     else:
         reask_rate = EXPECTED_REASK_RATE
 
-    # The vote's extra samples (k > 1): cached ones are reused (a rec drawn on other
-    # passages than sample #1's is dropped and redrawn), the rest are counted up front.
-    spath = samples_path(sig)
-    samples: dict[str, dict[str, dict]] = {}
-    vote_missing = vote_reask_pending = vote_rejudge = 0
-    if k_votes > 1:
-        for q, recs in load_samples(spath, sig).items():
-            if q not in ev:
-                continue
-            ids = done[q]["retrieved_doc_ids"] if q in done else [h.doc_id for h in retrieved[q]]
-            if kept_recs := {j: r for j, r in recs.items() if r["retrieved_doc_ids"] == ids}:
-                samples[q] = kept_recs
-        for q in scored:
-            recs = samples.get(q, {})
-            vote_missing += sum(str(j) not in recs for j in range(2, k_votes + 1))
-            vote_reask_pending += sum(
-                str(j) in recs and "reask" not in recs[str(j)] for j in range(2, k_votes + 1)
-            )
-            vote_rejudge += not skip_judge and not any("judge" in r for r in recs.values())
-        n_cached = sum(len(v) for v in samples.values())
-        print(f"  vote samples: {n_cached} cached in {spath}, {vote_missing} to draw "
-              f"(samples 2..{k_votes} of {len(scored)} claims)", flush=True)
-
-    print(_estimate_line(len(retrieved), gen_ep, judge_ep, throttle, skip_judge), flush=True)
+    print(_estimate_line(len(retrieved), gen_ep, judge_ep, throttle), flush=True)
     observed = observed_retry_rate(list(done.values()))
     retry_rate = EXPECTED_RETRY_RATE if observed is None else observed
     retry_src = "committed-run rate" if observed is None else f"observed on {len(done)} rows"
     est = request_estimate(
         len(retrieved), gen_ep, judge_ep, throttle, retry_rate,
-        reask_rate=reask_rate, reask_pending=len(reask_missing) + vote_reask_pending,
-        reask=reask_on, judge=not skip_judge, vote_samples=vote_missing,
-        vote_rejudges=vote_rejudge, vote_throttle=vote_throttle,
+        reask_rate=reask_rate, reask_pending=len(reask_missing), reask=reask_on,
     )
     print(_request_line(est, len(qids), len(done), throttle, retry_src), flush=True)
     if reask_on:
@@ -2350,12 +1900,9 @@ def main(argv: Sequence[str] = ()) -> None:
     # post-step below, so checkpointed rows stay first-pass rows.
     # The batch retry policy (generator.BATCH_MAX_RETRIES / REASK_MAX_RETRIES), not the
     # API's: no user is waiting, and quick SDK retries absorb transient 429s / 5xx first.
-    # votes=1: the eval draws the vote's extra samples itself (cached, resumable), never
-    # inside generate().
     generator = LLMGenerator(
         endpoint=gen_ep, reask=False,
         max_retries=BATCH_MAX_RETRIES, reask_max_retries=REASK_MAX_RETRIES,
-        votes=1, prompt_variant=variant,
     )
     judge_client = build_client(judge_ep, factory=OpenAI, timeout=60.0)  # Nemotron Ultra: rare 20-27 s calls
 
@@ -2381,16 +1928,10 @@ def main(argv: Sequence[str] = ()) -> None:
 
     for r in done.values():
         account(r.get("generation_cost_usd"))
-    for recs in samples.values():  # cached vote samples count toward the per-run ceiling too
-        for rec in recs.values():
-            account(rec.get("generation_cost_usd"))
-            if isinstance(rec.get("reask"), Mapping):
-                account(rec["reask"].get("cost_usd"), worst_reask)
 
     # Requests actually sent this session (successful calls by their own count; a failed
     # call counts 1, a lower bound), for the run block.
-    session = {"generation_attempts": 0, "reask_calls": 0, "judge_calls": 0,
-               "vote_sample_requests": 0}
+    session = {"generation_attempts": 0, "reask_calls": 0, "judge_calls": 0}
 
     def judge_usd() -> float:
         return prior_judge_usd + getattr(judge_client, "cost_usd", 0.0)
@@ -2466,8 +2007,7 @@ def main(argv: Sequence[str] = ()) -> None:
 
     # Pass 2 — generate + judge. The judge is called once per query for faithfulness
     # and context relevance (neither has a gold label); its `answered` field is used
-    # only where the reply carries no parseable verdict line. SSR_RAG_SKIP_JUDGE: no
-    # judge call (every judge field None).
+    # only where the reply carries no parseable verdict line.
     for qid in todo_ids:
         if qid not in retrieved:
             continue
@@ -2482,12 +2022,10 @@ def main(argv: Sequence[str] = ()) -> None:
                 raise SpendCeilingReached(
                     f"spent ${spent():.4f}, over SSR_RAG_MAX_SPEND_USD=${ceiling:.2f}"
                 )
-            s = None
-            if not skip_judge:
-                judge_calls += 1
-                s = with_rate_limit_retries(
-                    lambda q=q, hits=hits, ans=ans: judge_once(q, hits, ans.text), n, qid,
-                )
+            judge_calls += 1
+            s = with_rate_limit_retries(
+                lambda q=q, hits=hits, ans=ans: judge_once(q, hits, ans.text), n, qid,
+            )
         except DailyTokenBudgetExhausted as e:
             remaining = len(qids) - len(done)
             raise SystemExit(
@@ -2523,14 +2061,11 @@ def main(argv: Sequence[str] = ()) -> None:
         done[qid] = build_row(qid, q, label, gold[qid], f, generation_fields(ans, hits), s)
         checkpoint()  # persisted at once: a daily-cap stop loses no finished row
         r = done[qid]
-        scores = "judge skipped" if s is None else (
-            f"faith={s['faithfulness']:.2f} ctx={s['context_relevance']:.2f}"
-        )
         print(
             f"  [{n}/{len(qids)}] q{qid:>4} {label.label:<10} -> {r['predicted_label']:<10} "
             f"{'answered' if r['answered'] else 'abstain '}({r['answered_source'][0]}) "
             f"{'eR' if f['evidence'] else '--'}{'eQ' if f['evidence_qrels'] else '--'} "
-            f"{scores}"
+            f"faith={s['faithfulness']:.2f} ctx={s['context_relevance']:.2f}"
             f"{'  TRUNCATED' if r['truncated'] else ''}  {q[:40]}",
             flush=True,
         )
@@ -2606,150 +2141,9 @@ def main(argv: Sequence[str] = ()) -> None:
               f"({reply.finish_reason}, {reply.completion_tokens} tokens)", flush=True)
         time.sleep(throttle)
 
-    # Pass 4 — the self-consistency vote (SSR_LLM_VOTES = k > 1). Sample #1 is each
-    # claim's row as passes 2-3 left it. Samples 2..k come from the samples cache, else
-    # one generation each with the SAME passages (+ the truncation retry), and — for a
-    # claim whose sample has no verdict — that sample's OWN re-ask; every rec is cached at
-    # once. Then the vote (combine_sample_rows): when it serves a sample other than #1
-    # and the judge is on, that sample's reply is judged once (cached in its rec); a
-    # served sample #1 keeps its own judge scores. A sample that failed (not cached) is
-    # left out: the claim is voted over the samples it has and listed in
-    # missing_vote_samples (a k > 1 run is never canonical, so it still writes). Same
-    # retries, spend ceiling, daily-cap and fatal stops as passes 2-3.
-    vote_rows: dict[str, dict] = {}
-    vote_stats = {"drawn": 0, "cached": 0, "failed": 0, "reasks": 0, "rejudged": 0}
-    missing_vote_samples: list[str] = []
-    vote_judge_failed: list[str] = []
-    for qid in qids if k_votes > 1 else ():
-        if qid not in done:
-            continue
-        n = position[qid]
-        q, label, hits = queries[qid], labels[qid], passages(qid)
-        if [h.doc_id for h in hits] != done[qid]["retrieved_doc_ids"]:
-            raise RuntimeError(f"vote samples for q{qid} would see other passages than sample #1")
-        recs = samples.setdefault(qid, {})
-
-        def vote_stop(e: Exception, where: str, n=n) -> SystemExit:
-            return SystemExit(
-                f"\nStopped in the vote pass ({where}) at query {n}/{len(qids)}: "
-                f"{type(e).__name__}: {str(e)[:300]}\nNothing was written to {out}; {kept()}; "
-                f"vote samples so far are cached in {spath}. Re-run the same command to "
-                f"resume: only the missing samples are drawn."
-            )
-
-        def vote_reask_once(q=q, hits=hits):
-            if spent() + worst_reask > ceiling:
-                raise SpendCeilingReached(
-                    f"spent ${spent():.4f} so far and the next re-ask could cost up to "
-                    f"${worst_reask:.4f}, over SSR_RAG_MAX_SPEND_USD=${ceiling:.2f}"
-                )
-            session["vote_sample_requests"] += 1
-            try:
-                return generator.reask_verdict(q, hits)
-            except EmptyCompletionError as e:
-                account(e.cost_usd, worst_reask)
-                raise
-
-        for j in range(2, k_votes + 1):
-            rec = recs.get(str(j))
-            try:
-                if rec is None:
-                    ans = with_rate_limit_retries(
-                        lambda q=q, hits=hits: generate_once(q, hits, "vote_sample_requests"),
-                        n, qid,
-                    )
-                    account(getattr(ans, "cost_usd", None))
-                    if spent() > ceiling:
-                        raise SpendCeilingReached(
-                            f"spent ${spent():.4f}, over SSR_RAG_MAX_SPEND_USD=${ceiling:.2f}"
-                        )
-                    rec = {"sample": j, **generation_fields(ans, hits),
-                           "requests": getattr(ans, "attempts", 1),
-                           "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
-                    verdict = build_row(qid, q, label, (), done[qid], rec, None)["verdict"]
-                    if not (reask_on and needs_reask(q, verdict)):
-                        rec["reask"] = None  # not needed (absent = still to fetch)
-                    recs[str(j)] = rec
-                    save_samples(spath, sig, samples)  # persisted at once, like a row
-                    vote_stats["drawn"] += 1
-                    print(f"  [{n}/{len(qids)}] q{qid:>4} vote sample {j}/{k_votes} -> "
-                          f"{verdict}", flush=True)
-                    time.sleep(vote_throttle)
-                else:
-                    vote_stats["cached"] += 1
-                verdict = build_row(qid, q, label, (), done[qid], rec, None)["verdict"]
-                if (reask_on and needs_reask(q, verdict)
-                        and not isinstance(rec.get("reask"), Mapping)):
-                    reply = with_rate_limit_retries(vote_reask_once, n, qid)
-                    account(reply.cost_usd, worst_reask)
-                    rec["reask"] = {
-                        "raw": reply.raw, "finish_reason": reply.finish_reason,
-                        "completion_tokens": reply.completion_tokens,
-                        "reasoning_tokens": reply.reasoning_tokens,
-                        "cost_usd": reply.cost_usd, "provider": reply.provider,
-                        "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                    }
-                    rec["requests"] = int(rec.get("requests") or 0) + 1
-                    save_samples(spath, sig, samples)
-                    vote_stats["reasks"] += 1
-                    print(f"  [{n}/{len(qids)}] q{qid:>4} vote sample {j}/{k_votes} re-ask -> "
-                          f"{parse_reask(reply.raw)[0]}", flush=True)
-                    time.sleep(vote_throttle)
-            except (DailyTokenBudgetExhausted, SpendCeilingReached) as e:
-                raise vote_stop(e, f"sample {j}") from None
-            except Exception as e:
-                if _is_fatal(e):
-                    raise vote_stop(e, f"sample {j}") from None
-                # Not cached (or its re-ask still pending): a re-run retries it.
-                vote_stats["failed"] += 1
-                print(f"  [{n}/{len(qids)}] q{qid:>4} vote sample {j}/{k_votes} FAILED "
-                      f"({type(e).__name__})", flush=True)
-                time.sleep(vote_throttle)
-
-        row1 = final.get(qid) or {**done[qid], "reask_attempted": False}
-        by_sample = {1: row1}
-        for j in range(2, k_votes + 1):
-            if (rec := recs.get(str(j))) is not None and (
-                r := sample_row(done[qid], q, label, rec, reask_on)
-            ) is not None:
-                by_sample[j] = r
-        if len(by_sample) < k_votes:
-            missing_vote_samples.append(qid)
-        chosen, block = combine_sample_rows(k_votes, by_sample)
-        if chosen == 1:
-            vote_rows[qid] = {**row1, "vote": block}
-            continue
-        rec = recs[str(chosen)]
-        scores = None
-        if not skip_judge:
-            scores = rec.get("judge") if isinstance(rec.get("judge"), Mapping) else None
-            if scores is None:
-                try:
-                    judge_calls += 1
-                    scores = with_rate_limit_retries(
-                        lambda q=q, hits=hits, text=rec["answer"]: judge_once(q, hits, text), n, qid,
-                    )
-                except DailyTokenBudgetExhausted as e:
-                    raise vote_stop(e, f"judging sample {chosen}") from None
-                except Exception as e:
-                    if _is_fatal(e):
-                        raise vote_stop(e, f"judging sample {chosen}") from None
-                    # The verdict stands (the served sample has one); only its judge
-                    # scores are missing. Not cached: a re-run retries the judge call.
-                    parse_failures += isinstance(e, JudgeParseError)
-                    vote_judge_failed.append(qid)
-                    print(f"  [{n}/{len(qids)}] q{qid:>4} vote judge FAILED ({type(e).__name__})",
-                          flush=True)
-                else:
-                    rec["judge"] = dict(scores)
-                    save_samples(spath, sig, samples)
-                    vote_stats["rejudged"] += 1
-                time.sleep(vote_throttle)
-        vote_rows[qid] = {**sample_row(done[qid], q, label, rec, reask_on, scores), "vote": block}
-
     # Sample order, resumed rows included; every row says whether the re-ask fired.
     rows = [
-        vote_rows.get(q) or final.get(q) or {**done[q], "reask_attempted": False}
+        final.get(q) or {**done[q], "reask_attempted": False}
         for q in qids if q in done
     ]
     missing_ids = [q for q in qids if q not in done]
@@ -2773,28 +2167,7 @@ def main(argv: Sequence[str] = ()) -> None:
             f"{reask_cache_path(dataset)}.\nRe-run the same command: only the missing claims "
             f"(and failed re-asks) run."
         )
-    agg = aggregate(rows, gen_ep.model, judge_ep.model, gen_ep.provider, judge_ep.provider,
-                    judge_skipped=skip_judge)
-    votes_meta = None
-    if k_votes > 1:
-        votes_meta = {
-            "k": k_votes,
-            "rule": VOTE_RULE,
-            "samples_cache": str(spath),
-            # The vote's own identity: the base signature (which names the checkpoint and
-            # the samples cache, shared across k) + k + the rule.
-            "vote_signature": rag_signature({**sig_fields, "votes": k_votes, "vote_rule": VOTE_RULE}),
-            "samples": vote_stats,
-            "judged": "a served sample other than #1 is judged once on its own reply; a "
-                      "served sample #1 keeps its judge scores",
-        }
-    vote_out = {} if k_votes <= 1 else {
-        # Claims voted over fewer than k samples (a sample failed this session and is not
-        # cached; re-running the same command draws it), and claims whose served sample's
-        # judge call failed (verdict kept, judge fields None).
-        "missing_vote_samples": missing_vote_samples,
-        "vote_judge_failed": vote_judge_failed,
-    }
+    agg = aggregate(rows, gen_ep.model, judge_ep.model, gen_ep.provider, judge_ep.provider)
     out.mkdir(parents=True, exist_ok=True)
     (out / "rag.json").write_text(
         json.dumps(
@@ -2806,7 +2179,6 @@ def main(argv: Sequence[str] = ()) -> None:
                 # Sampled claims with no row (never on a canonical run, which refuses to
                 # write then): the aggregates above are over n = sampled - missing.
                 "missing_query_ids": missing_ids,
-                **vote_out,
                 "judge_calls": judge_calls,
                 "cost": {
                     "reported_usd": round(reported, 6),
@@ -2821,8 +2193,7 @@ def main(argv: Sequence[str] = ()) -> None:
                 # Provenance + per-query detail go after the aggregates, so the headline
                 # fields keep their place at the top of the file.
                 "run": {
-                    **run_metadata(gen_ep, judge_ep, dataset=dataset, n_requested=n_label,
-                                   judge_skipped=skip_judge, votes=votes_meta, context=context),
+                    **run_metadata(gen_ep, judge_ep, dataset=dataset, n_requested=n_label),
                     "n_sample": len(qids),
                     "eval_limit": limit,
                     "canonical": canonical,
@@ -2832,8 +2203,7 @@ def main(argv: Sequence[str] = ()) -> None:
                     "reask_replies": reask_stats,
                     # LLM requests actually sent THIS session (a resumed run's earlier
                     # sessions are not included): first-pass generation attempts, pass-3
-                    # re-asks, judge calls (retries included), and the vote's extra samples
-                    # (their attempts + their own re-asks). A failed call counts once.
+                    # re-asks and judge calls (retries included). A failed call counts once.
                     "requests_this_session": session,
                 },
                 "rows": rows,
@@ -2842,8 +2212,7 @@ def main(argv: Sequence[str] = ()) -> None:
         )
     )
     (out / "rag.md").write_text(
-        _context_banner(context)
-        + _markdown(agg, skipped, parse_failures, dataset, rows, missing=len(missing_ids))
+        _markdown(agg, skipped, parse_failures, dataset, rows, missing=len(missing_ids))
     )
     print(
         f"\nn={agg['n']}  verdict_accuracy={agg['verdict_accuracy']}  "
@@ -2859,17 +2228,7 @@ def main(argv: Sequence[str] = ()) -> None:
         f"{reask_stats['cached']} cached, {reask_stats['fetched']} fetched, "
         f"{reask_stats['failed']} failed)  "
         f"cost=${reported:.4f} reported (${counted:.4f} counted)"
-        + (f"  votes(k={k_votes}): splits={agg['votes']['splits']} "
-           f"changed_vs_sample1={agg['votes']['changed_vs_sample1']} "
-           f"sample_accuracy={agg['votes']['sample_accuracy']} "
-           f"({vote_stats['drawn']} samples drawn, {vote_stats['cached']} cached, "
-           f"{vote_stats['failed']} failed, {vote_stats['rejudged']} re-judged)"
-           if agg.get("votes") else "")
     )
-    if missing_vote_samples:
-        print(f"\nINCOMPLETE VOTE: {len(missing_vote_samples)} claims were voted over fewer than "
-              f"{k_votes} samples: {', '.join(missing_vote_samples)}. Re-running the same command "
-              f"draws only the missing samples.")
     if missing_ids:
         bar = "!" * 88
         print(

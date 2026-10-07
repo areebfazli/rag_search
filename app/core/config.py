@@ -279,20 +279,6 @@ class Settings(BaseSettings):
     # 0 broken, p=0.016; it fired on 15 of 300. With a paid generator it costs one more
     # paid call on those replies. A rag_eval run with it off is never canonical.
     llm_reask: bool = True
-    # SSR_LLM_VOTES: self-consistency majority vote over k generations, for CLAIMS only
-    # (generator.looks_like_claim; a question always gets one generation). Each sample is
-    # the full single-sample pipeline (truncation retry + its own re-ask); the verdict is
-    # the plurality of the samples' verdicts (generator.combine_votes: a tie goes to the
-    # lowest-index tied sample). /answer cost and latency grow up to k x, minus an early
-    # stop once one verdict has a strict majority of k. Default 1 = no vote (unchanged
-    # behaviour). Opt-in, see rag_eval (SSR_LLM_VOTES there draws all k samples, cached).
-    llm_votes: int = Field(default=1, ge=1, le=5)
-    # SSR_LLM_PROMPT_VARIANT: which product system prompt the generator sends
-    # (prompts.PROMPT_VARIANTS). "default" is prompts.SYSTEM, the prompt every committed
-    # number was measured with; "finding" adds prompts.FINDING_RULE (judge a claim by its
-    # main finding, not its exact wording). Opt-in; a rag_eval run with a non-default
-    # variant is never canonical (its prompt hash, cache keys and run dir all differ).
-    llm_prompt_variant: Literal["default", "finding"] = "default"
     # RAG-eval judge on the "groq" provider (openrouter_judge_model is the same model's
     # free OpenRouter variant). Deliberately a different model FAMILY from the generator,
     # not just a smaller size: same-family judging compounds shared preferences.

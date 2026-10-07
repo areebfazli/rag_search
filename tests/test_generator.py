@@ -1240,140 +1240,7 @@ def test_a_verdict_line_with_grouped_citations_parses(line):
     assert split_verdict(f"Prose [1].\n{line}") == ("Prose [1].", "SUPPORTED")
 
 
-# --- opt-in self-consistency vote (settings.llm_votes) ---------------------------------------
-
-from app.generate import prompts  # noqa: E402
-from app.generate.generator import (  # noqa: E402
-    VoteResult,
-    combine_votes,
-)
-
-S, R, N = "SUPPORTED", "REFUTED", "NOT ENOUGH EVIDENCE"
-
-
-@pytest.mark.parametrize("verdicts, want", [
-    ([S, S, S], VoteResult(S, 0, {S: 3}, "3", False, 0)),
-    # 2-1: the majority, served from its LOWEST-index sample.
-    ([R, S, S], VoteResult(S, 1, {R: 1, S: 2}, "2-1", False, 0)),
-    ([S, R, S], VoteResult(S, 0, {S: 2, R: 1}, "2-1", False, 0)),
-    # 1-1-1: a tie goes to sample #1.
-    ([N, S, R], VoteResult(N, 0, {N: 1, S: 1, R: 1}, "1-1-1", True, 0)),
-    # 1-1 with an abstaining sample: the lowest-index tied sample.
-    ([None, R, S], VoteResult(R, 1, {R: 1, S: 1}, "1-1", True, 1)),
-    ([S, None, R], VoteResult(S, 0, {S: 1, R: 1}, "1-1", True, 1)),
-    # Sample #1 has no verdict and samples 2, 3 agree: sample 2 (0-based 1) is served.
-    ([None, S, S], VoteResult(S, 1, {S: 2}, "2", False, 1)),
-    ([None, None, R], VoteResult(R, 2, {R: 1}, "1", False, 2)),
-    # No verdict anywhere: sample #1, unchanged.
-    ([None, None, None], VoteResult(None, 0, {}, "", False, 3)),
-])
-def test_combine_votes_is_the_frozen_rule(verdicts, want):
-    assert combine_votes(verdicts) == want
-
-
-def _voter(replies, votes=3, reask=False, completions=None):
-    gen = LLMGenerator(model="m", base_url="http://localhost:1", api_key="k",
-                       reasoning_effort="", reask=reask, votes=votes)
-    gen.client = SimpleNamespace(chat=SimpleNamespace(
-        completions=completions or _FakeCompletions(replies)))
-    return gen
-
-
-CLAIM = "Aspirin reduces stroke risk."
-
-
-def test_vote_stops_early_once_a_verdict_has_a_strict_majority():
-    gen = _voter([("Yes [1].\nVerdict: SUPPORTED", "stop")] * 3)
-    ans = gen.generate(CLAIM, _hits(2))
-    assert gen.client.chat.completions.calls == 2  # 2 of 3 agree: the 3rd cannot change it
-    assert (ans.verdict, ans.votes, ans.vote_verdicts, ans.vote_split) == (S, 3, [S, S], "2")
-    assert ans.vote_chosen == 0 and ans.text == "Yes [1]." and ans.warnings == []
-
-
-def test_vote_draws_all_k_on_disagreement_and_serves_the_majority_sample():
-    gen = _voter([("A [1].\nVerdict: SUPPORTED", "stop"), ("B [2].\nVerdict: REFUTED", "stop"),
-                  ("C [1].\nVerdict: REFUTED", "stop")])
-    ans = gen.generate(CLAIM, _hits(2))
-    assert gen.client.chat.completions.calls == 3
-    assert ans.verdict == R and ans.vote_chosen == 1 and ans.vote_split == "2-1"
-    assert ans.text == "B [2]." and ans.citations == ["doc1"]  # the chosen sample's own
-    assert ans.vote_counts == {S: 1, R: 2}
-
-
-def test_vote_tie_keeps_sample_one():
-    gen = _voter([("A.\nVerdict: SUPPORTED", "stop"), ("B.\nVerdict: REFUTED", "stop"),
-                  ("C.\nVerdict: NOT ENOUGH EVIDENCE", "stop")])
-    ans = gen.generate(CLAIM, _hits(1))
-    assert ans.verdict == S and ans.vote_chosen == 0 and ans.vote_split == "1-1-1"
-
-
-def test_a_question_never_gets_extra_calls():
-    gen = _voter([("It does [1].", "stop")] * 3)
-    ans = gen.generate("Does aspirin reduce stroke risk?", _hits(2))
-    assert gen.client.chat.completions.calls == 1
-    assert ans.votes == 1 and ans.vote_verdicts is None
-
-
-def test_votes_one_is_exactly_the_single_answer(monkeypatch):
-    from app.core.config import settings
-
-    monkeypatch.setattr(settings, "llm_votes", 1)
-    replies = [("No idea.", "stop"), ("Verdict: SUPPORTED", "stop")]
-    one = _voter(replies, votes=1, reask=True)
-    default = _voter(replies, votes=None, reask=True)  # None -> settings.llm_votes (1)
-    a, b = one.generate(CLAIM, _hits(2)), default.generate(CLAIM, _hits(2))
-    assert a == b and a.votes == 1 and a.vote_verdicts is None
-    assert one.client.chat.completions.requests == default.client.chat.completions.requests
-    assert one.client.chat.completions.calls == 2  # generation + its re-ask, as before
-
-
-def test_each_sample_gets_its_own_reask():
-    gen = _voter([("No idea.", "stop"), ("Verdict: SUPPORTED", "stop"),
-                  ("Yes [1].\nVerdict: SUPPORTED", "stop")], reask=True)
-    ans = gen.generate(CLAIM, _hits(2))
-    reqs = gen.client.chat.completions.requests
-    assert [r["max_tokens"] for r in reqs][1] == REASK_MAX_TOKENS  # sample 1's own re-ask
-    assert len(reqs) == 3 and ans.vote_verdicts == [S, S]
-    assert ans.vote_chosen == 0 and ans.verdict_source == "reask"
-
-
-def _ok(text):
-    return SimpleNamespace(
-        choices=[SimpleNamespace(message=SimpleNamespace(content=text), finish_reason="stop")],
-        usage=None)
-
-
-def test_a_failed_sample_is_skipped_with_a_warning():
-    items = [_ok("A.\nVerdict: SUPPORTED"), APITimeoutError(request=None), _ok("B.\nVerdict: SUPPORTED")]
-    gen = _voter(None, completions=_RaisingCompletions(items))
-    ans = gen.generate(CLAIM, _hits(1))
-    assert gen.client.chat.completions.calls == 3
-    assert ans.verdict == S and ans.vote_verdicts == [S, S] and ans.vote_errors == ["APITimeoutError"]
-    assert len(ans.warnings) == 1 and "1 of 3 vote samples failed" in ans.warnings[0]
-    assert ans.cost_usd is None  # the timed-out call may have been billed: unknown
-
-
-def test_every_sample_failing_raises():
-    errs = [APITimeoutError(request=None) for _ in range(3)]
-    gen = _voter(None, completions=_RaisingCompletions(errs))
-    with pytest.raises(APITimeoutError):
-        gen.generate(CLAIM, _hits(1))
-    assert gen.client.chat.completions.calls == 3
-
-
-def test_vote_cost_sums_every_drawn_sample():
-    def priced(text, cost):
-        r = _ok(text)
-        r.usage = SimpleNamespace(cost=cost)
-        return r
-
-    items = [priced("A.\nVerdict: SUPPORTED", 0.001), priced("B.\nVerdict: REFUTED", 0.002),
-             priced("C.\nVerdict: REFUTED", 0.004)]
-    ans = _voter(None, completions=_RaisingCompletions(items)).generate(CLAIM, _hits(1))
-    assert ans.cost_usd == pytest.approx(0.007) and ans.vote_chosen == 1
-
-
-# --- opt-in prompt variant "finding" (settings.llm_prompt_variant) -----------------------------
+# --- the product system prompt ------------------------------------------------------------
 
 SYSTEM_SHA256 = "f7a590b55959c08db24e2507688ebf73e83b4a6eddb70e4599fd1021c7b05721"
 
@@ -1382,26 +1249,9 @@ def test_default_system_prompt_is_byte_identical():
     import hashlib
 
     assert hashlib.sha256(SYSTEM.encode()).hexdigest() == SYSTEM_SHA256
-    assert prompts.system_prompt("default") is SYSTEM
 
 
-def test_finding_variant_inserts_the_rule_once_after_the_nei_sentence():
-    f = prompts.system_prompt("finding")
-    assert f.count(prompts.FINDING_RULE) == 1 and f.replace(prompts.FINDING_RULE + " ", "") == SYSTEM
-    assert ("neither supports nor refutes the claim. " + prompts.FINDING_RULE
-            + " For an ordinary question, do not add a verdict line.") in f
-    with pytest.raises(KeyError):
-        prompts.system_prompt("bogus")
-
-
-def test_generator_sends_the_variants_system_message(monkeypatch):
-    from app.core.config import settings
-
-    for variant, want in (("default", SYSTEM), ("finding", prompts.SYSTEM_FINDING)):
-        monkeypatch.setattr(settings, "llm_prompt_variant", variant)
-        gen = _generator("Yes [1].\nVerdict: SUPPORTED")
-        gen.generate(CLAIM, _hits(1))
-        assert gen.client.chat.completions.requests[0]["messages"][0]["content"] == want
-    explicit = LLMGenerator(model="m", base_url="http://localhost:1", api_key="k",
-                            prompt_variant="default")
-    assert explicit.system == SYSTEM  # an explicit argument wins over the setting
+def test_generator_sends_the_product_system_message():
+    gen = _generator("Yes [1].\nVerdict: SUPPORTED")
+    gen.generate("Aspirin reduces stroke risk.", _hits(1))
+    assert gen.client.chat.completions.requests[0]["messages"][0]["content"] == SYSTEM
