@@ -27,7 +27,7 @@ import json
 import re
 import unicodedata
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from openai import APIStatusError, OpenAI, OpenAIError
 
@@ -620,7 +620,6 @@ REASK_NOTE_NO_VERDICT = (
     "[No explanation available: the model's answer had no usable verdict line, so this "
     "verdict comes from a second, verdict-only check of the same passages.]"
 )
-REASK_NOTES = (REASK_NOTE, REASK_NOTE_NO_VERDICT)
 
 
 def needs_reask(query: str, verdict: str | None) -> bool:
@@ -794,8 +793,6 @@ class GeneratedAnswer(Answer):
     reask_attempted: bool = False
     reask: ReaskReply | None = None
     reask_error: str | None = None
-    # Short notes for the API response (main.py merges getattr(ans, "warnings")).
-    warnings: list[str] = field(default_factory=list)
 
 
 # Sent with every generation and re-ask request (the value every committed number was

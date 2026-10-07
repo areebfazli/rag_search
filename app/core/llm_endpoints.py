@@ -173,10 +173,6 @@ class LLMEndpoint:
     model: str
     api_key: str = field(default="", repr=False, compare=False)
 
-    @property
-    def key_env(self) -> str:
-        return KEY_ENV[self.provider]
-
     def extra_body(self) -> dict:
         """Provider-specific request fields every call to this endpoint must carry."""
         if not is_openrouter(self.base_url):

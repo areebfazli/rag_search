@@ -8,7 +8,6 @@ from __future__ import annotations
 import ipaddress
 import re
 import threading
-from collections.abc import Iterable
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -122,15 +121,6 @@ def _to_hits(hits) -> list[Hit]:
     ]
 
 
-def _add_warnings(warnings: list[str], extra: Iterable | None) -> list[str]:
-    """Append `extra` strings to `warnings`, de-duplicated, first occurrence kept."""
-    if isinstance(extra, str):  # one bare string, not an iterable of characters
-        extra = [extra]
-    merged = list(dict.fromkeys([*warnings, *(w for w in extra or [] if isinstance(w, str) and w)]))
-    warnings[:] = merged
-    return warnings
-
-
 # An exception CLASS name (what generator.reask_error records) — anything else is dropped
 # from the warning text, so a raw message or a key fragment can never reach a client.
 _ERROR_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
@@ -188,7 +178,6 @@ def answer(
     except (MissingApiKey, EndpointConfigError, SpendPolicyError) as e:
         raise HTTPException(status_code=503, detail=f"LLM not configured ({e})")
     hits = _retrieve(q, mode, top_k)
-    warnings: list[str] = []
     try:
         ans = get_generator().generate(q, hits)  # network call — safe outside the lock
     except OpenAIError as e:  # bad key, model gone, provider down — not a server bug
@@ -196,8 +185,6 @@ def answer(
     except EmptyCompletionError:  # HTTP 200 with no choices: an upstream failure too
         raise HTTPException(status_code=502, detail="LLM backend returned no completion")
     reask_warning = _reask_warning(ans)
-    _add_warnings(warnings, [reask_warning] if reask_warning else None)
-    _add_warnings(warnings, getattr(ans, "warnings", None))
     return AnswerResponse(
         query=q,
         answer=ans.text,
@@ -205,5 +192,5 @@ def answer(
         hits=_to_hits(hits),
         verdict=ans.verdict,
         verdict_source=getattr(ans, "verdict_source", None),  # GeneratedAnswer side channel
-        warnings=warnings,
+        warnings=[reask_warning] if reask_warning else [],
     )
