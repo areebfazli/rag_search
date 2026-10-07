@@ -1,7 +1,7 @@
 """Retrieval evaluation on BEIR/SciFact gold qrels with ranx.
 
-Runs each config over the test queries and reports nDCG@10, Recall@100, MRR@10 and
-MAP@100 with paired significance tests — the headline artifact of the project.
+Runs each config over the test queries and reports nDCG@10, Recall@10, Recall@100,
+MRR@10 and MAP@100 with paired significance tests — the headline artifact of the project.
 Writes a Markdown table + JSON to eval/results/ — but only for the canonical run (full
 test split, no SSR_EVAL_LIMIT). Any other run goes to data/eval_runs/ (gitignored), so
 a smoke test can never overwrite the committed table.
@@ -55,8 +55,16 @@ CONFIGS: list[tuple[str, str, str, str | None]] = [
     ),
 ]
 
-METRICS = ["ndcg@10", "recall@100", "mrr@10", "map@100"]
-PRETTY = {"ndcg@10": "nDCG@10", "recall@100": "Recall@100", "mrr@10": "MRR@10", "map@100": "MAP@100"}
+# Metrics are computed at scoring time from the cached runs, so adding one never changes
+# a cache signature or re-runs a config.
+METRICS = ["ndcg@10", "recall@10", "recall@100", "mrr@10", "map@100"]
+PRETTY = {
+    "ndcg@10": "nDCG@10",
+    "recall@10": "Recall@10",
+    "recall@100": "Recall@100",
+    "mrr@10": "MRR@10",
+    "map@100": "MAP@100",
+}
 DEPTH = 100  # first-stage candidate depth = result depth (enough for Recall@100)
 MAX_P = 0.05  # significance threshold for the paired tests
 CHECKPOINT_EVERY = 20  # persist partial progress this often (cross-encoders are slow)

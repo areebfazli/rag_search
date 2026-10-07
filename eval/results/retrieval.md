@@ -1,12 +1,12 @@
 # Retrieval evaluation — BEIR/SciFact (300 test queries)
 
-| Config | nDCG@10 | Recall@100 | MRR@10 | MAP@100 |
-|---|---|---|---|---|
-| BM25 | 0.6863 | 0.9127 | 0.6492 | 0.6439 |
-| Dense (bge-small) | 0.7127 | 0.9417 | 0.6822 | 0.6736 |
-| Hybrid (RRF) | 0.7241 | **0.9650** | 0.6886 | 0.6816 |
-| Hybrid + rerank (MS-MARCO MiniLM) | 0.6975 | **0.9650** | 0.6632 | 0.6558 |
-| Hybrid + rerank (bge-reranker-base) | **0.7242** | **0.9650** | **0.6901** | **0.6834** |
+| Config | nDCG@10 | Recall@10 | Recall@100 | MRR@10 | MAP@100 |
+|---|---|---|---|---|---|
+| BM25 | 0.6863 | 0.8187 | 0.9127 | 0.6492 | 0.6439 |
+| Dense (bge-small) | 0.7127 | 0.8362 | 0.9417 | 0.6822 | 0.6736 |
+| Hybrid (RRF) | 0.7241 | **0.8554** | **0.9650** | 0.6886 | 0.6816 |
+| Hybrid + rerank (MS-MARCO MiniLM) | 0.6975 | 0.8322 | **0.9650** | 0.6632 | 0.6558 |
+| Hybrid + rerank (bge-reranker-base) | **0.7242** | 0.8494 | **0.9650** | **0.6901** | **0.6834** |
 
 Reranked slice: top-32 of 100 fused candidates (the tail keeps its fused order, so Recall@100 is unchanged by reranking).
 
