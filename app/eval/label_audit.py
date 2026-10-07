@@ -57,6 +57,7 @@ import csv
 import hashlib
 import io
 import json
+import math
 import re
 import sys
 import urllib.request
@@ -67,7 +68,6 @@ from pathlib import Path
 from app.core.paths import display_path, is_within
 from app.eval import rag_eval
 from app.eval.rag_eval import LABELS, _abstention, _abstention_class, _rate, verdict_scores
-from app.eval.verify_eval import wilson
 from app.ingest.corpus import ClaimLabel, load_claim_labels
 
 AUDIT_REPO = "Kefez/scifact-audit-bionlp2026"
@@ -117,6 +117,16 @@ REPORT_STEM = "rag_label_audit"
 
 _CORRECTION_KEYS = ("claim_id", "doc_id", "original_label", "corrected_label", "error_type")
 _DEBATABLE_TEX = re.compile(r"final debatable claim IDs are ([0-9,\sand]+?)\.")
+
+
+def wilson(k: int, n: int, z: float = 1.959964) -> tuple[float, float] | None:
+    if n == 0:
+        return None
+    p = k / n
+    den = 1 + z * z / n
+    c = (p + z * z / (2 * n)) / den
+    h = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / den
+    return round(c - h, 4), round(c + h, 4)
 
 
 class AuditError(ValueError):
