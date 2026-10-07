@@ -343,7 +343,7 @@
       "doc_id": "3203590",
       "rationale_doc": false,
       "hybrid_recall@100": 0.0,
-      "bm25_rank": 1893,
+      "bm25_rank": null,
       "dense_rank": 56,
       "reachable": true
     },

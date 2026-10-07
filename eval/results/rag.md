@@ -2,31 +2,31 @@
 
 300 SciFact claims (random sample, seed=13) · top_k=5 · generator=inclusionai/ling-3.0-flash-sante:free (openrouter) · judge=nvidia/nemotron-3-ultra-550b-a55b:free (openrouter)
 
-11 answers truncated at the token budget (of those, 9 got a verdict from the verdict-only re-ask, 1 kept a verdict parsed from the text before the cut-off, 1 was scored with no verdict).
+11 answers truncated at the token budget (of those, 10 got a verdict from the verdict-only re-ask, 1 was scored with no verdict).
 
 ## Answer quality (LLM judge)
 
 | Metric | Score |
 |---|---|
-| Faithfulness (over answered, n=192; 3 answered only via the re-ask excluded — the first reply hit the token budget with no text left, so the judge saw no answer text) | 0.98 |
+| Faithfulness (over answered, n=193; 3 answered only via the re-ask excluded — the first reply hit the token budget with no text left, so the judge saw no answer text) | 0.98 |
 | Context relevance (all) | 0.72 |
 
 ## Claim verdicts, scored against the gold label (no judge)
 
-The final `Verdict:` line maps SUPPORTED→SUPPORT, REFUTED→CONTRADICT, NOT ENOUGH EVIDENCE→NEI. A reply with no verdict line counts as NEI if it abstained and as `NONE` (always wrong) if it answered.
+The final `Verdict:` line maps SUPPORTED→SUPPORT, REFUTED→CONTRADICT, NOT ENOUGH EVIDENCE→NEI. A reply with no verdict line counts as NEI if it is complete and abstained, and as `NONE` (always wrong) if it answered or was cut off at the token budget / empty.
 
 | Metric | Score |
 |---|---|
 | 3-class verdict accuracy | 0.80 |
 | Verdict line parsed | 1.00 |
 | Truncated answers (hit the token budget after 1 retry) | 11 of 300 |
-| Re-asked (claim with no verdict: one verdict-only call) | 15 of 300 (14 gave a verdict) |
+| Re-asked (claim with no verdict: one verdict-only call) | 16 of 300 (15 gave a verdict) |
 
 | Gold \ predicted | SUPPORT | CONTRADICT | NEI | NONE |
 |---|---|---|---|---|
-| **SUPPORT** | 101 | 6 | 17 | 0 |
+| **SUPPORT** | 101 | 6 | 16 | 1 |
 | **CONTRADICT** | 1 | 57 | 6 | 0 |
-| **NEI** | 17 | 13 | 82 | 0 |
+| **NEI** | 18 | 13 | 81 | 0 |
 
 ## Abstention — rationale oracle (headline)
 
@@ -34,23 +34,23 @@ The final `Verdict:` line maps SUPPORTED→SUPPORT, REFUTED→CONTRADICT, NOT EN
 
 | | Evidence retrieved | No evidence |
 |---|---|---|
-| Answered | 157 | 38 |
-| Abstained | 18 (false) | 87 (correct) |
+| Answered | 157 | 39 |
+| Abstained | 18 (false) | 86 (correct) |
 
 | Metric | Score |
 |---|---|
 | Evidence retrieved | 0.58 |
 | Answered (model attempted an answer) | 0.65 |
 | Abstention precision (abstained & no evidence) | 0.83 |
-| Abstention recall (no evidence & abstained) | 0.70 |
+| Abstention recall (no evidence & abstained) | 0.69 |
 | False abstention (had evidence, still abstained) | 0.10 |
-| Answered without evidence (hallucination risk) | 0.19 |
+| Answered without evidence (hallucination risk) | 0.20 |
 
 | Gold label | n | Answered |
 |---|---|---|
 | SUPPORT | 124 | 107 |
 | CONTRADICT | 64 | 58 |
-| NEI | 112 | 30 |
+| NEI | 112 | 31 |
 
 ## Abstention — legacy qrels oracle
 
@@ -58,8 +58,8 @@ The final `Verdict:` line maps SUPPORTED→SUPPORT, REFUTED→CONTRADICT, NOT EN
 
 | | Evidence retrieved | No evidence |
 |---|---|---|
-| Answered | 173 | 22 |
-| Abstained | 62 (false) | 43 (correct) |
+| Answered | 174 | 22 |
+| Abstained | 61 (false) | 43 (correct) |
 
 | Metric | Score |
 |---|---|

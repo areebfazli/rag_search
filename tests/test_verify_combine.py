@@ -118,4 +118,11 @@ def test_committed_rows_map_to_the_rows_the_combined_runs_were_built_from():
     fp = {r["query_id"]: r for r in verify_combine.ling_first_pass(
         json.loads(verify_combine.TEST_RUN.read_text()))["rows"]}
     for r in json.loads(combined.read_text())["rows"]:
-        assert r["ling_predicted_label"] == fp[r["query_id"]]["predicted_label"]
+        f = fp[r["query_id"]]
+        if (r["ling_predicted_label"], f["predicted_label"]) == ("NEI", "NONE"):
+            # The one allowed difference: the combined runs predate 3e360cc, under which a
+            # cut-off reply with no verdict scores NONE (it used to count as an NEI
+            # abstention). Anything else is a real mismatch.
+            assert f["verdict"] is None and rag_eval._broken_reply(bool(f.get("truncated")), f.get("answer"))
+            continue
+        assert r["ling_predicted_label"] == f["predicted_label"]

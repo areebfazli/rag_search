@@ -3,16 +3,18 @@
 Offline: no LLM calls, no network. Reads a rag.json (default: the committed
 eval/results/rag.json) and never writes eval/results/.
 
-Why. In the committed run, 30 claims with gold NEI got a SUPPORT (17) or CONTRADICT (13)
-verdict. SciFact's NEI means the claim's single *cited* abstract carries no rationale;
-the system, though, retrieves from all 5,183 abstracts, and another passage may genuinely
-decide the claim (SciFact-Open, Wadden et al. 2022, documents exactly this). Whether these
-30 are model errors or label artefacts of the closed-corpus framing is an empirical
+Why. In the committed run, 31 claims with gold NEI got a SUPPORT (18) or CONTRADICT (13)
+verdict (30, 17 + 13, before the regeneration under commit 3e360cc's scoring rules, where
+claim 514's re-ask answered SUPPORTED). SciFact's NEI means the claim's single *cited*
+abstract carries no rationale; the system, though, retrieves from all 5,183 abstracts, and
+another passage may genuinely decide the claim (SciFact-Open, Wadden et al. 2022, documents
+exactly this). Whether these
+disagreements are model errors or label artefacts of the closed-corpus framing is an empirical
 question, so a human labels each claim against exactly the passages the generator saw.
 
 Blindness. The labeller sees only the claim and its retrieved passages — never the
 model's verdict or answer, the gold label, the citations, the claim id or the doc ids —
-and the 30 disagreements are mixed with controls the model got right (default 30 NEI-gold
+and the disagreements are mixed with controls the model got right (default 30 NEI-gold
 claims predicted NEI, 20 SUPPORT/CONTRADICT-gold claims predicted correctly, 10 + 10),
 sampled and shuffled under a fixed seed, so the item mix does not reveal which are which.
 Item ids are opaque seeded tokens, unrelated to the claim id. The mapping lives in a

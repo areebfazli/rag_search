@@ -1,39 +1,39 @@
 {
   "n": 300,
   "evidence_rate": 0.5833,
-  "answered_rate": 0.65,
-  "abstention_precision": 0.8286,
-  "abstention_recall": 0.696,
+  "answered_rate": 0.6533,
+  "abstention_precision": 0.8269,
+  "abstention_recall": 0.688,
   "false_abstention_rate": 0.1029,
-  "answered_without_evidence_rate": 0.1949,
+  "answered_without_evidence_rate": 0.199,
   "oracle": "rationale",
   "quadrants": {
     "answered_with_evidence": 157,
-    "answered_without_evidence": 38,
+    "answered_without_evidence": 39,
     "false_abstention": 18,
-    "correct_abstention": 87
+    "correct_abstention": 86
   },
   "qrels_oracle": {
     "evidence_rate": 0.7833,
-    "abstention_precision": 0.4095,
+    "abstention_precision": 0.4135,
     "abstention_recall": 0.6615,
-    "false_abstention_rate": 0.2638,
-    "answered_without_evidence_rate": 0.1128,
+    "false_abstention_rate": 0.2596,
+    "answered_without_evidence_rate": 0.1122,
     "quadrants": {
-      "answered_with_evidence": 173,
+      "answered_with_evidence": 174,
       "answered_without_evidence": 22,
-      "false_abstention": 62,
+      "false_abstention": 61,
       "correct_abstention": 43
     }
   },
-  "verdict_accuracy": 0.8,
+  "verdict_accuracy": 0.7967,
   "verdict_parsed_rate": 0.9967,
   "confusion": {
     "SUPPORT": {
       "SUPPORT": 101,
       "CONTRADICT": 6,
-      "NEI": 17,
-      "NONE": 0
+      "NEI": 16,
+      "NONE": 1
     },
     "CONTRADICT": {
       "SUPPORT": 1,
@@ -42,9 +42,9 @@
       "NONE": 0
     },
     "NEI": {
-      "SUPPORT": 17,
+      "SUPPORT": 18,
       "CONTRADICT": 13,
-      "NEI": 82,
+      "NEI": 81,
       "NONE": 0
     }
   },
@@ -54,11 +54,11 @@
   "verdict_sources": {
     "line": 257,
     "inline": 10,
-    "stance": 18,
-    "reask": 14
+    "stance": 17,
+    "reask": 15
   },
-  "reasked_answers": 15,
-  "reask_verdicts": 14,
+  "reasked_answers": 16,
+  "reask_verdicts": 15,
   "evidence_quotes": {
     "found": {
       "n": 0,
@@ -74,12 +74,12 @@
     },
     "unknown": {
       "n": 300,
-      "verdict_accuracy": 0.8
+      "verdict_accuracy": 0.7967
     }
   },
-  "judge_verdict_agreement": 0.8796,
-  "faithfulness_answered": 0.9841,
-  "faithfulness_n": 192,
+  "judge_verdict_agreement": 0.8763,
+  "faithfulness_answered": 0.979,
+  "faithfulness_n": 193,
   "faithfulness_unjudged_reask": 3,
   "context_relevance": 0.717,
   "by_label": {
@@ -93,7 +93,7 @@
     },
     "NEI": {
       "n": 112,
-      "answered": 30
+      "answered": 31
     }
   },
   "generator_model": "inclusionai/ling-3.0-flash-sante:free",
@@ -105,6 +105,7 @@
   "skipped": 0,
   "skip_reasons": {},
   "judge_parse_failures": 0,
+  "missing_query_ids": [],
   "judge_calls": 302,
   "cost": {
     "reported_usd": 0.0,
@@ -115,7 +116,7 @@
     "judge_reported_usd": 0.0
   },
   "run": {
-    "git_sha": "a8a67c632d483a7d1e06733193dbf811f9959b25",
+    "git_sha": "aa98231e93780e9a179bb1411b65f37e78172851",
     "dataset": "beir/scifact/test",
     "prompt_hash": "d0921f4e69fc32f9da7ab88f4f7c88bc3cb25591bc5db11793807133c4bbd78b",
     "judge_prompt_hash": "62bb62544847d70bb5839669e2974f9e79aca5311745d5660a6746261448d86f",
@@ -167,6 +168,7 @@
       "source_zip_sha256": "536e14446a0ba56ed1398ab1055f39fe852686ecad24a6306c80c490fa8e0165"
     },
     "answered_source": "verdict line when parsed (answered = verdict != NOT ENOUGH EVIDENCE); the judge's `answered` field only when no verdict line was parsed",
+    "no_verdict_scoring": "nei_only_if_complete",
     "reask": {
       "enabled": true,
       "prompt_hash": "a54c51382d6abf1b3689dd3587c732ca18216c91badad3d6983d264354176717",
@@ -182,7 +184,7 @@
     "reask_cache": "data/eval_cache/secondlook/beir-scifact-test.json",
     "reask_replies": {
       "cached": 15,
-      "fetched": 0,
+      "fetched": 1,
       "failed": 0
     }
   },
@@ -1131,7 +1133,7 @@
       "first_pass": {
         "verdict": null,
         "verdict_source": null,
-        "predicted_label": "NEI",
+        "predicted_label": "NONE",
         "answered": false,
         "answered_source": "judge",
         "abstention_class": "false_abstention",
@@ -1523,7 +1525,7 @@
       "first_pass": {
         "verdict": null,
         "verdict_source": null,
-        "predicted_label": "NEI",
+        "predicted_label": "NONE",
         "answered": false,
         "answered_source": "judge",
         "abstention_class": "correct_abstention",
@@ -4027,7 +4029,7 @@
       "first_pass": {
         "verdict": null,
         "verdict_source": null,
-        "predicted_label": "NEI",
+        "predicted_label": "NONE",
         "answered": false,
         "answered_source": "judge",
         "abstention_class": "false_abstention",
@@ -4340,17 +4342,17 @@
       "qrels_doc_ids": [
         "16256507"
       ],
-      "verdict": "NOT ENOUGH EVIDENCE",
-      "predicted_label": "NEI",
-      "answered": false,
-      "answered_source": "verdict",
+      "verdict": "SUPPORTED",
+      "predicted_label": "SUPPORT",
+      "answered": true,
+      "answered_source": "reask",
       "judge_answered": false,
       "faithfulness": 0.0,
       "context_relevance": 0.6,
       "evidence": false,
       "evidence_qrels": true,
-      "abstention_class": "correct_abstention",
-      "abstention_class_qrels": "false_abstention",
+      "abstention_class": "answered_without_evidence",
+      "abstention_class_qrels": "answered_with_evidence",
       "answer": "The context does not provide sufficient evidence to support or refute the claim. Passage [2] indicates that adequate vitamin D status makes calcium intakes above 800 mg\n\n[Answer truncated: the model ran out of its token budget.]",
       "cited_doc_ids": [
         "16256507"
@@ -4369,8 +4371,32 @@
       "reasoning_tokens": 4015,
       "generation_cost_usd": 0.0,
       "generation_provider": "Novita",
-      "verdict_source": "stance",
-      "reask_attempted": false
+      "verdict_source": "reask",
+      "reask_attempted": true,
+      "reask": {
+        "raw": "Verdict: SUPPORTED [2]",
+        "parsed": "SUPPORTED",
+        "parse_source": "line",
+        "finish_reason": "stop",
+        "completion_tokens": 732,
+        "reasoning_tokens": 728,
+        "cost_usd": 0.0,
+        "provider": "Novita"
+      },
+      "first_pass": {
+        "verdict": null,
+        "verdict_source": null,
+        "predicted_label": "NONE",
+        "answered": false,
+        "answered_source": "judge",
+        "abstention_class": "correct_abstention",
+        "abstention_class_qrels": "false_abstention",
+        "answer": "The context does not provide sufficient evidence to support or refute the claim. Passage [2] indicates that adequate vitamin D status makes calcium intakes above 800 mg\n\n[Answer truncated: the model ran out of its token budget.]",
+        "cited_doc_ids": [
+          "16256507"
+        ]
+      },
+      "judge_scored_placeholder": false
     },
     {
       "query_id": "129",
@@ -7166,7 +7192,7 @@
       "first_pass": {
         "verdict": null,
         "verdict_source": null,
-        "predicted_label": "NEI",
+        "predicted_label": "NONE",
         "answered": false,
         "answered_source": "judge",
         "abstention_class": "correct_abstention",
@@ -8124,7 +8150,7 @@
         "7873737"
       ],
       "verdict": null,
-      "predicted_label": "NEI",
+      "predicted_label": "NONE",
       "answered": false,
       "answered_source": "judge",
       "judge_answered": false,
@@ -8215,7 +8241,7 @@
       "first_pass": {
         "verdict": null,
         "verdict_source": null,
-        "predicted_label": "NEI",
+        "predicted_label": "NONE",
         "answered": false,
         "answered_source": "judge",
         "abstention_class": "false_abstention",
@@ -8361,7 +8387,7 @@
       "first_pass": {
         "verdict": null,
         "verdict_source": null,
-        "predicted_label": "NEI",
+        "predicted_label": "NONE",
         "answered": false,
         "answered_source": "judge",
         "abstention_class": "correct_abstention",
@@ -11474,7 +11500,7 @@
       "first_pass": {
         "verdict": null,
         "verdict_source": null,
-        "predicted_label": "NEI",
+        "predicted_label": "NONE",
         "answered": false,
         "answered_source": "judge",
         "abstention_class": "correct_abstention",
@@ -12018,7 +12044,7 @@
       "first_pass": {
         "verdict": null,
         "verdict_source": null,
-        "predicted_label": "NEI",
+        "predicted_label": "NONE",
         "answered": false,
         "answered_source": "judge",
         "abstention_class": "false_abstention",
@@ -12581,7 +12607,7 @@
       "first_pass": {
         "verdict": null,
         "verdict_source": null,
-        "predicted_label": "NEI",
+        "predicted_label": "NONE",
         "answered": false,
         "answered_source": "judge",
         "abstention_class": "correct_abstention",

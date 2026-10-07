@@ -23,17 +23,19 @@ back when the papers lack evidence. A second model (Nemotron 3 Ultra) checks fai
 ## Results
 
 All on the 300 SciFact test claims, default settings. The web row used the evaluation's web
-settings, which differ from the API's ([details](docs/DETAILS.md#web-search-semantic-scholar-and-pubmed)).
+settings, which differ from the API's, and predates the keyword-rewrite fixes in commit aa98231,
+which change the query for 56 of the 300 claims and have not been re-measured on them yet
+([details](docs/DETAILS.md#web-search-semantic-scholar-and-pubmed)).
 
 | What is measured | Result | Source |
 |---|---|---|
 | Right paper among the top 10 results (Recall@10) | 0.855 | [`web_retrieval.md`](eval/results/web_retrieval.md) (local hybrid row) |
 | Right paper among the top 100 results (Recall@100) | 0.965 | [`retrieval.md`](eval/results/retrieval.md) |
 | Ranking quality (nDCG@10) | 0.724 | [`retrieval.md`](eval/results/retrieval.md) |
-| Correct verdict (support / refute / not enough evidence) | **0.80** (240 of 300; 95% CI 0.751–0.841) | [`rag.md`](eval/results/rag.md), [`rag_label_audit.md`](eval/results/rag_label_audit.md) |
-| Correct verdict under published label corrections (one-sided check) | 0.837 | [`rag_label_audit.md`](eval/results/rag_label_audit.md) |
+| Correct verdict (support / refute / not enough evidence) | **0.80** (239 of 300 = 0.797; 95% CI 0.748–0.838) | [`rag.md`](eval/results/rag.md), [`rag_label_audit.md`](eval/results/rag_label_audit.md) |
+| Correct verdict under published label corrections (one-sided check) | 0.830 | [`rag_label_audit.md`](eval/results/rag_label_audit.md) |
 | Answers that cite at least one paper | 282 of 300 (94%) | [`rag.json`](eval/results/rag.json) |
-| Answers that stick to the papers (faithfulness, LLM judge, 192 answers) | 0.98 | [`rag.md`](eval/results/rag.md) |
+| Answers that stick to the papers (faithfulness, LLM judge, 193 answers) | 0.98 | [`rag.md`](eval/results/rag.md) |
 | Search time per query (laptop CPU) | 0.124 s | [`latency.md`](eval/results/latency.md) |
 | Cost of a full 300-claim evaluation run | $0 | [`rag.json`](eval/results/rag.json) (`cost`) |
 | Web search (Semantic Scholar + PubMed): right paper in top 5 / top 100 | 0.228 / 0.384 (local search: 0.766 / 0.965) | [`web_retrieval.md`](eval/results/web_retrieval.md) |
@@ -53,8 +55,9 @@ settings, which differ from the API's ([details](docs/DETAILS.md#web-search-sema
   out) and cited papers far less often.
 - **Some of the dataset's own answers are wrong.** A published 2026 audit corrects 11 of the 300
   test labels (about 4%) and calls 8 more debatable; scored against the corrections, accuracy is
-  0.84. The audit skipped the no-evidence claims and all 11 changes happened to favour the
-  model, so this is a one-sided check; the headline keeps the original labels.
+  0.83 (0.84 with the debatable ones left out). The audit skipped the no-evidence claims, and of
+  the 11 changes 10 favour the model and none goes against it, so this is a one-sided check; the
+  headline keeps the original labels.
 - **Tried, measured, not adopted:** an evidence-first prompt, two verifier models and a
   "second look" step; none beat the current pipeline
   ([details](docs/DETAILS.md#tried-and-measured-not-adopted)).
@@ -91,7 +94,7 @@ allows one process.
 | Command | What it does |
 |---|---|
 | `make eval` | Search quality on the 300 test claims → `eval/results/retrieval.md` (no API key) |
-| `SSR_RAG_N=all make eval-rag` | Full answer-quality run on 300 claims → `eval/results/rag.md`; ~670 free requests, about 1.5 hours. Add `SSR_RAG_CHECK_QUOTA=1` to stop up front if today's free quota is short |
+| `SSR_RAG_N=all make eval-rag` | Full answer-quality run on 300 claims → `eval/results/rag.md`; ~670 free requests, about 1.5 hours. Add `SSR_RAG_CHECK_QUOTA=1` to stop up front if today's free quota is short. Only this full run on the default models writes there (and only once every claim is scored); a smaller or modified run, including the default `make eval-rag` (50 claims), goes to `data/eval_runs/` |
 | `make rag-compare A=a/rag.json B=b/rag.json` | Claim-by-claim significance test between two answer runs |
 | `make rag-audit` | Re-score answers under the published label corrections (offline, no LLM) |
 | `make web-eval` | Web search (Semantic Scholar + PubMed) vs local search (a few thousand requests at 1 per second; set the S2 key) |

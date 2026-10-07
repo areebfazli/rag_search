@@ -25,8 +25,8 @@ BEIR/SciFact, 300 test queries, gold qrels. Bold is best per column.
 | Hybrid + rerank (MS-MARCO MiniLM) | 0.6975 | **0.9650** |
 | Hybrid + rerank (bge-reranker-base) | **0.7242** | **0.9650** |
 
-RAG answers (Ling 3.0 Flash Sante, free, 300 test claims): **verdict accuracy 0.80** (95% CI
-0.751–0.841), faithfulness 0.98 (LLM judge), abstention precision 0.83; see [Grounded answers](#grounded-answers-rag).
+RAG answers (Ling 3.0 Flash Sante, free, 300 test claims): **verdict accuracy 0.80** (239/300 =
+0.797, 95% CI 0.748–0.838), faithfulness 0.98 (LLM judge), abstention precision 0.83; see [Grounded answers](#grounded-answers-rag).
 
 MRR@10, MAP@100 and the per-comparison significance tests are in
 [`eval/results/retrieval.md`](../eval/results/retrieval.md); what the numbers mean is in
@@ -68,7 +68,7 @@ app/retrieve   dense · fusion (RRF) · service (SearchService, the single retri
 app/rerank     cross_encoder (MS-MARCO MiniLM, bge-reranker-base)
 app/generate   generator (OpenAI-compatible client) · prompts (grounded prompt + injection sanitizer)
 app/verify     NLI and fine-tuned verifiers + Kaggle training kit (measured, not adopted)
-app/eval       retrieval_eval · rag_eval · rag_compare · label_audit · web_eval · web_pool_eval · latency · analysis · judge_agreement · verify_eval/verify_combine
+app/eval       retrieval_eval · rag_eval · rag_compare · label_audit · nei_relabel (blind human re-labelling packet + scorer, offline) · web_eval · web_pool_eval · latency · analysis · judge_agreement · verify_eval/verify_combine
 app/api        main (FastAPI: /search, /answer, rate-limited)
 frontend/      index.html (vanilla JS UI, served at /)
 ```
@@ -153,7 +153,7 @@ with `SSR_RERANK_CANDIDATES=100 uv run python -m app.eval.retrieval_eval`.
 
 ## Grounded answers (RAG)
 
-`GET /answer?q=...` runs the hybrid retrieval, then generates a grounded answer with an OpenAI-compatible LLM (the free `inclusionai/ling-3.0-flash-sante:free` on OpenRouter by default; paid `openai/gpt-oss-120b` via `SSR_OPENROUTER_LLM_MODEL`, or Groq, Ollama or another endpoint via `SSR_LLM_PROVIDER=groq` and `SSR_LLM_BASE_URL`). Answers cite sources as `[n]` mapped back to document ids, and the model is instructed to **abstain when the retrieved context lacks the evidence** rather than hallucinate. When the input is a claim and the reply has no parseable verdict (truncated, or prose without a `Verdict:` line), the generator makes one verdict-only follow-up call (`SSR_LLM_REASK`, on by default; the response's `verdict_source` says where the verdict came from). Only inputs that read as a claim get that re-ask or a verdict inferred from the reply's first sentence: a question, a keyword search ("BRCA1 breast cancer risk") or an instruction gets neither (a simple heuristic in `looks_like_claim`, checked to accept all 300 test and 809 train claims; a short claim with no final period can be missed and is then treated like a question). If a web source or the re-ask fails, the answer is still served and the failure is listed in the response's `warnings`.
+`GET /answer?q=...` runs the hybrid retrieval, then generates a grounded answer with an OpenAI-compatible LLM (the free `inclusionai/ling-3.0-flash-sante:free` on OpenRouter by default; paid `openai/gpt-oss-120b` via `SSR_OPENROUTER_LLM_MODEL`, or Groq, Ollama or another endpoint via `SSR_LLM_PROVIDER=groq` and `SSR_LLM_BASE_URL`). Answers cite sources as `[n]` mapped back to document ids, and the model is instructed to **abstain when the retrieved context lacks the evidence** rather than hallucinate. When the input is a claim and the reply has no parseable verdict (truncated, or prose without a `Verdict:` line), the generator makes one verdict-only follow-up call (`SSR_LLM_REASK`, on by default; the response's `verdict_source` says where the verdict came from). A truncated reply never gets a verdict inferred from its first sentence (it was cut off mid-reply); it goes to the re-ask instead. Only inputs that read as a claim get that re-ask or a verdict inferred from the reply's first sentence: a question, a keyword search ("BRCA1 breast cancer risk") or an instruction gets neither (a simple heuristic in `looks_like_claim`, checked to accept all 300 test and 809 train claims; a short claim with no final period can be missed and is then treated like a question). If a web source or the re-ask fails, the answer is still served and the failure is listed in the response's `warnings`. `/answer` gives each generation call one SDK retry and the re-ask none (30 s and 120 s timeouts), so a stuck provider holds a worker for minutes at most; the eval harness, with no user waiting, allows 5 retries (re-ask 1).
 
 For example, `/answer?q=Can aspirin reduce the risk of colorectal cancer?`:
 > "Aspirin has been shown to reduce the risk of colorectal cancer [1][2][3] … a pooled analysis of four randomized trials showed a 34% reduction in 20-year colorectal cancer mortality [3]."
@@ -171,13 +171,13 @@ full tables in [`eval/results/rag.md`](../eval/results/rag.md). **A full run cos
 free models.** The first-pass answers span two days (OpenRouter's 1,000 requests/day free cap hit
 mid-run, resumed from the per-row checkpoint).
 
-**Verdict accuracy is 0.80 (240 of 300), 95% Wilson CI 0.751–0.841.**
+**Verdict accuracy is 0.80 (239 of 300 = 0.797), 95% Wilson CI 0.748–0.838.**
 
 | Gold label | n | Verdict accuracy | Answered (not abstained) |
 |---|---|---|---|
 | SUPPORT | 124 | 0.815 (101) | 107 |
 | CONTRADICT | 64 | 0.891 (57) | 58 |
-| NEI | 112 | 0.732 (82) | 30 |
+| NEI | 112 | 0.723 (81) | 31 |
 
 **What changed.** Two post-processing steps on the same Ling answers, scored on the 300 test
 claims with paired exact McNemar via `make rag-compare` (b = earlier run right and this run
@@ -189,15 +189,31 @@ wrong, c = the reverse). Neither was developed on train alone; see
 | Strict `Verdict:` line only | 0.73 | | | |
 | + verdict-recovery parser (verdict restated in prose, or a stance rule; commits ec465ef, b3de17b) | 0.7767 | 0 | 14 | 0.0001 |
 | **+ verdict re-ask** (one verdict-only call for a claim with no verdict; commits e367318, 3dcc1a3) | **0.8000** | **0** | **7** | **0.016** |
+| Current scoring rules (commit 3e360cc; see below) | **0.7967** | 1 | 0 | 1.00 |
 
-The re-ask fired on 15 of 300 claims (10 answers truncated at the token budget, 5 prose replies
-without a verdict line), produced a verdict for 14 (12 correct), and broke nothing. Abstention
-(+0.01, p = 0.25) and citation rate (0.94, unchanged) don't move significantly. Faithfulness
-stays 0.98 (0.984 over 192 judged answers): the re-ask is not re-judged, and the 3 claims that
-count as answered only through the re-ask, after a first reply that hit the token budget
-(4,096 tokens after its retry) before writing any answer text, are left out because the judge saw
-no answer text. Verdict sources over the 300 rows: `line` 257, `inline` 10, `stance` 18, `reask` 14,
-none 1 (still truncated after the re-ask, scored as an abstention).
+The first three rows were measured as committed at the time. Commit 3e360cc then tightened two
+scoring rules: a reply cut off at the token budget (or empty) with no verdict now scores `NONE`
+(always wrong) instead of NEI, since it abstained from nothing, and a truncated reply no longer
+gets a verdict from its first sentence (it is re-asked instead). On the same stored answers that
+moved two claims, both now wrong: claim 343 (gold SUPPORT, truncated, no verdict even after the
+re-ask) went from NEI to `NONE`, and claim 514 (gold NEI, truncated) lost its first-sentence NEI
+verdict, was re-asked (the only new LLM call when the run was regenerated) and answered
+SUPPORTED. Under the current rules the answers without the re-ask score 0.76 (228/300), and the
+re-ask fixes 11 and breaks 0 (p = 0.001); the extra 4 are NEI claims whose replies were cut off
+before any text and used to count as correct abstentions, so the scoring change, not the re-ask,
+accounts for the difference from the 7 above, and the 7 fixed / 0 broken (p = 0.016) is still the
+figure the re-ask was adopted on.
+
+The re-ask now fires on 16 of 300 claims (11 answers truncated at the token budget, 5 prose
+replies without a verdict line) and produces a verdict for 15 (12 correct). Abstention (+0.007,
+p = 0.63) and citation rate (0.94, unchanged) don't move significantly. Faithfulness stays 0.98
+(0.979 over 193 judged answers): the re-ask is not re-judged, and the 3 claims that count as
+answered only through the re-ask, after a first reply that hit the token budget (4,096 tokens
+after its retry) before writing any answer text, are left out because the judge saw no answer
+text. Claim 514 is counted: its truncated first reply had text, which the judge scored
+(faithfulness 0.0). Verdict sources over the 300 rows: `line` 257, `inline` 10, `stance` 17,
+`reask` 15, none 1 (claim 343, still truncated after the re-ask: `NONE` for the verdict, an
+abstention in the tables below).
 
 Abstention is scored against a **rationale oracle**: the context has evidence when a document the
 annotators cited *with rationale sentences* is in the top-5. NEI claims have no rationale
@@ -205,9 +221,9 @@ document, so abstaining on them is the correct action.
 
 | Metric | Score |
 |---|---|
-| Faithfulness (over answered, LLM judge; n = 192, 3 re-ask-only answers excluded) | 0.98 |
+| Faithfulness (over answered, LLM judge; n = 193, 3 re-ask-only answers excluded) | 0.98 |
 | Context relevance (all, LLM judge) | 0.72 |
-| **3-class verdict accuracy** (vs gold label, no judge) | **0.80** (240/300) |
+| **3-class verdict accuracy** (vs gold label, no judge) | **0.80** (239/300) |
 | Verdict parsed (incl. recovered and re-asked) | 299 of 300 |
 | Truncated answers (hit the token budget after 1 retry) | 11 of 300 |
 | Answers that needed the length retry | 63 of 300 |
@@ -215,40 +231,42 @@ document, so abstaining on them is the correct action.
 | Evidence retrieved (rationale doc in top-5) | 0.58 |
 | Answered (model attempted an answer) | 0.65 |
 | **Abstention precision** (abstained & no evidence) | **0.83** |
-| Abstention recall (no evidence & abstained) | 0.70 |
+| Abstention recall (no evidence & abstained) | 0.69 |
 | False abstention (had evidence, abstained anyway) | 0.10 |
-| Answered without evidence, as a share of answers given (hallucination risk) | 0.19 |
+| Answered without evidence, as a share of answers given (hallucination risk) | 0.20 |
 
 |  | evidence retrieved (175) | no evidence (125) |
 |---|---|---|
-| **answered** (195) | 157 answered with evidence | 38 answered with nothing to go on |
-| **abstained** (105) | 18 declined despite having the evidence | 87 correct |
+| **answered** (196) | 157 answered with evidence | 39 answered with nothing to go on |
+| **abstained** (104) | 18 declined despite having the evidence | 86 correct |
 
-Verdicts against the gold label (`NONE` = answered with no verdict, always wrong):
+Verdicts against the gold label (`NONE` = no verdict on a reply that answered, was cut off at the
+token budget or was empty; always wrong):
 
 | Gold \ predicted | SUPPORT | CONTRADICT | NEI | NONE |
 |---|---|---|---|---|
-| **SUPPORT** (124) | 101 | 6 | 17 | 0 |
+| **SUPPORT** (124) | 101 | 6 | 16 | 1 |
 | **CONTRADICT** (64) | 1 | 57 | 6 | 0 |
-| **NEI** (112) | 17 | 13 | 82 | 0 |
+| **NEI** (112) | 18 | 13 | 81 | 0 |
 
-**Remaining failure modes.** 60 of 300 verdicts are wrong, and almost all are an evidence
+**Remaining failure modes.** 61 of 300 verdicts are wrong, and almost all are an evidence
 *judgement* error, not a format one:
 
-- **NEI claims answered anyway: 30 of 112** (17 SUPPORTED, 13 REFUTED), the largest group. The
+- **NEI claims answered anyway: 31 of 112** (18 SUPPORTED, 13 REFUTED), the largest group. The
   model is over-eager: it infers a verdict from weak or tangential context. They account for most
-  of the 38 answers given without evidence.
-- **SUPPORT/CONTRADICT claims abstained on: 23** (17 SUPPORT, 6 CONTRADICT). For 14 of the 17
+  of the 39 answers given without evidence.
+- **SUPPORT/CONTRADICT claims abstained on: 22** (16 SUPPORT, 6 CONTRADICT). For 13 of the 16
   SUPPORT claims the rationale doc is in the context: the model reads the passage too literally.
-- Smaller: 6 SUPPORT claims answered REFUTED and 1 CONTRADICT answered SUPPORTED.
+- Smaller: 6 SUPPORT claims answered REFUTED, 1 CONTRADICT answered SUPPORTED, and 1 SUPPORT
+  claim (343) truncated with no verdict even after the re-ask.
 
 **The oracle decides whether abstention looks broken.** Scored the legacy way, against BEIR qrels
 (which mark a cited abstract relevant for NEI claims too), the *same answers* give abstention
-precision 0.41 and 62 "false" abstentions (rate 0.26); under the rationale oracle only 18 are
+precision 0.41 and 61 "false" abstentions (rate 0.26); under the rationale oracle only 18 are
 false and precision is 0.83.
 
 **Paired comparison with the paid gpt-oss-120b run** (50 shared claims; both predate the
-verdict-recovery parser, so they use the old strict parser and are not comparable to the 0.80
+verdict-recovery parser, so they use the old strict parser and are not comparable to the 0.797
 headline). Accuracy is indistinguishable on these 50 claims (p = 1.00), which with 3
 discordant claims rules a difference neither in nor out; citations are the one significant
 difference:
@@ -274,23 +292,28 @@ Re-scoring the same stored answers offline ([`eval/results/rag_label_audit.md`](
 
 | Labels | n | Verdict accuracy |
 |---|---|---|
-| Original SciFact labels (headline) | 300 | 0.8000 |
-| Corrected (the 11 confirmed errors) | 300 | 0.8367 |
-| Corrected, 8 debatable claims excluded | 292 | 0.8425 |
+| Original SciFact labels (headline) | 300 | 0.7967 |
+| Corrected (the 11 confirmed errors) | 300 | 0.8300 |
+| Corrected, 8 debatable claims excluded | 292 | 0.8356 |
 
-**The headline stays on the original labels.** Read 0.837 as a one-sided sensitivity check, not
+**The headline stays on the original labels.** Read 0.830 as a one-sided sensitivity check, not
 as an upper bound or a second headline. Only the 188 evidence-bearing claims were audited, never
 the 112 NEI ones, so label errors there, which could move the score either way, were never
-looked for; all 11 flips went wrong → right. The corrections come from a single annotator, and 8 of the 11 were first flagged
-by an LLM, so an LLM generator agreeing with them is partly expected. One of the 11 (claim 343)
-is credited only through the judge fallback: its answer was truncated with no verdict, the judge
-called it not answered, so it scores as NEI. The predictions are identical across rows, so this
-measures the labels, not the pipeline. To compare
+looked for; of the 11 corrected claims, 10 go wrong → right and none right → wrong. The eleventh,
+claim 343 (SUPPORT → NEI), stays wrong: its answer was truncated with no verdict, which now scores
+`NONE` under either label (it was credited through the judge's "not answered" call before commit
+3e360cc). The corrections come from a single annotator, and 8 of the 11 were first flagged
+by an LLM, so an LLM generator agreeing with them is partly expected. The predictions are
+identical across rows, so this measures the labels, not the pipeline. To compare
 two runs under the corrected key: `make rag-compare A=... B=... ARGS=--labels=audit`.
 
 ### Tried and measured, not adopted
 
-All on the 300 test claims unless noted; paired exact McNemar.
+All on the 300 test claims unless noted; paired exact McNemar. These were scored before commit
+3e360cc's scoring rules and not re-run: "0.80" is the canonical run as committed at dc1816b
+(240/300), which differs from the current one only on claims 343 and 514
+([above](#grounded-answers-rag)), and "0.7767" is the same answers before the re-ask under the old
+rules.
 
 | Experiment | Verdict accuracy | Result |
 |---|---|---|
@@ -399,6 +422,13 @@ the results file) add nothing significant. Web search still trails local hybrid 
 (p < 0.0001), which is expected: S2 searches ~200M papers against our 5,183, so this asks whether
 open-web retrieval can find the gold paper at all, not which ranker is better.
 
+**These rows predate commit aa98231**, which fixed how the keyword rewrite handles numbered names
+(interleukin-2, TDP-43), unseen words, currency and comparator numbers and compound duplicates.
+The fix changes the S2 queries for 56 of the 300 test claims (41 of them in the primary query).
+On the 100 train claims it moved Recall@5 0.285 → 0.305 and Recall@100 0.453 → 0.463 (2 claims
+better, 0 worse; not significant), but `make web-eval` has not been re-run on test, so the table
+is for the pre-fix rewrite until it is.
+
 These rows were measured with the eval's web settings, not the API's: the pooled row embeds the
 top 50 candidates (`SSR_WEB_DENSE_CAP`), has no per-request deadline and does not apply the dataset-dump snippet filter.
 The API instead embeds at most 30 (`SSR_WEB_API_DENSE_CAP`), abandons extra sources still
@@ -451,10 +481,10 @@ about 1 per second (`SSR_EVAL_LIMIT=2` is a smoke run).
   though annotators found no rationale in it, and the whole hybrid-vs-dense recall gain (itself
   only suggestive: sign test p = 0.065) sits on that stratum (Finding 1).
 - **300 claims still leave a ~5-point interval on RAG accuracy.** The eval covers every SciFact
-  test claim, and the 95% Wilson interval on verdict accuracy is 0.751–0.841 (0.80 ± 0.045), so a
+  test claim, and the 95% Wilson interval on verdict accuracy is 0.748–0.838 (0.797 ± 0.045), so a
   gap of a few points between two runs' headline rates means nothing on its own; compare runs
   claim by claim with `make rag-compare`. The re-ask gain (+7 claims, raw p = 0.016) is small,
-  rests on 15 re-asked claims, and is borderline once the other variants scored on the same
+  rests on 15 re-asked claims (16 under the current scoring rules), and is borderline once the other variants scored on the same
   claims are counted (Holm 0.047–0.078). The interval also ignores generator nondeterminism.
 - **The test set has been reused.** The parser and the re-ask were chosen with the 300 test
   claims in view, and 8 variants have been scored on them, so 0.80 is no longer a clean held-out
@@ -462,9 +492,9 @@ about 1 per second (`SSR_EVAL_LIMIT=2` is a smoke run).
 - **Paired comparisons with the gpt-oss run cover only 50 claims**, scored with the old strict
   parser, so only large effects (the citation gap) can reach significance.
 - **The label audit is a sensitivity check, not a new key.** One annotator, mostly LLM-flagged, no
-  NEI claims audited; the 0.8367 corrected figure is a one-sided check, not an upper bound.
-- **Remaining errors are evidence-judgement errors.** 30 of 112 NEI claims are answered anyway
-  (over-eager) and 17 of 124 SUPPORT claims are abstained on (too literal); format and parsing
+  NEI claims audited; the 0.830 corrected figure is a one-sided check, not an upper bound.
+- **Remaining errors are evidence-judgement errors.** 31 of 112 NEI claims are answered anyway
+  (over-eager) and 16 of 124 SUPPORT claims are abstained on (too literal); format and parsing
   failures are now ≤ 1 of 300.
 - **Web search is far below local retrieval on SciFact, and slow.** Even pooled, Recall@5 is
   0.228 against 0.766 (Recall@100 0.384 against 0.965), a query takes many seconds, and the
@@ -486,8 +516,8 @@ about 1 per second (`SSR_EVAL_LIMIT=2` is a smoke run).
 
 ## What I'd do next
 
-- **Attack the two remaining error modes directly.** Over-eager answers on NEI claims (30 of 112)
-  and too-literal abstentions on SUPPORT claims (17 of 124) are what is left. A stricter prompt
+- **Attack the two remaining error modes directly.** Over-eager answers on NEI claims (31 of 112)
+  and too-literal abstentions on SUPPORT claims (16 of 124) are what is left. A stricter prompt
   (evidence-first), an off-the-shelf NLI verifier, a fine-tuned verifier and a second-look check
   have all been measured and not adopted ([above](#tried-and-measured-not-adopted)), so the next
   lever is better supervision, such as SciFact-train hard negatives for NEI, or a stronger
@@ -528,9 +558,9 @@ Open <http://localhost:8000> for the search UI, or query the API directly:
 plus the optional networked `web` and `hybrid_web` ([Web search](#web-search-semantic-scholar-and-pubmed)).
 `GET /answer?q=...&top_k=5` returns the grounded answer, its verdict and citations.
 
-The RAG and web targets (`make eval-rag`, `make rag-compare`, `make rag-audit`, `make web-eval`)
-and the verifier experiments (`make verify-eval`, `verify-export`, `verify-train`,
-`verify-combine`) are listed with one-line descriptions in the [`Makefile`](../Makefile).
+The RAG and web targets (`make eval-rag`, `make rag-compare`, `make rag-audit`,
+`make rag-relabel`, `make web-eval`) and the verifier experiments (`make verify-eval`,
+`verify-export`, `verify-train`, `verify-combine`) are listed with one-line descriptions in the [`Makefile`](../Makefile).
 
 ## Operational notes
 
@@ -559,6 +589,17 @@ Things that are deliberate rather than accidental, and the reasoning behind them
 - **`make eval` caches per config** under `data/eval_cache/`, keyed by a signature of everything
   that affects the numbers, and checkpoints every 20 queries, because a cross-encoder sweep over 300
   queries is hours on a laptop CPU. `SSR_EVAL_REFRESH=1` forces recomputation.
+- **BM25 returns only documents that share a term with the query.** bm25s fills its top-k with
+  score-0 documents in index order; those are dropped, so a query with no known token (e.g.
+  "5-HT2A", or only stopwords) gets no BM25 hits instead of k arbitrary ones that fusion would
+  rank. The web re-rank keeps them, since it orders a whole candidate pool. Local retrieval
+  metrics are unchanged on all 300 test claims.
+- **Only one RAG run writes the committed artifact.** `make eval-rag` writes
+  `eval/results/rag.{md,json}` only for a full test-split run (`SSR_RAG_N=all`, no
+  `SSR_EVAL_LIMIT`) with both models on the code defaults and the re-ask on. Every other run,
+  including the default 50-claim sample, writes to `data/eval_runs/`. A canonical run that ends
+  with a claim missing or a failed re-ask refuses to write (finished rows stay checkpointed, so a
+  re-run redoes only those); non-canonical runs write and name the missing claims.
 - **Retrieval is serialized** by a process-wide lock (embedded Qdrant and the shared
   sentence-transformers models are not thread-safe), so this serves one search at a time per
   worker. Running Qdrant in server mode is the fix if that ceiling ever matters.

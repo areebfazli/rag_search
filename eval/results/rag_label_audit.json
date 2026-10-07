@@ -3,7 +3,7 @@
   "headline": "original",
   "source_run": "eval/results/rag.json",
   "run": {
-    "git_sha": "a8a67c632d483a7d1e06733193dbf811f9959b25",
+    "git_sha": "aa98231e93780e9a179bb1411b65f37e78172851",
     "dataset": "beir/scifact/test",
     "generator_model": "inclusionai/ling-3.0-flash-sante:free",
     "judge_model": "nvidia/nemotron-3-ultra-550b-a55b:free",
@@ -46,11 +46,11 @@
   "tiers": {
     "original": {
       "n": 300,
-      "correct": 240,
-      "verdict_accuracy": 0.8,
+      "correct": 239,
+      "verdict_accuracy": 0.7967,
       "verdict_accuracy_ci95": [
-        0.7511,
-        0.8413
+        0.7475,
+        0.8383
       ],
       "per_label": {
         "SUPPORT": {
@@ -65,16 +65,16 @@
         },
         "NEI": {
           "n": 112,
-          "correct": 82,
-          "accuracy": 0.7321
+          "correct": 81,
+          "accuracy": 0.7232
         }
       },
       "confusion": {
         "SUPPORT": {
           "SUPPORT": 101,
           "CONTRADICT": 6,
-          "NEI": 17,
-          "NONE": 0
+          "NEI": 16,
+          "NONE": 1
         },
         "CONTRADICT": {
           "SUPPORT": 1,
@@ -83,32 +83,32 @@
           "NONE": 0
         },
         "NEI": {
-          "SUPPORT": 17,
+          "SUPPORT": 18,
           "CONTRADICT": 13,
-          "NEI": 82,
+          "NEI": 81,
           "NONE": 0
         }
       },
-      "answered_rate": 0.65,
+      "answered_rate": 0.6533,
       "evidence_rate": 0.5833,
-      "abstention_precision": 0.8286,
-      "abstention_recall": 0.696,
+      "abstention_precision": 0.8269,
+      "abstention_recall": 0.688,
       "false_abstention_rate": 0.1029,
-      "answered_without_evidence_rate": 0.1949,
+      "answered_without_evidence_rate": 0.199,
       "quadrants": {
         "answered_with_evidence": 157,
-        "answered_without_evidence": 38,
+        "answered_without_evidence": 39,
         "false_abstention": 18,
-        "correct_abstention": 87
+        "correct_abstention": 86
       }
     },
     "corrected_strict": {
       "n": 300,
-      "correct": 251,
-      "verdict_accuracy": 0.8367,
+      "correct": 249,
+      "verdict_accuracy": 0.83,
       "verdict_accuracy_ci95": [
-        0.7906,
-        0.8742
+        0.7834,
+        0.8683
       ],
       "per_label": {
         "SUPPORT": {
@@ -123,8 +123,8 @@
         },
         "NEI": {
           "n": 118,
-          "correct": 88,
-          "accuracy": 0.7458
+          "correct": 86,
+          "accuracy": 0.7288
         }
       },
       "confusion": {
@@ -141,32 +141,32 @@
           "NONE": 0
         },
         "NEI": {
-          "SUPPORT": 17,
+          "SUPPORT": 18,
           "CONTRADICT": 13,
-          "NEI": 88,
-          "NONE": 0
+          "NEI": 86,
+          "NONE": 1
         }
       },
-      "answered_rate": 0.65,
+      "answered_rate": 0.6533,
       "evidence_rate": 0.5667,
-      "abstention_precision": 0.8762,
-      "abstention_recall": 0.7077,
+      "abstention_precision": 0.875,
+      "abstention_recall": 0.7,
       "false_abstention_rate": 0.0765,
-      "answered_without_evidence_rate": 0.1949,
+      "answered_without_evidence_rate": 0.199,
       "quadrants": {
         "answered_with_evidence": 157,
-        "answered_without_evidence": 38,
+        "answered_without_evidence": 39,
         "false_abstention": 13,
-        "correct_abstention": 92
+        "correct_abstention": 91
       }
     },
     "corrected_excl_debatable": {
       "n": 292,
-      "correct": 246,
-      "verdict_accuracy": 0.8425,
+      "correct": 244,
+      "verdict_accuracy": 0.8356,
       "verdict_accuracy_ci95": [
-        0.7963,
-        0.8798
+        0.7888,
+        0.8737
       ],
       "per_label": {
         "SUPPORT": {
@@ -181,8 +181,8 @@
         },
         "NEI": {
           "n": 118,
-          "correct": 88,
-          "accuracy": 0.7458
+          "correct": 86,
+          "accuracy": 0.7288
         }
       },
       "confusion": {
@@ -199,23 +199,23 @@
           "NONE": 0
         },
         "NEI": {
-          "SUPPORT": 17,
+          "SUPPORT": 18,
           "CONTRADICT": 13,
-          "NEI": 88,
-          "NONE": 0
+          "NEI": 86,
+          "NONE": 1
         }
       },
-      "answered_rate": 0.6507,
+      "answered_rate": 0.6541,
       "evidence_rate": 0.5651,
-      "abstention_precision": 0.8725,
-      "abstention_recall": 0.7008,
+      "abstention_precision": 0.8713,
+      "abstention_recall": 0.6929,
       "false_abstention_rate": 0.0788,
-      "answered_without_evidence_rate": 0.2,
+      "answered_without_evidence_rate": 0.2042,
       "quadrants": {
         "answered_with_evidence": 152,
-        "answered_without_evidence": 38,
+        "answered_without_evidence": 39,
         "false_abstention": 13,
-        "correct_abstention": 89
+        "correct_abstention": 88
       }
     }
   },
@@ -245,9 +245,9 @@
       "gold_after": "NEI",
       "rationale_docs_before": 1,
       "rationale_docs_after": 0,
-      "predicted_label": "NEI",
+      "predicted_label": "NONE",
       "correct_before": false,
-      "correct_after": true,
+      "correct_after": false,
       "answered": false,
       "evidence_before": true,
       "evidence_after": false,

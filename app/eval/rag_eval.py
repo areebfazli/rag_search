@@ -320,7 +320,8 @@ CACHE = Path("data/eval_cache/rag")  # per-row resume checkpoints (gitignored)
 # re-ask fetched are cache hits here, and vice versa.
 REASK_CACHE = Path("data/eval_cache/secondlook")
 # Expected share of claims the re-ask fires on, for the up-front request estimate only:
-# 15 of 300 on the committed test run. A checkpoint's own rate wins once it is big enough.
+# 16 of 300 on the committed test run (15 before 3e360cc's scoring rules). A checkpoint's
+# own rate wins once it is big enough.
 EXPECTED_REASK_RATE = 0.05
 
 # Expected share of generations that need the truncation retry, for the up-front request

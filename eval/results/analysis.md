@@ -52,7 +52,7 @@ Every qrels-relevant doc hybrid fails to return in its top-100 (11 docs over 11 
 | 502 | NEI | 13071728 | — | 0.00 | 295 | not in top-100 | no |
 | 560 | NEI | 40096222 | — | 0.00 | 266 | not in top-100 | no |
 | 619 | CONTRADICT | 2565138 | no | 0.50 | 397 | not in top-100 | no |
-| 913 | NEI | 3203590 | — | 0.00 | 1893 | 56 | yes |
+| 913 | NEI | 3203590 | — | 0.00 | not ranked | 56 | yes |
 | 975 | NEI | 5304891 | — | 0.00 | 316 | not in top-100 | no |
 | 1110 | CONTRADICT | 13770184 | yes | 0.00 | 1068 | not in top-100 | no |
 | 1175 | NEI | 31272411 | — | 0.00 | 57 | not in top-100 | yes |
