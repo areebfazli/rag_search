@@ -7,7 +7,7 @@ number comes from the committed files in [`eval/results/`](../eval/results/).
 Contents: [Retrieval results](#retrieval-results-at-a-glance) ·
 [Pipeline](#pipeline) · [Stack](#stack) · [Code layout](#code-layout) ·
 [Retrieval evaluation](#retrieval-evaluation) · [Grounded answers](#grounded-answers-rag) ·
-[Label audit](#label-audit) · [Tried and not adopted](#tried-and-measured-not-adopted) ·
+[Label audit](#label-audit) · [NEI re-labelling](#blind-re-labelling-of-the-nei-disagreements-llm-annotators-secondary) · [Tried and not adopted](#tried-and-measured-not-adopted) ·
 [Test-set reuse](#how-much-to-trust-the-test-set) ·
 [Judge reliability](#judge-reliability) · [Web search](#web-search-semantic-scholar-and-pubmed) ·
 [Limitations](#limitations) · [What I'd do next](#what-id-do-next) ·
@@ -68,7 +68,7 @@ app/retrieve   dense · fusion (RRF) · service (SearchService, the single retri
 app/rerank     cross_encoder (MS-MARCO MiniLM, bge-reranker-base)
 app/generate   generator (OpenAI-compatible client) · prompts (grounded prompt + injection sanitizer)
 app/verify     NLI and fine-tuned verifiers + Kaggle training kit (measured, not adopted)
-app/eval       retrieval_eval · rag_eval · rag_compare · label_audit · nei_relabel (blind human re-labelling packet + scorer, offline) · web_eval · web_pool_eval · latency · analysis · judge_agreement · verify_eval/verify_combine
+app/eval       retrieval_eval · rag_eval · rag_compare · label_audit · nei_relabel (blind re-labelling packet + scorer, offline) · web_eval · web_pool_eval · latency · analysis · judge_agreement · verify_eval/verify_combine
 app/api        main (FastAPI: /search, /answer, rate-limited)
 frontend/      index.html (vanilla JS UI, served at /)
 ```
@@ -307,6 +307,42 @@ by an LLM, so an LLM generator agreeing with them is partly expected. The predic
 identical across rows, so this measures the labels, not the pipeline. To compare
 two runs under the corrected key: `make rag-compare A=... B=... ARGS=--labels=audit`.
 
+### Blind re-labelling of the NEI disagreements (LLM annotators, secondary)
+
+The audit above never looked at NEI claims, which is where most remaining errors are: 31 NEI-gold
+claims got SUPPORT (18) or CONTRADICT (13). SciFact's NEI means the one *cited* abstract has no
+rationale, while the system searches all 5,183 abstracts, so another passage may decide the claim.
+To test that, the 31 disagreements were labelled blind against exactly the passages the generator saw.
+
+- **Packet.** 81 items from `eval/results/rag.json` (git_sha `aa98231`): the 31 disagreements plus
+  50 controls the model got right (30 NEI, 10 SUPPORT, 10 CONTRADICT), shuffled with a fixed seed.
+  Built by `make rag-relabel` (`app/eval/nei_relabel.py`).
+- **Annotators.** Three independent LLM agents (2 Claude Opus, 1 Claude Sonnet), each shown only the
+  claim and the 5 passages, with no model verdict or answer, gold label or claim id, and the same
+  written guidelines as the HTML page. Majority vote. Unanimous on 71 of 81 items, no 3-way
+  splits, Fleiss κ = 0.87.
+- **Disagreements.** The majority sides with the model on 25 of 31 (15 SUPPORT, 10 CONTRADICT) and
+  with gold NEI on 6 (claims 1175, 1213, 1344, 350, 384, 410). Per annotator: 28, 23 and 23 of 31.
+  Of the 25, the SciFact-cited abstract was among the passages in 14 and not in 11.
+- **Controls.** The majority matches SciFact gold on 49 of 50 (0.98; NEI controls 29/30,
+  SUPPORT/CONTRADICT 20/20); per annotator 48, 49 and 48 of 50.
+
+| Labels | n | Verdict accuracy (95% Wilson CI) |
+|---|---|---|
+| Original SciFact labels (headline) | 300 | 0.7967 (239/300) |
+| Annotator labels on the 31 disagreements only (one-sided, can only rise) | 300 | 0.8800 (264/300; 0.838–0.912) |
+| Annotator labels on every sampled item | 300 | 0.8767 (263/300; 0.835–0.909) |
+
+**Secondary; the headline stays on the original SciFact labels.** The annotators are LLMs, not a
+human, so this is a weaker check, and they may share the generator's reading of the evidence (the
+generator is also an LLM). The controls show they are not simply agreeing with the model: they match
+gold wherever model and gold agree. The question asked is also not SciFact's: "do these passages
+decide it?" (open corpus) against "does the cited abstract decide it?" (closed corpus), the mismatch
+SciFact-Open (Wadden et al. 2022) documents. Annotator spread on the disagreements is 23–28 of 31.
+The labels are not committed (`data/` is gitignored). Read together, this suggests most remaining
+NEI "errors" reflect the benchmark's label definition and the open-corpus mismatch rather than the
+model, retrieval or code; it does not show the verdicts are correct, and it is not a corrected score.
+
 ### Tried and measured, not adopted
 
 All on the 300 test claims unless noted; paired exact McNemar. These were scored before commit
@@ -495,7 +531,9 @@ about 1 per second (`SSR_EVAL_LIMIT=2` is a smoke run).
   NEI claims audited; the 0.830 corrected figure is a one-sided check, not an upper bound.
 - **Remaining errors are evidence-judgement errors.** 31 of 112 NEI claims are answered anyway
   (over-eager) and 16 of 124 SUPPORT claims are abstained on (too literal); format and parsing
-  failures are now ≤ 1 of 300.
+  failures are now ≤ 1 of 300. A secondary blind re-label by LLM annotators sided with the model
+  on 25 of the 31 NEI cases, so some of the over-eager count is the label definition, not the model
+  ([details](#blind-re-labelling-of-the-nei-disagreements-llm-annotators-secondary)).
 - **Web search is far below local retrieval on SciFact, and slow.** Even pooled, Recall@5 is
   0.228 against 0.766 (Recall@100 0.384 against 0.965), a query takes many seconds, and the
   results move with S2's and PubMed's indexes; it is an optional source, not a replacement.

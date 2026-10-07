@@ -75,6 +75,31 @@ CAVEAT = (
     "corrected SciFact score."
 )
 
+DEFAULT_ANNOTATOR = "one human annotator (the repo owner)"
+LLM_CAVEAT_TAIL = (
+    "The annotators here are LLMs, not a human: a weaker check than a human, and they may "
+    "share the generator's reading of the evidence (the generator is also an LLM). They were "
+    "blinded to the verdicts, answers, gold labels and claim ids, and judged the open-corpus "
+    "question \"do these retrieved passages decide the claim?\", a different task from "
+    "SciFact's closed-corpus label (\"does the cited abstract decide it?\"), so a relabel "
+    "measures a different thing, not a corrected SciFact score."
+)
+
+
+def caveat_for(annotator: str | None = None, note: str | None = None) -> str:
+    """The secondary-accuracy caveat. The default (single human) text is unchanged."""
+    if annotator is None or annotator == DEFAULT_ANNOTATOR:
+        return CAVEAT
+    text = (
+        "SECONDARY, not a headline: the headline verdict accuracy stays on the original SciFact "
+        f"labels. Annotator: {annotator}. " + LLM_CAVEAT_TAIL
+    )
+    return f"{text} {note.strip()}" if note and note.strip() else text
+
+
+def _is_default(rep: Mapping) -> bool:
+    return rep.get("annotator", DEFAULT_ANNOTATOR) == DEFAULT_ANNOTATOR
+
 
 class RelabelError(ValueError):
     """A packet, key, label export or rag.json that does not fit together."""
@@ -712,7 +737,9 @@ def check_rows(key: Mapping, rows: Sequence[Mapping]) -> dict[str, Mapping]:
     return by_id
 
 
-def score(key: Mapping, labels: Mapping[str, Mapping], blob: Mapping) -> dict:
+def score(key: Mapping, labels: Mapping[str, Mapping], blob: Mapping,
+          annotator: str | None = None, annotators_note: str | None = None) -> dict:
+    annotator = (annotator or "").strip() or DEFAULT_ANNOTATOR
     rows = blob["rows"]
     check_rows(key, rows)
     items = key["items"]
@@ -753,6 +780,8 @@ def score(key: Mapping, labels: Mapping[str, Mapping], blob: Mapping) -> dict:
     n_total = {g: sum(e["group"] == g for e in items) for g in GROUPS}
 
     return {
+        "annotator": annotator,
+        "annotators_note": (annotators_note or "").strip() or None,
         "packet_id": key["packet_id"],
         "source_run": key.get("source_run"),
         "n_items": len(items),
@@ -777,7 +806,7 @@ def score(key: Mapping, labels: Mapping[str, Mapping], blob: Mapping) -> dict:
             "all_split": split(dis),
         },
         "secondary_verdict_accuracy": {
-            "caveat": CAVEAT,
+            "caveat": caveat_for(annotator, annotators_note),
             "original_labels": original,
             "stored_verdict_accuracy": stored,
             "stored_matches": stored is None or abs(original["verdict_accuracy"] - stored) < 5e-4,
@@ -825,13 +854,17 @@ def _cell(s: object) -> str:
 
 def to_markdown(rep: Mapping) -> str:
     d, sec = rep["disagreement_outcome"], rep["secondary_verdict_accuracy"]
+    default = _is_default(rep)
+    who, Who = ("human", "Human") if default else ("annotator", "Annotator")
     lines = [
-        "# Blind human re-labelling of SciFact NEI disagreements",
+        "# Blind human re-labelling of SciFact NEI disagreements" if default
+        else "# Blind re-labelling of SciFact NEI disagreements",
         "",
         f"Packet `{rep['packet_id']}`; source run git_sha `{(rep.get('source_run') or {}).get('git_sha')}`. "
         f"Labelled {rep['n_labelled']}/{rep['n_items']} items "
         + "(" + ", ".join(f"{g} {rep['labelled_by_group'][g]}/{rep['items_by_group'][g]}" for g in GROUPS) + ").",
         "",
+        *([] if default else [f"Annotator: {rep['annotator']}.", ""]),
         "The labeller saw each claim with the 5 passages the generator saw, blind to the model's "
         "verdict and answer, the gold label and the claim id. Controls are claims the model got "
         "right, so on a control gold = model and agreement there is the labeller's calibration "
@@ -839,7 +872,7 @@ def to_markdown(rep: Mapping) -> str:
         "",
         "## Agreement",
         "",
-        "| Items | n | human vs gold | human vs model | kappa (gold) | kappa (model) |",
+        f"| Items | n | {who} vs gold | {who} vs model | kappa (gold) | kappa (model) |",
         "|---|---:|---|---|---:|---:|",
     ]
     for name, k in (("Disagreements (gold NEI, model S/C)", "disagreement"), ("Controls (all)", "controls"),
@@ -857,7 +890,7 @@ def to_markdown(rep: Mapping) -> str:
         "",
         "## The disagreements",
         "",
-        f"Of {d['n_labelled']} labelled disagreements ({d['n_total']} in the packet), the human "
+        f"Of {d['n_labelled']} labelled disagreements ({d['n_total']} in the packet), the {who} "
         f"sides with the **model** on {d['human_sides_with_model']} "
         f"(SUPPORT {d['sides_with_model_by_model_label']['SUPPORT']}, CONTRADICT "
         f"{d['sides_with_model_by_model_label']['CONTRADICT']}), with the **gold NEI** on "
@@ -869,16 +902,16 @@ def to_markdown(rep: Mapping) -> str:
         f"(all labelled disagreements: {d['all_split']['cited_doc_in_passages']} / "
         f"{d['all_split']['cited_doc_not_in_passages']}).",
         "",
-        "Human × gold on controls (rows gold, columns human):",
+        f"{Who} × gold on controls (rows gold, columns {who}):",
         "",
-        "| gold \\ human | " + " | ".join(LABELS) + " |",
+        f"| gold \\ {who} | " + " | ".join(LABELS) + " |",
         "|---|" + "---:|" * len(LABELS),
     ]
     conf = rep["controls"]["confusion_gold_x_human"]
     lines += [f"| {g} | " + " | ".join(str(conf[g][h]) for h in LABELS) + " |" for g in LABELS]
     lines += [
         "",
-        "## Secondary: verdict accuracy under human relabels",
+        f"## Secondary: verdict accuracy under {who} relabels",
         "",
         f"> {sec['caveat']}",
         "",
@@ -886,8 +919,8 @@ def to_markdown(rep: Mapping) -> str:
         "|---|---:|---|---:|",
     ]
     for name, k in (("Original SciFact labels (headline)", "original_labels"),
-                    ("Human relabels of the NEI disagreements only", "human_relabels_disagreements_only"),
-                    ("Human relabels of every sampled item", "human_relabels_all_sampled_items")):
+                    (f"{Who} relabels of the NEI disagreements only", "human_relabels_disagreements_only"),
+                    (f"{Who} relabels of every sampled item", "human_relabels_all_sampled_items")):
         a = sec[k]
         ci = a["ci95"]
         lines.append(
@@ -896,8 +929,8 @@ def to_markdown(rep: Mapping) -> str:
         )
     lines += [
         "",
-        f"- Disagreements only: {sec['human_relabels_disagreements_only']['note']}.",
-        f"- Every sampled item: {sec['human_relabels_all_sampled_items']['note']}.",
+        f"- Disagreements only: {sec['human_relabels_disagreements_only']['note'].replace('human', who)}.",
+        f"- Every sampled item: {sec['human_relabels_all_sampled_items']['note'].replace('human', who)}.",
     ]
     if not sec["stored_matches"]:
         lines.append(
@@ -908,7 +941,7 @@ def to_markdown(rep: Mapping) -> str:
         "",
         "## Per disagreement item",
         "",
-        "| item | claim | gold | model | human | decided by | cited doc shown | note |",
+        f"| item | claim | gold | model | {who} | decided by | cited doc shown | note |",
         "|---|---|---|---|---|---|---|---|",
     ]
     for p in rep["per_disagreement"]:
@@ -955,6 +988,11 @@ def main(argv: Sequence[str] | None = None) -> None:
     s.add_argument("--key", type=Path, default=None, help="default: <out>/key.json")
     s.add_argument("--rag", type=Path, default=DEFAULT_RAG)
     s.add_argument("--out", type=Path, default=DEFAULT_OUT)
+    s.add_argument("--annotator", default=None,
+                   help="free-text description of who labelled (default: the single human "
+                        "annotator wording); anything else is treated as LLM annotators")
+    s.add_argument("--annotators-note", default=None,
+                   help="extra sentence appended to the secondary-accuracy caveat")
     args = ap.parse_args(argv)
 
     _guarded(args.out)
@@ -972,10 +1010,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         else:
             key = json.loads((args.key or args.out / KEY_NAME).read_text())
             labels = load_labels(json.loads(args.labels.read_text()), key)
-            rep = score(key, labels, blob)
+            rep = score(key, labels, blob, annotator=args.annotator, annotators_note=args.annotators_note)
             md_p, js_p = write_report(args.out, rep)
             d = rep["disagreement_outcome"]
-            print(f"labelled {rep['n_labelled']}/{rep['n_items']}; human sides with the model on "
+            who = "human" if _is_default(rep) else "annotator"
+            print(f"labelled {rep['n_labelled']}/{rep['n_items']}; {who} sides with the model on "
                   f"{d['human_sides_with_model']}/{d['n_labelled']} labelled disagreements")
             print(f"report: {md_p}\n        {js_p}")
     except RelabelError as e:

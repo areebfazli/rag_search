@@ -57,7 +57,9 @@ which change the query for 56 of the 300 claims and have not been re-measured on
   test labels (about 4%) and calls 8 more debatable; scored against the corrections, accuracy is
   0.83 (0.84 with the debatable ones left out). The audit skipped the no-evidence claims, and of
   the 11 changes 10 favour the model and none goes against it, so this is a one-sided check; the
-  headline keeps the original labels.
+  headline keeps the original labels. A separate secondary check (three blind LLM annotators, not
+  a human) sided with the model on 25 of 31 NEI-gold disagreements; see
+  [details](docs/DETAILS.md#blind-re-labelling-of-the-nei-disagreements-llm-annotators-secondary).
 - **Tried, measured, not adopted:** an evidence-first prompt, two verifier models and a
   "second look" step; none beat the current pipeline
   ([details](docs/DETAILS.md#tried-and-measured-not-adopted)).

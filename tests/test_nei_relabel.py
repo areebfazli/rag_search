@@ -339,3 +339,67 @@ def test_cli_build_and_score_end_to_end(tmp_path, monkeypatch):
     rep = json.loads((out / "report.json").read_text())
     assert rep["disagreement_outcome"]["human_sides_with_model"] == 1
     assert (out / "report.md").read_text().startswith("# Blind human re-labelling")
+
+
+LLM_ANNOTATOR = "majority of 3 blind LLM annotators (2 Claude Opus, 1 Claude Sonnet)"
+
+
+def _scored(**kw):
+    b = blob()
+    _, key = build(b)
+    labels = human_labels(key, {"Q9101": "SUPPORT", "Q9102": "NEI", "Q9103": "CONTRADICT"}, {})
+    return nr.score(key, nr.load_labels(export(key, labels), key), b, **kw)
+
+
+def test_default_annotator_wording_is_unchanged():
+    rep = _scored()
+    assert rep["annotator"] == nr.DEFAULT_ANNOTATOR and rep["annotators_note"] is None
+    assert rep["secondary_verdict_accuracy"]["caveat"] == nr.CAVEAT
+    assert _scored(annotator="  ")["secondary_verdict_accuracy"]["caveat"] == nr.CAVEAT
+    md = nr.to_markdown(rep)
+    assert md.startswith("# Blind human re-labelling of SciFact NEI disagreements")
+    assert "| Items | n | human vs gold | human vs model |" in md
+    assert "Human relabels of the NEI disagreements only" in md
+    assert "Human × gold on controls" in md and "| gold \\ human |" in md
+    assert "Annotator:" not in md and "LLM" not in md
+
+
+def test_llm_annotator_wording_is_neutral_and_caveated():
+    rep = _scored(annotator=LLM_ANNOTATOR, annotators_note="Majority vote of 3.")
+    assert rep["annotator"] == LLM_ANNOTATOR
+    cav = rep["secondary_verdict_accuracy"]["caveat"]
+    assert LLM_ANNOTATOR in cav and "LLMs, not a human" in cav and "weaker check than a human" in cav
+    assert "generator is also an LLM" in cav and cav.endswith("Majority vote of 3.")
+    assert "One annotator (the repo owner" not in cav
+    assert "headline verdict accuracy stays on the original" in cav
+    md = nr.to_markdown(rep)
+    assert md.startswith("# Blind re-labelling of SciFact NEI disagreements")
+    assert f"Annotator: {LLM_ANNOTATOR}." in md
+    assert "| Items | n | annotator vs gold | annotator vs model |" in md
+    assert "Annotator relabels of the NEI disagreements only" in md
+    assert "the annotator sides with the **model**" in md
+    assert "Annotator × gold on controls" in md and "| gold \\ annotator |" in md
+    assert "human" not in md.lower().replace("not a human", "").replace("than a human", "")
+    # counts do not depend on the annotator description
+    base = _scored()
+    assert rep["disagreement_outcome"] == base["disagreement_outcome"]
+
+
+def test_cli_score_records_annotator(tmp_path, monkeypatch, capsys):
+    b = blob()
+    rag = tmp_path / "rag.json"
+    rag.write_text(json.dumps(b))
+    monkeypatch.setattr(nr, "_load_corpus", lambda dataset: corpus(b["rows"]))
+    out = tmp_path / "relabel"
+    nr.main(["build", "--rag", str(rag), "--out", str(out), "--n-nei-controls", "3",
+             "--n-evidence-controls", "2"])
+    key = json.loads((out / "key.json").read_text())
+    labels = tmp_path / "labels.json"
+    labels.write_text(json.dumps(export(key, human_labels(key, {"Q9101": "SUPPORT"}, {}))))
+    nr.main(["score", "--labels", str(labels), "--rag", str(rag), "--out", str(out),
+             "--annotator", LLM_ANNOTATOR, "--annotators-note", "Extra."])
+    rep = json.loads((out / "report.json").read_text())
+    assert rep["annotator"] == LLM_ANNOTATOR and rep["annotators_note"] == "Extra."
+    assert rep["secondary_verdict_accuracy"]["caveat"].endswith("Extra.")
+    assert "annotator sides with the model" in capsys.readouterr().out
+    assert (out / "report.md").read_text().startswith("# Blind re-labelling")
