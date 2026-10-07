@@ -7,7 +7,8 @@ number comes from the committed files in [`eval/results/`](../eval/results/).
 Contents: [Retrieval results](#retrieval-results-at-a-glance) ·
 [Pipeline](#pipeline) · [Stack](#stack) · [Code layout](#code-layout) ·
 [Retrieval evaluation](#retrieval-evaluation) · [Grounded answers](#grounded-answers-rag) ·
-[Label audit](#label-audit) · [NEI re-labelling](#blind-re-labelling-of-the-nei-disagreements-llm-annotators-secondary) · [Tried and not adopted](#tried-and-measured-not-adopted) ·
+[Label audit](#label-audit) · [NEI re-labelling](#blind-re-labelling-of-the-nei-disagreements-llm-annotators-secondary) ·
+[Where the remaining errors come from](#where-the-remaining-verdict-errors-come-from-diagnosis) · [Tried and not adopted](#tried-and-measured-not-adopted) ·
 [Test-set reuse](#how-much-to-trust-the-test-set) ·
 [Judge reliability](#judge-reliability) · [Web search](#web-search-semantic-scholar-and-pubmed) ·
 [Limitations](#limitations) · [What I'd do next](#what-id-do-next) ·
@@ -340,8 +341,76 @@ gold wherever model and gold agree. The question asked is also not SciFact's: "d
 decide it?" (open corpus) against "does the cited abstract decide it?" (closed corpus), the mismatch
 SciFact-Open (Wadden et al. 2022) documents. Annotator spread on the disagreements is 23–28 of 31.
 The labels are not committed (`data/` is gitignored). Read together, this suggests most remaining
-NEI "errors" reflect the benchmark's label definition and the open-corpus mismatch rather than the
-model, retrieval or code; it does not show the verdicts are correct, and it is not a corrected score.
+NEI "errors" reflect where the benchmark draws the NEI line (and, to a lesser extent, the
+open-corpus mismatch) rather than the model, retrieval or code; it does not show the verdicts are
+correct, and it is not a corrected score. How much of this is the open-corpus mismatch was tested
+directly afterwards and is smaller than this check alone suggests; see
+[the diagnosis](#where-the-remaining-verdict-errors-come-from-diagnosis).
+
+### Where the remaining verdict errors come from (diagnosis)
+
+Two follow-up measurements ask where the 61 test errors (31 NEI-gold answered, 30
+SUPPORT/CONTRADICT-gold wrong) come from: is it retrieval, the open-corpus mismatch, or the
+evidence judgement itself? Both are diagnostics, not product changes, and neither is canonical.
+
+**1. Cited-abstract diagnostic (train).** `SSR_RAG_CONTEXT=oracle_cited` (eval-only, never
+canonical) gives the generator only SciFact's cited abstract(s) instead of the retrieved top 5.
+Same seeded 100 `beir/scifact/train` claims, free Ling, judge skipped
+(`data/eval_runs/rag_beir-scifact-train_100_d0921f4e_nojudge_oracle-cited/`, local, gitignored).
+
+| Gold | Retrieved top 5 | Cited abstract only | Fixed / broken |
+|---|---|---|---|
+| All 100 | 0.81 | 0.84 | 7 / 4 (exact McNemar p = 0.55) |
+| SUPPORT | 0.864 | 0.864 | 2 / 2 |
+| CONTRADICT | 0.864 | 0.955 | 2 / 0 |
+| NEI | 0.706 | 0.735 | 3 / 2 |
+
+The +3 points is within run-to-run noise (Ling repeats flip about 7 of 50 verdicts), so the
+retrieval ceiling here is roughly +3 points at most. The cited doc was already in the retrieved
+top 5 for 88 of 100 claims. Of the baseline's 19 errors, 3 had no cited doc in the top 5 (all
+NEI-gold, called SUPPORT from other papers) and the cited abstract fixed all 3; of the 16 with it
+in the top 5, 4 were fixed and 12 stayed wrong. Seven NEI-gold claims are called CONTRADICT even
+when shown only the cited abstract.
+
+**2. Second blind re-labelling (test, errors on a stance claim).** `nei_relabel build --set
+evidence_errors` (packet `a08a3152bfcba3d5`): 70 items, the 30 SUPPORT/CONTRADICT-gold errors plus
+40 controls (20 NEI-gold predicted NEI, 10 SUPPORT and 10 CONTRADICT correct), excluding the first
+packet's claims. Same three blind LLM annotators (2 Claude Opus, 1 Claude Sonnet), majority vote:
+unanimous on 56 of 70, no 3-way splits, Fleiss κ = 0.79.
+
+| Error type (n) | Majority sides with gold (model judgement error) | With the model | Third label |
+|---|---|---|---|
+| SUPPORT → NEI (16) | 8 | 8 | 0 |
+| CONTRADICT → NEI (6) | 3 | 3 | 0 |
+| SUPPORT → CONTRADICT (6) | 0 | 6 | 0 |
+| CONTRADICT → SUPPORT (1) | 0 | 1 | 0 |
+| SUPPORT → no verdict (1) | 0 | 0 | 1 |
+| **All 30** | **11** | **18** | **1** |
+
+Per annotator, 11, 13 and 5 of the 30 side with gold. SciFact's rationale abstract was among the
+passages for 25 of the 30; among the 18 sided with the model, 4 had it missing. Controls: the
+majority matches gold on 36 of 40 (SUPPORT/CONTRADICT 20/20, NEI 16/20); the annotators called 4
+NEI-gold controls CONTRADICT, so they lean toward finding a stance and the 18 may be high.
+Secondary accuracy: 0.8567 (257/300) relabelling these errors only, 0.8433 (253/300) over all
+sampled items; the headline stays 0.7967.
+
+**Conclusion (measured, not triumphant).** The remaining errors are mostly not retrieval (oracle
+ceiling about +3 points on train; cited doc in the top 5 for 88%), not code or parsing, and not
+mainly the open-corpus mismatch: that is smaller than the earlier unblinded estimate (about 25 of
+61) suggested. On train only 3 errors came from it, and in the first blind check the cited
+abstract was shown in 14 of the 25 cases sided with the model. The main source is where the line
+is drawn between NEI and a stance. The model, and the LLM annotators, read the same abstract more
+liberally than SciFact's explicit-rationale-sentence convention on NEI claims (over-reading, mostly
+toward CONTRADICT), and more cautiously on some implied SUPPORT (about 11 genuine too-cautious
+errors). Combined over the 61 test errors: about 43 where blind LLM annotators side with the model
+(25 + 18), about 17 model judgement errors (6 + 11), and 1 with no verdict. Caveats: this is an
+estimate from LLM annotators, not a human; the diagnostic is on train and the re-labelling on
+test, and they are not the same claims; and the train deltas are within noise.
+
+**Implication.** Further gains on SciFact mean calibrating to its annotation convention (for
+example few-shot examples of its NEI threshold). That is benchmark calibration, not a smarter
+system, and should be described that way. Next step: few-shot calibration screened on train (in
+progress, nothing adopted).
 
 ### Tried and measured, not adopted
 
@@ -560,8 +629,11 @@ about 1 per second (`SSR_EVAL_LIMIT=2` is a smoke run).
 - **Remaining errors are evidence-judgement errors.** 31 of 112 NEI claims are answered anyway
   (over-eager) and 16 of 124 SUPPORT claims are abstained on (too literal); format and parsing
   failures are now ≤ 1 of 300. A secondary blind re-label by LLM annotators sided with the model
-  on 25 of the 31 NEI cases, so some of the over-eager count is the label definition, not the model
-  ([details](#blind-re-labelling-of-the-nei-disagreements-llm-annotators-secondary)).
+  on 25 of the 31 NEI cases, so some of the over-eager count is where the benchmark draws the NEI
+  line, not the model ([details](#blind-re-labelling-of-the-nei-disagreements-llm-annotators-secondary));
+  the open-corpus mismatch explains less than that check alone suggested, and about 11 of the 30
+  stance-claim errors look like genuine too-cautious judgements
+  ([diagnosis](#where-the-remaining-verdict-errors-come-from-diagnosis)).
 - **Web search is far below local retrieval on SciFact, and slow.** Even pooled, Recall@5 is
   0.228 against 0.766 (Recall@100 0.384 against 0.965), a query takes many seconds, and the
   results move with S2's and PubMed's indexes; it is an optional source, not a replacement.

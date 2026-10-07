@@ -60,6 +60,8 @@ which change the query for 56 of the 300 claims and have not been re-measured on
   headline keeps the original labels. A separate secondary check (three blind LLM annotators, not
   a human) sided with the model on 25 of 31 NEI-gold disagreements; see
   [details](docs/DETAILS.md#blind-re-labelling-of-the-nei-disagreements-llm-annotators-secondary).
+  Where the remaining errors come from (mostly where NEI is drawn, not retrieval or parsing):
+  [diagnosis](docs/DETAILS.md#where-the-remaining-verdict-errors-come-from-diagnosis).
 - **Tried, measured, not adopted:** an evidence-first prompt, two verifier models, a
   "second look" step, majority voting and a wording prompt variant; none beat the current pipeline
   ([details](docs/DETAILS.md#tried-and-measured-not-adopted)).
