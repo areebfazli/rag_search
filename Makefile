@@ -1,4 +1,4 @@
-.PHONY: install index api eval eval-rag rag-compare rag-audit rag-relabel analysis latency web-eval test lint ci
+.PHONY: install index api eval eval-rag rag-compare rag-audit analysis latency web-eval test lint ci
 
 install:  ## create env + install deps
 	uv sync
@@ -29,9 +29,6 @@ rag-compare:  ## paired McNemar of two RAG runs: make rag-compare A=path/rag.jso
 
 rag-audit:  ## re-score rag.json under the SciFact label audit (offline, no LLM) -> eval/results/rag_label_audit.{md,json}; RUNS=other/rag.json writes next to each
 	uv run --locked python -m app.eval.label_audit $(RUNS) $(ARGS)
-
-rag-relabel:  ## blind human re-labelling of the NEI disagreements (offline, no LLM): STAGE=build (default) -> data/relabel/labeling.html + key.json; STAGE=score LABELS=export.json -> data/relabel/report.{md,json}
-	uv run --locked python -m app.eval.nei_relabel $(or $(STAGE),build) $(if $(LABELS),--labels $(LABELS)) $(ARGS)
 
 # --locked: run against uv.lock exactly as committed, and fail (rather than silently
 # re-resolve and rewrite it) if pyproject.toml has drifted. `make install` is the step
