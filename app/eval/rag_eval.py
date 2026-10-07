@@ -129,6 +129,14 @@ Opt-in experiments (all default off; each makes a run non-canonical and names it
   judge fallback can credit it as an NEI abstention). The aggregates average the judge
   metrics over rows that have them (None here); the request estimate counts 0 judge
   calls. Its signature gains ``judge_skipped`` (only then), its dir ends in ``_nojudge``.
+* ``SSR_RAG_CONTEXT=oracle_cited`` (eval only, a DIAGNOSTIC — never a product mode) — the
+  generator gets the claim's SciFact-cited abstract(s) (oracle_cited_ids: its BEIR qrels
+  docs plus any rationale doc) instead of the retrieved top-k, rendered exactly like
+  retrieved passages; no retrieval runs. It separates open-corpus vs closed-corpus
+  mismatch (SciFact labels a claim against its cited abstract only) from the model's own
+  judgement; its accuracy is a closed-corpus ceiling, not a deployable number. The re-ask
+  policy is the default's. Its signature gains ``context`` (only then), its dir ends in
+  ``_oracle-cited``, and rag.md opens with a DIAGNOSTIC banner.
 * ``SSR_LLM_VOTES=k`` (k > 1) — the pre-registered self-consistency vote
   (generator.combine_votes, VOTE_RULE). Sample #1 of each claim is its ordinary row under
   the UNCHANGED signature (existing checkpoints and re-ask replies are reused) after the
@@ -418,8 +426,22 @@ ORACLE_DEFINITIONS = {
         "claim is scored as a false abstention"
     ),
 }
+# The generator's context (SSR_RAG_CONTEXT). "retrieved" (default) is the product: the
+# top-k of MODE over the whole corpus. "oracle_cited" is a DIAGNOSTIC, never a product
+# mode and never canonical: the claim's SciFact-cited abstract(s) — the docs its label was
+# annotated against — in place of retrieval, so open-corpus vs closed-corpus mismatch can
+# be told apart from the model's own judgement. A ceiling for the closed-corpus task.
+CONTEXT_DEFAULT = "retrieved"
+CONTEXT_DEFINITIONS = {
+    "retrieved": f"the top-{TOP_K} of the retrieval mode over the whole corpus (the product)",
+    "oracle_cited": (
+        "DIAGNOSTIC, not a deployable mode: the claim's cited abstract(s) only (BEIR qrels "
+        "docs, which mark every cited doc relevant incl. NEI claims', plus any rationale "
+        "doc), in doc-id order, rendered like retrieved passages — no retrieval at all"
+    ),
+}
 LABELS = ("SUPPORT", "CONTRADICT", "NEI")
-VERDICT_TO_LABEL = dict(zip(VERDICTS, LABELS, strict=True))  # SUPPORTED->SUPPORT, ...
+VERDICT_TO_LABEL =dict(zip(VERDICTS, LABELS, strict=True))  # SUPPORTED->SUPPORT, ...
 NO_VERDICT = "NONE"  # answered, but with no parseable verdict line: maps to no label
 # How a reply with no verdict is scored (predicted_label), recorded in run metadata so
 # rag.md describes the rule its rag.json was scored under. A rag.json without the field
@@ -880,6 +902,7 @@ def run_metadata(
     n_requested: int | str | None = None,
     judge_skipped: bool = False,
     votes: Mapping | None = None,
+    context: str = CONTEXT_DEFAULT,
 ) -> dict:
     """Provenance for rag.json: enough to tell whether two runs are comparable. Records
     each role's provider, base URL, model id and the provider fields sent — never a key.
@@ -947,6 +970,10 @@ def run_metadata(
             "judged": "not re-judged: faithfulness / context relevance are the first reply's",
         },
         **({"votes": dict(votes)} if votes else {}),
+        # SSR_RAG_CONTEXT diagnostic only (absent on a default run, so its rag.json is
+        # unchanged): what the generator was given instead of retrieval.
+        **({"context": context, "context_definition": CONTEXT_DEFINITIONS[context]}
+           if context != CONTEXT_DEFAULT else {}),
     }
 
 
@@ -1367,13 +1394,24 @@ def _votes_md(v: Mapping | None) -> str:
     )
 
 
+def _context_banner(context: str | None) -> str:
+    """The line rag.md opens with on an SSR_RAG_CONTEXT diagnostic run ('' by default)."""
+    if not context or context == CONTEXT_DEFAULT:
+        return ""
+    return (
+        f"> **DIAGNOSTIC — context `{context}`, not retrieval.** "
+        f"{CONTEXT_DEFINITIONS[context]}. A ceiling for the closed-corpus task, not a "
+        f"deployable mode; never comparable to a headline number.\n\n"
+    )
+
+
 def markdown_from_json(blob: Mapping) -> str:
     """rag.md re-rendered offline from a finished rag.json — the aggregates and rows it
     stores — with the current writer: no LLM call, no retrieval, nothing recomputed."""
     run = blob.get("run") if isinstance(blob.get("run"), Mapping) else {}
     rows = blob.get("rows") if isinstance(blob.get("rows"), list) else None
     missing = blob.get("missing_query_ids")
-    return _markdown(blob, int(blob.get("skipped") or 0), int(blob.get("judge_parse_failures") or 0),
+    return _context_banner(run.get("context")) + _markdown(blob, int(blob.get("skipped") or 0), int(blob.get("judge_parse_failures") or 0),
                      run.get("dataset"), rows, missing=len(missing) if isinstance(missing, list) else 0,
                      no_verdict_scoring=run.get("no_verdict_scoring"))
 
@@ -1452,6 +1490,21 @@ def rag_dataset(env: Mapping[str, str] | None = None) -> str:
     return env.get("SSR_RAG_DATASET") or settings.eval_dataset
 
 
+def rag_context(env: Mapping[str, str] | None = None) -> str:
+    """SSR_RAG_CONTEXT: "retrieved" (unset = the default) or the "oracle_cited" diagnostic."""
+    env = os.environ if env is None else env
+    raw = (env.get("SSR_RAG_CONTEXT") or CONTEXT_DEFAULT).strip().lower()
+    if raw not in CONTEXT_DEFINITIONS:
+        raise ValueError(f"SSR_RAG_CONTEXT must be one of {sorted(CONTEXT_DEFINITIONS)}, got {raw!r}")
+    return raw
+
+
+def oracle_cited_ids(qrels_ids: Collection[str], label: ClaimLabel) -> list[str]:
+    """The claim's cited abstracts for the oracle_cited diagnostic: its BEIR qrels docs
+    (SciFact's cited docs, NEI claims included) plus any rationale doc, in doc-id order."""
+    return sorted(set(qrels_ids) | label.rationale_doc_ids, key=lambda d: (len(d), d))
+
+
 def sample_claims(query_ids: Collection[str], n: int | None, seed: int = SEED) -> list[str]:
     """The first `n` of a seeded shuffle of the sorted ids (all of them for None).
 
@@ -1503,6 +1556,7 @@ def output_dir(
     prompt_variant: str = "default",
     votes: int = 1,
     judge_skipped: bool = False,
+    context: str = CONTEXT_DEFAULT,
 ) -> tuple[Path, bool]:
     """Where this run's rag.{md,json} go, and whether it is the canonical run.
 
@@ -1519,11 +1573,15 @@ def output_dir(
     off (SSR_LLM_REASK=false) is not what the product serves: never canonical either,
     and its directory ends in ``_noreask``. Neither is a run with a non-default prompt
     variant (its prompt hash already names the directory apart), a self-consistency vote
-    (SSR_LLM_VOTES = k > 1: ``_votes<k>``) or no judge (SSR_RAG_SKIP_JUDGE: ``_nojudge``).
+    (SSR_LLM_VOTES = k > 1: ``_votes<k>``), no judge (SSR_RAG_SKIP_JUDGE: ``_nojudge``)
+    or the oracle-context diagnostic (SSR_RAG_CONTEXT=oracle_cited: ``_oracle-cited``).
     """
     changed = non_default_roles(gen, judge_ep) if gen and judge_ep else []
     whole_split = split_size is not None and n_sample == split_size
-    defaults = reask and prompt_variant == "default" and votes == 1 and not judge_skipped
+    defaults = (
+        reask and prompt_variant == "default" and votes == 1 and not judge_skipped
+        and context == CONTEXT_DEFAULT
+    )
     if not limit and dataset == CANONICAL_DATASET and whole_split and not changed and defaults:
         return OUT, True
     name = f"rag_{_slug(dataset)}_{n_sample}_{phash[:8]}"
@@ -1537,6 +1595,8 @@ def output_dir(
         name += f"_votes{votes}"
     if judge_skipped:
         name += "_nojudge"
+    if context != CONTEXT_DEFAULT:
+        name += f"_{_slug(context)}"
     return assert_outside(RUNS / name), False
 
 
@@ -1605,7 +1665,7 @@ _CHECKPOINT_ROW_KEYS = (
 
 def signature_fields(
     dataset: str, n_sample: int, gen: LLMEndpoint, judge_ep: LLMEndpoint,
-    judge_skipped: bool = False,
+    judge_skipped: bool = False, context: str = CONTEXT_DEFAULT,
 ) -> dict:
     """Everything that changes a row's content. Nothing git-specific: a commit that
     leaves every one of these alone must not invalidate hours of rate-limited work.
@@ -1615,7 +1675,8 @@ def signature_fields(
     settings.llm_prompt_variant, via prompt_hash), the generator's token budget and
     reasoning setting, and the retrieval that produced its context. ``judge_skipped``
     (SSR_RAG_SKIP_JUDGE: rows carry no judge scores) adds a key ONLY when set, so every
-    default signature — and the checkpoint it names — is unchanged. The vote's k is not
+    default signature — and the checkpoint it names — is unchanged; so does ``context``
+    (SSR_RAG_CONTEXT, only when not the default "retrieved"). The vote's k is not
     here: sample #1 is the ordinary row, and the extra samples live in their own cache
     (samples_path) under this same signature, so runs with different k share them.
     """
@@ -1643,6 +1704,8 @@ def signature_fields(
         fields["index_manifest"] = index
     if judge_skipped:
         fields["judge_skipped"] = True
+    if context != CONTEXT_DEFAULT:
+        fields["context"] = context
     return fields
 
 
@@ -2072,6 +2135,7 @@ def main(argv: Sequence[str] = ()) -> None:
         raise ValueError("SSR_EVAL_LIMIT must be >= 0")
     # Opt-in experiment switches; every one of them makes the run non-canonical.
     skip_judge = os.environ.get("SSR_RAG_SKIP_JUDGE", "") not in ("", "0")
+    context = rag_context()
     k_votes = settings.llm_votes
     variant = settings.llm_prompt_variant
 
@@ -2096,7 +2160,7 @@ def main(argv: Sequence[str] = ()) -> None:
     reask_on = settings.llm_reask
     out, canonical = output_dir(
         dataset, limit, len(qids), phash, gen_ep, judge_ep, reask=reask_on, split_size=len(queries),
-        prompt_variant=variant, votes=k_votes, judge_skipped=skip_judge,
+        prompt_variant=variant, votes=k_votes, judge_skipped=skip_judge, context=context,
     )
     if changed := non_default_roles(gen_ep, judge_ep):
         print(_non_default_notice(changed, gen_ep, judge_ep), flush=True)
@@ -2109,6 +2173,9 @@ def main(argv: Sequence[str] = ()) -> None:
     if k_votes > 1:
         print(f"SSR_LLM_VOTES={k_votes}: self-consistency vote over {k_votes} samples per claim "
               f"({VOTE_RULE}); this run never writes {OUT}", flush=True)
+    if context != CONTEXT_DEFAULT:
+        print(f"SSR_RAG_CONTEXT={context}: {CONTEXT_DEFINITIONS[context]}; this run "
+              f"never writes {OUT}", flush=True)
     if skip_judge:
         print(f"SSR_RAG_SKIP_JUDGE: no judge calls (no faithfulness / context relevance; a reply "
               f"with no verdict scores {NO_VERDICT}); this run never writes {OUT}", flush=True)
@@ -2132,7 +2199,9 @@ def main(argv: Sequence[str] = ()) -> None:
         print(replacing, flush=True)
 
     # Resume: rows completed under the same signature are reused, never re-generated.
-    sig_fields = signature_fields(dataset, len(qids), gen_ep, judge_ep, judge_skipped=skip_judge)
+    sig_fields = signature_fields(
+        dataset, len(qids), gen_ep, judge_ep, judge_skipped=skip_judge, context=context,
+    )
     sig = rag_signature(sig_fields)
     ckpt = checkpoint_path(sig)
     done, prior = load_checkpoint(ckpt, sig, qids)
@@ -2149,7 +2218,9 @@ def main(argv: Sequence[str] = ()) -> None:
             warn = " — the default MiniLM, which measurably HURTS nDCG@10 on SciFact"
         print(f"MODE={MODE}: reranking with {reranker}{warn}", flush=True)
 
-    service = SearchService()
+    # The oracle_cited diagnostic never retrieves (and so never opens Qdrant).
+    service = SearchService() if context == CONTEXT_DEFAULT else None
+    corpus: dict[str, dict] = {}
     skipped = parse_failures = 0
     judge_calls = int(_stat(prior, "judge_calls"))
     prior_judge_usd = float(_stat(prior, "judge_reported_usd"))
@@ -2170,9 +2241,15 @@ def main(argv: Sequence[str] = ()) -> None:
     # Resumed rows already carry their evidence flags; only the rest are retrieved.
     position = {q: i for i, q in enumerate(qids, start=1)}
     retrieved: dict[str, list[SearchHit]] = {}
+    if service is None and todo_ids:
+        corpus.update({d["doc_id"]: d for d in load_documents()})
     for qid in todo_ids:
         try:
-            retrieved[qid] = service.retrieve(queries[qid], mode=MODE, top_k=TOP_K)
+            if service is None:  # SSR_RAG_CONTEXT=oracle_cited: the cited abstract(s) only
+                cited = {d for d, rel in qrels.get(qid, {}).items() if rel > 0}
+                retrieved[qid] = reask_hits(oracle_cited_ids(cited, labels[qid]), corpus)
+            else:
+                retrieved[qid] = service.retrieve(queries[qid], mode=MODE, top_k=TOP_K)
         except Exception as e:  # skip a query rather than lose the whole run
             skip(position[qid], qid, e)
     gold = {qid: {d for d, rel in qrels.get(qid, {}).items() if rel > 0} for qid in retrieved}
@@ -2197,7 +2274,6 @@ def main(argv: Sequence[str] = ()) -> None:
     # The re-ask post-step's work, known before any LLM call: resumed rows with no
     # verdict either have their reply in the re-ask cache or still need one call.
     reask_cache = ReplyCache(reask_cache_path(dataset))
-    corpus: dict[str, dict] = {}
 
     def passages(qid: str) -> list[SearchHit]:
         if qid in retrieved:  # this session's retrieval: exactly what the generator saw
@@ -2745,7 +2821,7 @@ def main(argv: Sequence[str] = ()) -> None:
                 # fields keep their place at the top of the file.
                 "run": {
                     **run_metadata(gen_ep, judge_ep, dataset=dataset, n_requested=n_label,
-                                   judge_skipped=skip_judge, votes=votes_meta),
+                                   judge_skipped=skip_judge, votes=votes_meta, context=context),
                     "n_sample": len(qids),
                     "eval_limit": limit,
                     "canonical": canonical,
@@ -2765,7 +2841,8 @@ def main(argv: Sequence[str] = ()) -> None:
         )
     )
     (out / "rag.md").write_text(
-        _markdown(agg, skipped, parse_failures, dataset, rows, missing=len(missing_ids))
+        _context_banner(context)
+        + _markdown(agg, skipped, parse_failures, dataset, rows, missing=len(missing_ids))
     )
     print(
         f"\nn={agg['n']}  verdict_accuracy={agg['verdict_accuracy']}  "

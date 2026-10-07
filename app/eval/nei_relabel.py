@@ -34,11 +34,28 @@ substituted. The headline stays on the original labels: one annotator, and an
 open-corpus judgement ("do these passages decide it?") is a different task from
 SciFact's closed one ("does the cited abstract decide it?").
 
+Second packet set, ``--set evidence_errors``. The same blind check for the other side of
+the errors: every SUPPORT/CONTRADICT-gold claim the model got wrong (predicted NEI, the
+opposite stance, or no parseable verdict), mixed with controls the model got right (default
+20 NEI-gold predicted NEI, 20 SUPPORT/CONTRADICT-gold predicted correctly, 10 + 10) under a
+different seed, written to data/relabel_evidence/ so the first packet is untouched. Controls
+never reuse a claim from an earlier packet (``--exclude-key``, default data/relabel/key.json
+when it exists): a labeller who recognised a claim would know it is a control, because the
+targets were never in the first packet. The scorer reports, per target, whether the
+labeller sides with the gold label (the passages decide it as SciFact says: a model
+judgement error), with the model (a label or evidence problem: split on whether SciFact's
+rationale abstract was among the passages at all, since without it the passages may not
+decide the claim — a retrieval miss, not a label error) or picks a third label.
+
 Run:
     uv run python -m app.eval.nei_relabel build [--rag eval/results/rag.json] [--force]
         -> data/relabel/labeling.html (open it in a browser) + data/relabel/key.json
     uv run python -m app.eval.nei_relabel score --labels path/to/exported-labels.json
         -> data/relabel/report.{md,json}
+    uv run python -m app.eval.nei_relabel build --set evidence_errors
+        -> data/relabel_evidence/{labeling.html,key.json}  (score with --set evidence_errors)
+    uv run python -m app.eval.nei_relabel export-items --set evidence_errors --to items.json
+        -> the page's blind items ({packet_id, labels_format, items}) for other annotators
 """
 from __future__ import annotations
 
@@ -48,7 +65,7 @@ import hashlib
 import json
 import math
 import random
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from pathlib import Path
 
 from app.core.paths import REPO_ROOT, RESULTS, assert_outside, display_path
@@ -64,6 +81,29 @@ HTML_NAME = "labeling.html"
 KEY_NAME = "key.json"
 KEY_FORMAT = "nei-relabel-key/v1"
 LABELS_FORMAT = "nei-relabel-labels/v1"
+
+NEI_SET = "nei_disagreements"  # the first packet (the default; its output must not change)
+EVIDENCE_SET = "evidence_errors"
+SETS = (NEI_SET, EVIDENCE_SET)
+EVIDENCE_GROUPS = ("evidence_error", "control_nei", "control_evidence")
+EVIDENCE_SEED = 20261107  # deliberately not SEED: different item ids, samples and order
+EVIDENCE_N_NEI_CONTROLS = 20
+EVIDENCE_N_EVIDENCE_CONTROLS = 20
+DEFAULT_EVIDENCE_OUT = REPO_ROOT / "data" / "relabel_evidence"
+STANCES = ("SUPPORT", "CONTRADICT")
+
+
+def groups_for(kind: str) -> tuple[str, ...]:
+    if kind == NEI_SET:
+        return GROUPS
+    if kind == EVIDENCE_SET:
+        return EVIDENCE_GROUPS
+    raise RelabelError(f"unknown packet set {kind!r} (expected one of {', '.join(SETS)})")
+
+
+def default_out(kind: str) -> Path:
+    groups_for(kind)
+    return DEFAULT_OUT if kind == NEI_SET else DEFAULT_EVIDENCE_OUT
 
 CAVEAT = (
     "SECONDARY, not a headline: the headline verdict accuracy stays on the original SciFact "
@@ -119,29 +159,47 @@ def _sample(rows: Sequence[Mapping], k: int, seed: int, tag: str) -> list[Mappin
     return _rng(seed, f"sample:{tag}").sample(pool, k)
 
 
+def _targets(rows: Sequence[Mapping], kind: str) -> list[Mapping]:
+    if kind == NEI_SET:
+        return [r for r in rows if r["gold_label"] == "NEI" and r["predicted_label"] in STANCES]
+    groups_for(kind)
+    return [r for r in rows if r["gold_label"] in STANCES and r["predicted_label"] != r["gold_label"]]
+
+
 def select_items(
     rows: Sequence[Mapping],
     seed: int = SEED,
     n_nei_controls: int = N_NEI_CONTROLS,
     n_evidence_controls: int = N_EVIDENCE_CONTROLS,
+    kind: str = NEI_SET,
+    exclude_claims: Collection[str] = (),
 ) -> list[dict]:
-    """Key entries (shuffled, with opaque item ids) for every NEI-gold claim the model gave
-    SUPPORT/CONTRADICT, plus seeded samples of controls the model got right: NEI-gold
-    predicted NEI, and SUPPORT/CONTRADICT-gold predicted correctly (split evenly, any odd
-    one to SUPPORT)."""
+    """Key entries (shuffled, with opaque item ids) for every target claim, plus seeded
+    samples of controls the model got right: NEI-gold predicted NEI, and
+    SUPPORT/CONTRADICT-gold predicted correctly (split evenly, any odd one to SUPPORT).
+
+    Targets: for ``nei_disagreements`` (default) every NEI-gold claim the model gave
+    SUPPORT/CONTRADICT; for ``evidence_errors`` every SUPPORT/CONTRADICT-gold claim the
+    model got wrong (NEI, the other stance, or no parseable verdict). `exclude_claims`
+    removes claims from the control pools only (claims an earlier packet showed)."""
+    target_group = groups_for(kind)[0]
     ids = [str(r["query_id"]) for r in rows]
     if len(set(ids)) != len(ids):
         raise RelabelError("rag.json has duplicate query ids")
-    disagree = [r for r in rows if r["gold_label"] == "NEI" and r["predicted_label"] in ("SUPPORT", "CONTRADICT")]
-    nei_ok = [r for r in rows if r["gold_label"] == "NEI" and r["predicted_label"] == "NEI"]
+    excl = {str(c) for c in exclude_claims}
+    pool = [r for r in rows if str(r["query_id"]) not in excl] if excl else rows
+    disagree = _targets(rows, kind)
+    nei_ok = [r for r in pool if r["gold_label"] == "NEI" and r["predicted_label"] == "NEI"]
     n_con = n_evidence_controls // 2
-    picked: list[tuple[str, Mapping]] = [("disagreement", r) for r in sorted(disagree, key=lambda r: str(r["query_id"]))]
+    picked: list[tuple[str, Mapping]] = [(target_group, r) for r in sorted(disagree, key=lambda r: str(r["query_id"]))]
     picked += [("control_nei", r) for r in _sample(nei_ok, n_nei_controls, seed, "control_nei")]
     for lab, k in (("SUPPORT", n_evidence_controls - n_con), ("CONTRADICT", n_con)):
-        ok = [r for r in rows if r["gold_label"] == lab and r["predicted_label"] == lab]
+        ok = [r for r in pool if r["gold_label"] == lab and r["predicted_label"] == lab]
         picked += [("control_evidence", r) for r in _sample(ok, k, seed, f"control_{lab}")]
     if not disagree:
-        raise RelabelError("no NEI-gold claims with a SUPPORT/CONTRADICT prediction in this run")
+        if kind == NEI_SET:
+            raise RelabelError("no NEI-gold claims with a SUPPORT/CONTRADICT prediction in this run")
+        raise RelabelError("no SUPPORT/CONTRADICT-gold claims with a wrong prediction in this run")
 
     id_rng = _rng(seed, "item-ids")
     item_ids: set[str] = set()
@@ -153,7 +211,7 @@ def select_items(
         retrieved = [str(d) for d in r.get("retrieved_doc_ids") or []]
         if not retrieved:
             raise RelabelError(f"claim {r['query_id']}: row stores no retrieved_doc_ids")
-        entries.append({
+        entry = {
             "item_id": iid,
             "claim_id": str(r["query_id"]),
             "group": group,
@@ -163,8 +221,15 @@ def select_items(
             # Is a doc the SciFact annotators cited (qrels) among the passages shown? For a
             # NEI claim that doc has no rationale by definition — the analysis splits on it.
             "cited_doc_in_passages": bool(set(map(str, r.get("qrels_doc_ids") or [])) & set(retrieved)),
-            "verdict_source": r.get("verdict_source"),
-        })
+        }
+        if kind == EVIDENCE_SET:
+            # Was an abstract SciFact marks as carrying the rationale among the passages?
+            # Without it the passages may genuinely not decide an S/C-gold claim.
+            entry["rationale_doc_in_passages"] = bool(
+                set(map(str, r.get("rationale_doc_ids") or [])) & set(retrieved)
+            )
+        entry["verdict_source"] = r.get("verdict_source")
+        entries.append(entry)
     _rng(seed, "order").shuffle(entries)
     return entries
 
@@ -575,17 +640,30 @@ def build_packet(
     n_nei_controls: int = N_NEI_CONTROLS,
     n_evidence_controls: int = N_EVIDENCE_CONTROLS,
     source: str = "",
+    kind: str = NEI_SET,
+    exclude_keys: Sequence[Mapping] = (),
 ) -> tuple[str, dict]:
     """(html, key) for a rag.json blob. `claims` is {claim id: text}, `docs` is
-    {doc id: {"title", "text"}} — injectable, so tests need no corpus."""
-    entries = select_items(blob["rows"], seed, n_nei_controls, n_evidence_controls)
+    {doc id: {"title", "text"}} — injectable, so tests need no corpus. `exclude_keys`
+    are keys of earlier packets whose claims must not reappear as controls."""
+    excluded = {e["claim_id"] for k in exclude_keys for e in k["items"]}
+    entries = select_items(blob["rows"], seed, n_nei_controls, n_evidence_controls, kind, excluded)
     items = public_items(entries, claims, docs)
     pid = packet_id(items)
     run = blob.get("run") or {}
-    counts = {g: sum(e["group"] == g for e in entries) for g in GROUPS}
+    counts = {g: sum(e["group"] == g for e in entries) for g in groups_for(kind)}
+    extra: dict = {}
+    if kind != NEI_SET:
+        extra["set"] = kind
+    if exclude_keys:
+        extra["controls_exclude"] = {
+            "packets": [k.get("packet_id") for k in exclude_keys],
+            "n_claims": len(excluded),
+        }
     key = {
         "format": KEY_FORMAT,
         "packet_id": pid,
+        **extra,
         "seed": seed,
         "source": source,
         "source_run": {k: run.get(k) for k in ("git_sha", "dataset", "generator_model", "prompt_hash")},
@@ -708,9 +786,16 @@ def _agreement(pairs: Sequence[tuple[str, str]]) -> dict:
     return {"n": n, "agree": k, "rate": round(k / n, 4) if n else None, "ci95": wilson(k, n)}
 
 
+def _cats(pairs: Sequence[tuple[str, str]]) -> tuple[str, ...]:
+    """LABELS plus any other row label present (a model with no parseable verdict is
+    'NONE'), so nothing silently drops out of a confusion table or kappa."""
+    extra = sorted({r for r, _ in pairs} - set(LABELS), key=str)
+    return LABELS + tuple(extra)
+
+
 def _confusion(pairs: Sequence[tuple[str, str]]) -> dict:
     """{row label: {human label: count}} for (row, human) pairs."""
-    return {r: {h: sum(p == (r, h) for p in pairs) for h in LABELS} for r in LABELS}
+    return {r: {h: sum(p == (r, h) for p in pairs) for h in LABELS} for r in _cats(pairs)}
 
 
 def _accuracy(rows: Sequence[Mapping], gold: Mapping[str, str]) -> dict:
@@ -737,8 +822,25 @@ def check_rows(key: Mapping, rows: Sequence[Mapping]) -> dict[str, Mapping]:
     return by_id
 
 
+def _block(es: Sequence[Mapping], lab: Mapping[str, str]) -> dict:
+    hg = [(e["gold_label"], lab[e["item_id"]]) for e in es]
+    hm = [(e["model_label"], lab[e["item_id"]]) for e in es]
+    return {
+        "n": len(es),
+        "human_vs_gold": _agreement(hg),
+        "human_vs_model": _agreement(hm),
+        "kappa_human_vs_gold": cohen_kappa([g for g, _ in hg], [h for _, h in hg]),
+        "kappa_human_vs_model": cohen_kappa([m for m, _ in hm], [h for _, h in hm], _cats(hm)),
+        "confusion_gold_x_human": _confusion(hg),
+        "confusion_model_x_human": _confusion(hm),
+    }
+
+
 def score(key: Mapping, labels: Mapping[str, Mapping], blob: Mapping,
           annotator: str | None = None, annotators_note: str | None = None) -> dict:
+    if key.get("set", NEI_SET) != NEI_SET:
+        groups_for(key["set"])
+        return score_evidence(key, labels, blob, annotator, annotators_note)
     annotator = (annotator or "").strip() or DEFAULT_ANNOTATOR
     rows = blob["rows"]
     check_rows(key, rows)
@@ -749,17 +851,7 @@ def score(key: Mapping, labels: Mapping[str, Mapping], blob: Mapping,
         return [e for e in items if e["group"] in names and e["item_id"] in lab]
 
     def block(es: Sequence[Mapping]) -> dict:
-        hg = [(e["gold_label"], lab[e["item_id"]]) for e in es]
-        hm = [(e["model_label"], lab[e["item_id"]]) for e in es]
-        return {
-            "n": len(es),
-            "human_vs_gold": _agreement(hg),
-            "human_vs_model": _agreement(hm),
-            "kappa_human_vs_gold": cohen_kappa([g for g, _ in hg], [h for _, h in hg]),
-            "kappa_human_vs_model": cohen_kappa([m for m, _ in hm], [h for _, h in hm]),
-            "confusion_gold_x_human": _confusion(hg),
-            "confusion_model_x_human": _confusion(hm),
-        }
+        return _block(es, lab)
 
     dis = group("disagreement")
     sides_model = [e for e in dis if lab[e["item_id"]] == e["model_label"]]
@@ -836,6 +928,122 @@ def score(key: Mapping, labels: Mapping[str, Mapping], blob: Mapping,
     }
 
 
+OUTCOMES = ("with_gold", "with_model", "third_label")
+
+
+def _outcome(e: Mapping, human: str) -> str:
+    """Which side the labeller takes on a target error (gold != model there)."""
+    if human == e["gold_label"]:
+        return "with_gold"
+    if human == e["model_label"]:
+        return "with_model"
+    return "third_label"
+
+
+def score_evidence(key: Mapping, labels: Mapping[str, Mapping], blob: Mapping,
+                   annotator: str | None = None, annotators_note: str | None = None) -> dict:
+    """Score an ``evidence_errors`` packet: on each SUPPORT/CONTRADICT-gold claim the model
+    got wrong, does the labeller side with the gold label (a model judgement error), with
+    the model (a label or evidence problem) or pick a third label?"""
+    annotator = (annotator or "").strip() or DEFAULT_ANNOTATOR
+    groups = EVIDENCE_GROUPS
+    rows = blob["rows"]
+    check_rows(key, rows)
+    items = key["items"]
+    lab = {e["item_id"]: labels[e["item_id"]]["label"] for e in items if e["item_id"] in labels}
+
+    def group(*names: str) -> list[Mapping]:
+        return [e for e in items if e["group"] in names and e["item_id"] in lab]
+
+    def tally(es: Sequence[Mapping]) -> dict:
+        return {"n": len(es), **{o: sum(_outcome(e, lab[e["item_id"]]) == o for e in es) for o in OUTCOMES}}
+
+    tgt = group("evidence_error")
+    all_tgt = [e for e in items if e["group"] == "evidence_error"]
+    types = sorted({f"{e['gold_label']}->{e['model_label']}" for e in all_tgt})
+    by_type = {}
+    for t in types:
+        es = [e for e in tgt if f"{e['gold_label']}->{e['model_label']}" == t]
+        by_type[t] = {
+            "n_total": sum(f"{e['gold_label']}->{e['model_label']}" == t for e in all_tgt),
+            **tally(es),
+            "human_labels": {h: sum(lab[e["item_id"]] == h for e in es) for h in LABELS},
+        }
+
+    gold = {str(r["query_id"]): r["gold_label"] for r in rows}
+    relabel_tgt = {**gold, **{e["claim_id"]: lab[e["item_id"]] for e in tgt}}
+    relabel_all = {**gold, **{e["claim_id"]: lab[e["item_id"]] for e in items if e["item_id"] in lab}}
+    original = _accuracy(rows, gold)
+    stored = blob.get("verdict_accuracy")
+    n_total = {g: sum(e["group"] == g for e in items) for g in groups}
+
+    return {
+        "set": EVIDENCE_SET,
+        "annotator": annotator,
+        "annotators_note": (annotators_note or "").strip() or None,
+        "packet_id": key["packet_id"],
+        "source_run": key.get("source_run"),
+        "controls_exclude": key.get("controls_exclude"),
+        "n_items": len(items),
+        "n_labelled": len(lab),
+        "labelled_by_group": {g: len(group(g)) for g in groups},
+        "items_by_group": n_total,
+        "evidence_error": _block(tgt, lab),
+        "controls": _block(group("control_nei", "control_evidence"), lab),
+        "control_nei": _block(group("control_nei"), lab),
+        "control_evidence": _block(group("control_evidence"), lab),
+        "all_items": _block(group(*groups), lab),
+        "target_outcome": {
+            "n_labelled": len(tgt),
+            "n_total": n_total["evidence_error"],
+            **{o: tally(tgt)[o] for o in OUTCOMES},
+            "by_error_type": by_type,
+            "by_rationale_shown": {
+                "rationale_doc_in_passages": tally([e for e in tgt if e["rationale_doc_in_passages"]]),
+                "rationale_doc_not_in_passages": tally([e for e in tgt if not e["rationale_doc_in_passages"]]),
+            },
+            "meaning": {
+                "with_gold": "the passages decide the claim as SciFact says: a model judgement error",
+                "with_model": "the labeller reads the passages as the model did: a label or evidence "
+                              "problem (a retrieval miss when SciFact's rationale abstract was not "
+                              "among the passages)",
+                "third_label": "neither; for a model with no parseable verdict (NONE) every non-gold "
+                               "label lands here",
+            },
+        },
+        "secondary_verdict_accuracy": {
+            "caveat": caveat_for(annotator, annotators_note),
+            "original_labels": original,
+            "stored_verdict_accuracy": stored,
+            "stored_matches": stored is None or abs(original["verdict_accuracy"] - stored) < 5e-4,
+            "human_relabels_targets_only": {
+                **_accuracy(rows, relabel_tgt),
+                "labels_changed": sum(relabel_tgt[q] != gold[q] for q in gold),
+                "note": "one-sided: only the SUPPORT/CONTRADICT-gold errors are re-judged, so this "
+                        "can only rise; it is not an estimate of accuracy under human labels",
+            },
+            "human_relabels_all_sampled_items": {
+                **_accuracy(rows, relabel_all),
+                "labels_changed": sum(relabel_all[q] != gold[q] for q in gold),
+                "note": "two-sided on the sample: controls the human labels differently from "
+                        "gold now count against the model too; the other claims keep gold",
+            },
+        },
+        "per_target": [
+            {
+                "item_id": e["item_id"], "claim_id": e["claim_id"], "gold": e["gold_label"],
+                "model": e["model_label"], "human": lab.get(e["item_id"]),
+                "outcome": _outcome(e, lab[e["item_id"]]) if e["item_id"] in lab else None,
+                "decided_by": (labels.get(e["item_id"]) or {}).get("passages", []),
+                "rationale_doc_in_passages": e["rationale_doc_in_passages"],
+                "verdict_source": e.get("verdict_source"),
+                "note": (labels.get(e["item_id"]) or {}).get("note", ""),
+            }
+            for e in sorted(all_tgt, key=lambda e: e["claim_id"])
+        ],
+    }
+
+
 def _f(v: object) -> str:
     if v is None:
         return "n/a"
@@ -853,6 +1061,8 @@ def _cell(s: object) -> str:
 
 
 def to_markdown(rep: Mapping) -> str:
+    if rep.get("set", NEI_SET) == EVIDENCE_SET:
+        return _evidence_markdown(rep)
     d, sec = rep["disagreement_outcome"], rep["secondary_verdict_accuracy"]
     default = _is_default(rep)
     who, Who = ("human", "Human") if default else ("annotator", "Annotator")
@@ -953,6 +1163,154 @@ def to_markdown(rep: Mapping) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _evidence_markdown(rep: Mapping) -> str:
+    d, sec = rep["target_outcome"], rep["secondary_verdict_accuracy"]
+    default = _is_default(rep)
+    who, Who = ("human", "Human") if default else ("annotator", "Annotator")
+    excl = rep.get("controls_exclude") or {}
+    lines = [
+        "# Blind human re-labelling of SciFact SUPPORT/CONTRADICT errors" if default
+        else "# Blind re-labelling of SciFact SUPPORT/CONTRADICT errors",
+        "",
+        f"Packet `{rep['packet_id']}`; source run git_sha `{(rep.get('source_run') or {}).get('git_sha')}`. "
+        f"Labelled {rep['n_labelled']}/{rep['n_items']} items "
+        + "(" + ", ".join(f"{g} {rep['labelled_by_group'][g]}/{rep['items_by_group'][g]}"
+                          for g in EVIDENCE_GROUPS) + ").",
+        "",
+        *([] if default else [f"Annotator: {rep['annotator']}.", ""]),
+        "Targets are the SUPPORT/CONTRADICT-gold claims the model got wrong. The labeller saw "
+        "each claim with the passages the generator saw, blind to the model's verdict and "
+        "answer, the gold label and the claim id, mixed with controls the model got right "
+        "(NEI-gold predicted NEI, SUPPORT/CONTRADICT-gold predicted correctly). On a control "
+        "gold = model, so agreement there is the labeller's calibration against SciFact's labels."
+        + (f" Controls exclude the {excl.get('n_claims')} claims of earlier packet(s) "
+           + ", ".join(f"`{p}`" for p in excl.get("packets") or []) + "." if excl else ""),
+        "",
+        "## Agreement",
+        "",
+        f"| Items | n | {who} vs gold | {who} vs model | kappa (gold) | kappa (model) |",
+        "|---|---:|---|---|---:|---:|",
+    ]
+    for name, k in (("Targets (S/C gold, model wrong)", "evidence_error"), ("Controls (all)", "controls"),
+                    ("Controls: NEI-gold, model NEI", "control_nei"),
+                    ("Controls: S/C-gold, model right", "control_evidence"), ("All items", "all_items")):
+        b = rep[k]
+        lines.append(
+            f"| {name} | {b['n']} | {_agree_md(b['human_vs_gold'])} | {_agree_md(b['human_vs_model'])} "
+            f"| {_f(b['kappa_human_vs_gold'])} | {_f(b['kappa_human_vs_model'])} |"
+        )
+    lines += [
+        "",
+        "Kappa is n/a where it is undefined (one rater uses a single label throughout).",
+        "",
+        "## The errors",
+        "",
+        f"Of {d['n_labelled']} labelled targets ({d['n_total']} in the packet), the {who} sides "
+        f"with the **gold** label on {d['with_gold']} (the passages decide it as SciFact says: a "
+        f"model judgement error), with the **model** on {d['with_model']} (a label or evidence "
+        f"problem), and picks a third label on {d['third_label']}.",
+        "",
+        "| gold -> model | labelled / n | with gold | with model | third label |",
+        "|---|---:|---:|---:|---:|",
+    ]
+    for t, v in d["by_error_type"].items():
+        lines.append(f"| {t} | {v['n']}/{v['n_total']} | {v['with_gold']} | {v['with_model']} | {v['third_label']} |")
+    rs = d["by_rationale_shown"]
+    lines += [
+        "",
+        "| SciFact rationale abstract among the passages | n | with gold | with model | third label |",
+        "|---|---:|---:|---:|---:|",
+        *(f"| {name} | {rs[k]['n']} | {rs[k]['with_gold']} | {rs[k]['with_model']} | {rs[k]['third_label']} |"
+          for name, k in (("yes", "rationale_doc_in_passages"), ("no", "rationale_doc_not_in_passages"))),
+        "",
+        "- With the model, rationale abstract not shown: the abstract SciFact's label rests on "
+        "never reached the generator, so the gold label does not describe these passages — a "
+        "retrieval miss (or other passages genuinely read differently), not a model judgement error.",
+        f"- With the model, rationale abstract shown: the {who} reads the cited evidence "
+        f"differently from SciFact's annotators (or shares the model's stricter reading).",
+        "- A model with no parseable verdict (NONE) cannot be sided with; any non-gold label "
+        "there counts as a third label.",
+        "",
+        f"Controls calibration: {who} × gold on controls (rows gold, columns {who}):",
+        "",
+        f"| gold \\ {who} | " + " | ".join(LABELS) + " |",
+        "|---|" + "---:|" * len(LABELS),
+    ]
+    conf = rep["controls"]["confusion_gold_x_human"]
+    lines += [f"| {g} | " + " | ".join(str(conf[g][h]) for h in LABELS) + " |" for g in conf]
+    lines += [
+        "",
+        f"## Secondary: verdict accuracy under {who} relabels",
+        "",
+        f"> {sec['caveat']}",
+        "",
+        "| Labels | correct / n | verdict accuracy (95% Wilson CI) | labels changed |",
+        "|---|---:|---|---:|",
+    ]
+    for name, k in (("Original SciFact labels (headline)", "original_labels"),
+                    (f"{Who} relabels of the S/C-gold errors only", "human_relabels_targets_only"),
+                    (f"{Who} relabels of every sampled item", "human_relabels_all_sampled_items")):
+        a = sec[k]
+        ci = a["ci95"]
+        lines.append(
+            f"| {name} | {a['correct']}/{a['n']} | {_f(a['verdict_accuracy'])}"
+            f" ({ci[0]:.3f}–{ci[1]:.3f}) | {a.get('labels_changed', 0)} |"
+        )
+    lines += [
+        "",
+        f"- Targets only: {sec['human_relabels_targets_only']['note'].replace('human', who)}.",
+        f"- Every sampled item: {sec['human_relabels_all_sampled_items']['note'].replace('human', who)}.",
+    ]
+    if not sec["stored_matches"]:
+        lines.append(
+            f"- WARNING: recomputed original accuracy {sec['original_labels']['verdict_accuracy']} "
+            f"differs from the run's stored {sec['stored_verdict_accuracy']}."
+        )
+    lines += [
+        "",
+        "## Per target item",
+        "",
+        f"| item | claim | gold | model | {who} | side | decided by | rationale shown | verdict source | note |",
+        "|---|---|---|---|---|---|---|---|---|---|",
+    ]
+    for p in rep["per_target"]:
+        lines.append(
+            f"| {p['item_id']} | {p['claim_id']} | {p['gold']} | {p['model']} | {p['human'] or '—'} | "
+            f"{(p['outcome'] or '—').replace('_', ' ')} | {','.join(map(str, p['decided_by'])) or '—'} | "
+            f"{'yes' if p['rationale_doc_in_passages'] else 'no'} | {p['verdict_source'] or '—'} "
+            f"| {_cell(p['note'])} |"
+        )
+    return "\n".join(lines) + "\n"
+
+
+def page_items(html: str) -> dict:
+    """The blind data a labelling page carries: {packet_id, labels_format, items}."""
+    start = html.find('<script type="application/json" id="packet-data">')
+    end = html.find("</script>", start)
+    if start < 0 or end < 0:
+        raise RelabelError("not a labelling page: no packet-data block")
+    data = json.loads(html[start + len('<script type="application/json" id="packet-data">'):end])
+    if set(data) != {"packet_id", "labels_format", "items"}:
+        raise RelabelError(f"unexpected packet-data fields: {sorted(data)}")
+    for it in data["items"]:
+        if set(it) != {"id", "claim", "passages"}:
+            raise RelabelError(f"unexpected item fields: {sorted(it)}")
+    return data
+
+
+def export_items(packet_dir: Path, to: Path) -> dict:
+    """Write the page's blind items (exactly what the labeller sees, nothing from the key)
+    to `to`, for annotators who label from a JSON file instead of the page."""
+    to = _guarded(Path(to))
+    data = page_items((Path(packet_dir) / HTML_NAME).read_text(encoding="utf-8"))
+    key_p = Path(packet_dir) / KEY_NAME
+    if key_p.exists() and json.loads(key_p.read_text()).get("packet_id") != data["packet_id"]:
+        raise RelabelError(f"{key_p} is for a different packet than {HTML_NAME}")
+    to.parent.mkdir(parents=True, exist_ok=True)
+    to.write_text(json.dumps(data, indent=1) + "\n", encoding="utf-8")
+    return data
+
+
 def write_report(out_dir: Path, rep: Mapping) -> tuple[Path, Path]:
     out_dir = _guarded(out_dir)
     md_p, js_p = _guarded(out_dir / "report.md"), _guarded(out_dir / "report.json")
@@ -976,46 +1334,89 @@ def _load_corpus(dataset: str) -> tuple[dict[str, str], dict[str, dict]]:
 def main(argv: Sequence[str] | None = None) -> None:
     ap = argparse.ArgumentParser(prog="python -m app.eval.nei_relabel", description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
+    set_help = (f"which packet: {NEI_SET} (default; out data/relabel/) or {EVIDENCE_SET} "
+                "(S/C-gold errors; out data/relabel_evidence/)")
     b = sub.add_parser("build", help="write the blind labelling page + key to data/relabel/")
+    b.add_argument("--set", dest="kind", choices=SETS, default=NEI_SET, help=set_help)
     b.add_argument("--rag", type=Path, default=DEFAULT_RAG)
-    b.add_argument("--out", type=Path, default=DEFAULT_OUT)
-    b.add_argument("--seed", type=int, default=SEED)
-    b.add_argument("--n-nei-controls", type=int, default=N_NEI_CONTROLS)
-    b.add_argument("--n-evidence-controls", type=int, default=N_EVIDENCE_CONTROLS)
+    b.add_argument("--out", type=Path, default=None, help="default: the --set's directory")
+    b.add_argument("--seed", type=int, default=None)
+    b.add_argument("--n-nei-controls", type=int, default=None)
+    b.add_argument("--n-evidence-controls", type=int, default=None)
+    b.add_argument("--exclude-key", type=Path, action="append", default=None,
+                   help="key of an earlier packet whose claims must not be controls (repeatable); "
+                        f"{EVIDENCE_SET} default: data/relabel/key.json if it exists")
     b.add_argument("--force", action="store_true", help="overwrite a key for a different packet")
     s = sub.add_parser("score", help="score exported labels against the key")
+    s.add_argument("--set", dest="kind", choices=SETS, default=NEI_SET, help=set_help)
     s.add_argument("--labels", type=Path, required=True)
     s.add_argument("--key", type=Path, default=None, help="default: <out>/key.json")
     s.add_argument("--rag", type=Path, default=DEFAULT_RAG)
-    s.add_argument("--out", type=Path, default=DEFAULT_OUT)
+    s.add_argument("--out", type=Path, default=None, help="default: the --set's directory")
     s.add_argument("--annotator", default=None,
                    help="free-text description of who labelled (default: the single human "
                         "annotator wording); anything else is treated as LLM annotators")
     s.add_argument("--annotators-note", default=None,
                    help="extra sentence appended to the secondary-accuracy caveat")
+    x = sub.add_parser("export-items", help="write a built packet's blind items as JSON")
+    x.add_argument("--set", dest="kind", choices=SETS, default=NEI_SET, help=set_help)
+    x.add_argument("--packet", type=Path, default=None, help="default: the --set's directory")
+    x.add_argument("--to", type=Path, required=True)
     args = ap.parse_args(argv)
 
+    if args.cmd == "export-items":
+        try:
+            data = export_items(args.packet or default_out(args.kind), args.to)
+        except RelabelError as e:
+            raise SystemExit(f"error: {e}") from None
+        print(f"packet {data['packet_id']}: {len(data['items'])} blind items -> {args.to}")
+        return
+    if args.out is None:
+        args.out = default_out(args.kind)
     _guarded(args.out)
     blob = json.loads(args.rag.read_text())
     try:
         if args.cmd == "build":
+            evid = args.kind == EVIDENCE_SET
+            seed = args.seed if args.seed is not None else (EVIDENCE_SEED if evid else SEED)
+            n_nei = args.n_nei_controls if args.n_nei_controls is not None else (
+                EVIDENCE_N_NEI_CONTROLS if evid else N_NEI_CONTROLS)
+            n_ev = args.n_evidence_controls if args.n_evidence_controls is not None else (
+                EVIDENCE_N_EVIDENCE_CONTROLS if evid else N_EVIDENCE_CONTROLS)
+            excl_paths = args.exclude_key
+            if excl_paths is None:
+                first = DEFAULT_OUT / KEY_NAME
+                excl_paths = [first] if evid and first.exists() else []
+            exclude_keys = [json.loads(p.read_text()) for p in excl_paths]
+            for p, k in zip(excl_paths, exclude_keys):
+                print(f"controls exclude the {len(k['items'])} claims of packet {k.get('packet_id')} ({p})")
             dataset = (blob.get("run") or {}).get("dataset") or "beir/scifact/test"
             claims, docs = _load_corpus(dataset)
-            html, key = build_packet(blob, claims, docs, args.seed, args.n_nei_controls,
-                                     args.n_evidence_controls, source=display_path(args.rag.resolve()))
+            html, key = build_packet(blob, claims, docs, seed, n_nei, n_ev,
+                                     source=display_path(args.rag.resolve()), kind=args.kind,
+                                     exclude_keys=exclude_keys)
             html_p, key_p = write_packet(args.out, html, key, force=args.force)
             print(f"packet {key['packet_id']}: {key['n_items']} items {key['counts']}")
             print(f"labelling page: {html_p}")
             print(f"key (do not open while labelling): {key_p}")
         else:
             key = json.loads((args.key or args.out / KEY_NAME).read_text())
+            if key.get("set", NEI_SET) != args.kind:
+                raise RelabelError(f"the key is for set {key.get('set', NEI_SET)!r}; pass "
+                                   f"--set {key.get('set', NEI_SET)} (so the report lands in its own directory)")
             labels = load_labels(json.loads(args.labels.read_text()), key)
             rep = score(key, labels, blob, annotator=args.annotator, annotators_note=args.annotators_note)
             md_p, js_p = write_report(args.out, rep)
-            d = rep["disagreement_outcome"]
             who = "human" if _is_default(rep) else "annotator"
-            print(f"labelled {rep['n_labelled']}/{rep['n_items']}; {who} sides with the model on "
-                  f"{d['human_sides_with_model']}/{d['n_labelled']} labelled disagreements")
+            if args.kind == EVIDENCE_SET:
+                d = rep["target_outcome"]
+                print(f"labelled {rep['n_labelled']}/{rep['n_items']}; on {d['n_labelled']} labelled "
+                      f"S/C-gold errors the {who} sides with gold {d['with_gold']}, with the model "
+                      f"{d['with_model']}, third label {d['third_label']}")
+            else:
+                d = rep["disagreement_outcome"]
+                print(f"labelled {rep['n_labelled']}/{rep['n_items']}; {who} sides with the model on "
+                      f"{d['human_sides_with_model']}/{d['n_labelled']} labelled disagreements")
             print(f"report: {md_p}\n        {js_p}")
     except RelabelError as e:
         raise SystemExit(f"error: {e}") from None

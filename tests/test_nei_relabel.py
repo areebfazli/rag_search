@@ -403,3 +403,305 @@ def test_cli_score_records_annotator(tmp_path, monkeypatch, capsys):
     assert rep["secondary_verdict_accuracy"]["caveat"].endswith("Extra.")
     assert "annotator sides with the model" in capsys.readouterr().out
     assert (out / "report.md").read_text().startswith("# Blind re-labelling")
+
+
+# --- default packet is unchanged by the evidence_errors set ---------------------------------
+
+# sha256 of the default packet / reports on the fake rows above, recorded before the
+# evidence_errors set was added: the first packet's page, key and reports must not change.
+GOLDEN = {
+    "html": "2e58ebf1b216b444ab3b75a43626a39f45d7073039c5d76cb67af15d34ed110b",
+    "key": "1d50573260ada1b80ae46b03411b01d19321df82efab398b2c56d8e0b3b5e87e",
+    "rep_default": "b57a4d4b66795c7a68b025c9bd213d0dd18ab5f072c5ca85a62fe3df60fdf9fc",
+    "md_default": "de21d59814f246c10cc49a7895b8c00d8ef9933b3c1640a87460146572ead1b3",
+    "rep_llm": "28fe92b265a2e0c7407e60c6ac3dfa23623c4e7397e0565f9a0677c353f3cf3a",
+    "md_llm": "2a4bf72243c6c87fbca328bb16adc783da4c76274549c36f0c7ec0a3a378c031",
+}
+
+
+def _sha(s):
+    import hashlib
+
+    return hashlib.sha256(s.encode()).hexdigest()
+
+
+def test_default_packet_and_reports_are_byte_identical():
+    html, key = build()
+    assert _sha(html) == GOLDEN["html"]
+    assert _sha(json.dumps(key, indent=2)) == GOLDEN["key"]
+    assert "set" not in key and "controls_exclude" not in key
+    assert all("rationale_doc_in_passages" not in e for e in key["items"])
+    for name, kw in (("default", {}), ("llm", {"annotator": LLM_ANNOTATOR, "annotators_note": "Note."})):
+        rep = _scored(**kw)
+        assert _sha(json.dumps(rep, indent=2, ensure_ascii=False)) == GOLDEN[f"rep_{name}"]
+        assert _sha(nr.to_markdown(rep)) == GOLDEN[f"md_{name}"]
+    # explicit default kind == implicit default
+    _, key2 = build(kind=nr.NEI_SET)
+    assert key2 == key
+
+
+# --- evidence_errors set ----------------------------------------------------------------------
+
+
+def evidence_rows():
+    """fake_rows() plus more S/C-gold errors. Targets: Q9501 SUPPORT->NEI (rationale doc
+    shown), Q9502 CONTRADICT->SUPPORT (rationale not shown), Q9503 SUPPORT->NONE,
+    Q9504 SUPPORT->CONTRADICT (rationale shown)."""
+    rows = fake_rows()
+    rows += [row("Q9503", "SUPPORT", "NONE"), row("Q9504", "SUPPORT", "CONTRADICT")]
+    for r in rows:
+        if r["query_id"] in ("Q9501", "Q9504"):
+            r["rationale_doc_ids"] = [r["retrieved_doc_ids"][3]]
+            r["qrels_doc_ids"] = [r["retrieved_doc_ids"][3]]
+        elif r["gold_label"] != "NEI":
+            r["rationale_doc_ids"] = [f"ratQ{r['query_id']}"]
+    return rows
+
+
+EV_TARGETS = {"Q9501", "Q9502", "Q9503", "Q9504"}
+
+
+def build_ev(b=None, **kw):
+    b = b or blob(evidence_rows())
+    kw.setdefault("kind", nr.EVIDENCE_SET)
+    kw.setdefault("seed", nr.EVIDENCE_SEED)
+    return build(b, **kw)
+
+
+def test_evidence_selection_groups_and_counts():
+    _, key = build_ev()
+    assert key["set"] == nr.EVIDENCE_SET and key["seed"] == nr.EVIDENCE_SEED != nr.SEED
+    assert key["counts"] == {"evidence_error": 4, "control_nei": 4, "control_evidence": 4}
+    by = {e["claim_id"]: e for e in key["items"]}
+    assert {c for c, e in by.items() if e["group"] == "evidence_error"} == EV_TARGETS
+    assert not {"Q9101", "Q9102", "Q9103"} & set(by)  # NEI disagreements belong to packet 1
+    for e in key["items"]:
+        if e["group"] == "evidence_error":
+            assert e["gold_label"] in ("SUPPORT", "CONTRADICT") and e["model_label"] != e["gold_label"]
+        elif e["group"] == "control_nei":
+            assert (e["gold_label"], e["model_label"]) == ("NEI", "NEI")
+        else:
+            assert e["gold_label"] == e["model_label"] != "NEI"
+    assert by["Q9503"]["model_label"] == "NONE"
+    assert by["Q9501"]["rationale_doc_in_passages"] and by["Q9504"]["rationale_doc_in_passages"]
+    assert not by["Q9502"]["rationale_doc_in_passages"] and not by["Q9503"]["rationale_doc_in_passages"]
+    # ids, samples and order differ from the default packet's seed
+    _, k_default_seed = build_ev(seed=nr.SEED)
+    assert {e["item_id"] for e in key["items"]}.isdisjoint(e["item_id"] for e in k_default_seed["items"])
+
+
+def test_evidence_controls_exclude_earlier_packets():
+    b = blob(evidence_rows())
+    _, first = build(b)  # the NEI packet over the same rows
+    _, key = build_ev(b, n_nei_controls=2, n_evidence_controls=2, exclude_keys=[first])
+    first_claims = {e["claim_id"] for e in first["items"]}
+    ctl = {e["claim_id"] for e in key["items"] if e["group"] != "evidence_error"}
+    assert ctl and not ctl & first_claims
+    assert key["controls_exclude"] == {"packets": [first["packet_id"]], "n_claims": len(first_claims)}
+    # targets are never excluded
+    _, k2 = build_ev(b, n_nei_controls=0, n_evidence_controls=0,
+                     exclude_keys=[{"packet_id": "x", "items": [{"claim_id": "Q9501"}]}])
+    assert {e["claim_id"] for e in k2["items"]} == EV_TARGETS
+    with pytest.raises(nr.RelabelError, match="only 2 available"):  # 6 NEI controls - 4 used
+        build_ev(b, n_nei_controls=3, exclude_keys=[first])
+
+
+def test_unknown_set_is_refused():
+    with pytest.raises(nr.RelabelError, match="unknown packet set"):
+        build(kind="bogus")
+
+
+def test_evidence_page_leaks_nothing_and_matches_the_default_ui():
+    b = blob(evidence_rows())
+    html, key = build_ev(b)
+    for e in key["items"]:
+        assert e["claim_id"] not in html
+        for d in e["retrieved_doc_ids"]:
+            assert d not in html
+    assert ANSWER not in html
+    for r in b["rows"]:
+        for d in r["qrels_doc_ids"] + r["rationale_doc_ids"]:
+            assert d not in html
+    low = html.lower()
+    for word in ("gold", "verdict", "predict", "model", "cited", "citation", "disagree",
+                 "control", "answer", "refuted", "supported", "key.json", "claim_id", "query_id",
+                 "rationale", "evidence_error", "evidence_errors", "relabel_evidence", "error"):
+        assert word not in low, word
+    data_txt = re.search(r'id="packet-data">(.*?)</script>', html, re.S).group(1)
+    for lab in ("SUPPORT", "CONTRADICT", "NEI", "NONE"):
+        assert lab not in data_txt
+    data = page_data(html)
+    assert set(data) == {"packet_id", "labels_format", "items"}
+    assert all(set(it) == {"id", "claim", "passages"} for it in data["items"])
+    assert all(set(p) == {"title", "text"} for it in data["items"] for p in it["passages"])
+    # same page apart from the data block: nothing in the UI tells the two packets apart
+    default_html, _ = build()
+    strip = lambda h: re.sub(r'id="packet-data">.*?</script>', "", h, flags=re.S)  # noqa: E731
+    assert strip(html) == strip(default_html)
+
+
+def test_evidence_order_is_shuffled_not_grouped():
+    _, key = build_ev()
+    groups = [e["group"] for e in key["items"]]
+    assert groups[:4] != ["evidence_error"] * 4 and groups[-4:] != ["evidence_error"] * 4
+
+
+def test_export_items_is_the_blind_page_data(tmp_path):
+    html, key = build_ev()
+    nr.write_packet(tmp_path / "p", html, key)
+    out = tmp_path / "blind" / "items.json"
+    data = nr.export_items(tmp_path / "p", out)
+    raw = out.read_text()
+    assert json.loads(raw) == data == page_data(html)
+    assert set(data) == {"packet_id", "labels_format", "items"} and data["packet_id"] == key["packet_id"]
+    for e in key["items"]:
+        assert e["claim_id"] not in raw and e["group"] not in raw
+    for lab in ("SUPPORT", "CONTRADICT", "NEI", "NONE"):
+        assert lab not in raw
+    # a key for another packet next to the page is refused
+    _, other = build_ev(seed=1)
+    (tmp_path / "p" / "key.json").write_text(json.dumps(other))
+    with pytest.raises(nr.RelabelError, match="different packet"):
+        nr.export_items(tmp_path / "p", out)
+    with pytest.raises(SystemExit):
+        nr.export_items(tmp_path / "p", RESULTS / "never_created.json")
+
+
+def ev_labels(key, tgt, ctl=None):
+    """tgt: claim id -> label for targets; controls agree with gold unless in ctl."""
+    ctl = ctl or {}
+    out = {}
+    for e in key["items"]:
+        c = e["claim_id"]
+        out[e["item_id"]] = tgt.get(c) if e["group"] == "evidence_error" else ctl.get(c, e["gold_label"])
+    return {k: v for k, v in out.items() if v is not None}
+
+
+def test_evidence_score_outcomes_and_secondary_accuracy():
+    b = blob(evidence_rows())
+    _, key = build_ev(b)
+    ctl_nei = next(e["claim_id"] for e in key["items"] if e["group"] == "control_nei")
+    labels = ev_labels(key, {
+        "Q9501": "SUPPORT",      # with gold (model said NEI): a model judgement error
+        "Q9502": "SUPPORT",      # with the model (gold CONTRADICT); rationale not shown
+        "Q9503": "NEI",          # model NONE: any non-gold label is a third label
+        "Q9504": "NEI",          # gold SUPPORT, model CONTRADICT: third label
+    }, {ctl_nei: "SUPPORT"})
+    rep = nr.score(key, nr.load_labels(export(key, labels), key), b)
+    assert rep["set"] == nr.EVIDENCE_SET
+    d = rep["target_outcome"]
+    assert (d["with_gold"], d["with_model"], d["third_label"], d["n_labelled"], d["n_total"]) == (1, 1, 2, 4, 4)
+    assert d["by_error_type"]["SUPPORT->NEI"] == {
+        "n_total": 1, "n": 1, "with_gold": 1, "with_model": 0, "third_label": 0,
+        "human_labels": {"SUPPORT": 1, "CONTRADICT": 0, "NEI": 0}}
+    assert d["by_error_type"]["SUPPORT->NONE"]["third_label"] == 1
+    assert d["by_rationale_shown"]["rationale_doc_in_passages"] == {
+        "n": 2, "with_gold": 1, "with_model": 0, "third_label": 1}
+    assert d["by_rationale_shown"]["rationale_doc_not_in_passages"] == {
+        "n": 2, "with_gold": 0, "with_model": 1, "third_label": 1}
+    # NONE stays visible in the model confusion table rather than dropping out
+    assert rep["evidence_error"]["confusion_model_x_human"]["NONE"]["NEI"] == 1
+    assert rep["evidence_error"]["human_vs_model"]["agree"] == 1
+    c = rep["controls"]
+    assert c["n"] == 8 and c["human_vs_gold"]["agree"] == 7
+    assert c["confusion_gold_x_human"]["NEI"]["SUPPORT"] == 1
+
+    sec = rep["secondary_verdict_accuracy"]
+    base = sum(r["predicted_label"] == r["gold_label"] for r in b["rows"])
+    assert sec["original_labels"]["correct"] == base and sec["stored_matches"]
+    one = sec["human_relabels_targets_only"]
+    assert one["correct"] == base + 1 and one["labels_changed"] == 3  # Q9502 flips to right
+    two = sec["human_relabels_all_sampled_items"]
+    assert two["correct"] == base + 1 - 1 and two["labels_changed"] == 4
+    assert "headline verdict accuracy stays on the original" in sec["caveat"]
+    per = {p["claim_id"]: p for p in rep["per_target"]}
+    assert per["Q9501"]["outcome"] == "with_gold" and per["Q9502"]["outcome"] == "with_model"
+
+    md = nr.to_markdown(rep)
+    assert md.startswith("# Blind human re-labelling of SciFact SUPPORT/CONTRADICT errors")
+    assert "sides with the **gold** label on 1" in md and "with the **model** on 1" in md
+    assert "| SUPPORT->NONE | 1/1 | 0 | 0 | 1 |" in md
+    assert "Human relabels of the S/C-gold errors only" in md and "One annotator" in md
+    assert "n\\|ote x" in md
+
+
+def test_evidence_score_llm_annotator_wording():
+    b = blob(evidence_rows())
+    _, key = build_ev(b)
+    labels = ev_labels(key, {"Q9501": "SUPPORT", "Q9502": "SUPPORT"})
+    rep = nr.score(key, nr.load_labels(export(key, labels), key), b,
+                   annotator=LLM_ANNOTATOR, annotators_note="Majority vote of 3.")
+    cav = rep["secondary_verdict_accuracy"]["caveat"]
+    assert LLM_ANNOTATOR in cav and "LLMs, not a human" in cav and cav.endswith("Majority vote of 3.")
+    md = nr.to_markdown(rep)
+    assert md.startswith("# Blind re-labelling of SciFact SUPPORT/CONTRADICT errors")
+    assert f"Annotator: {LLM_ANNOTATOR}." in md
+    assert "the annotator sides with the **gold** label" in md
+    assert "human" not in md.lower().replace("not a human", "").replace("than a human", "")
+    d = rep["target_outcome"]
+    assert (d["n_labelled"], d["with_gold"], d["with_model"]) == (2, 1, 1)
+    per = {p["claim_id"]: p for p in rep["per_target"]}
+    assert per["Q9503"]["human"] is None and per["Q9503"]["outcome"] is None
+
+
+def test_cli_evidence_build_export_and_score(tmp_path, monkeypatch, capsys):
+    b = blob(evidence_rows())
+    rag = tmp_path / "rag.json"
+    rag.write_text(json.dumps(b))
+    monkeypatch.setattr(nr, "_load_corpus", lambda dataset: corpus(b["rows"]))
+    first = tmp_path / "relabel"
+    monkeypatch.setattr(nr, "DEFAULT_OUT", first)
+    nr.main(["build", "--rag", str(rag), "--out", str(first), "--n-nei-controls", "2",
+             "--n-evidence-controls", "2"])
+    k1 = json.loads((first / "key.json").read_text())
+    before = {p.name: p.read_bytes() for p in first.iterdir()}
+
+    out = tmp_path / "relabel_evidence"
+    nr.main(["build", "--set", "evidence_errors", "--rag", str(rag), "--out", str(out),
+             "--n-nei-controls", "2", "--n-evidence-controls", "2"])
+    key = json.loads((out / "key.json").read_text())
+    assert key["set"] == "evidence_errors" and key["seed"] == nr.EVIDENCE_SEED
+    assert key["controls_exclude"]["packets"] == [k1["packet_id"]]  # default: data/relabel/key.json
+    assert key["counts"] == {"evidence_error": 4, "control_nei": 2, "control_evidence": 2}
+    assert {p.name: p.read_bytes() for p in first.iterdir()} == before  # packet 1 untouched
+    # building the evidence set into packet 1's directory is refused (different packet)
+    with pytest.raises(SystemExit, match="different packet"):
+        nr.main(["build", "--set", "evidence_errors", "--rag", str(rag), "--out", str(first),
+                 "--n-nei-controls", "2", "--n-evidence-controls", "2"])
+
+    items = tmp_path / "blind2" / "items.json"
+    nr.main(["export-items", "--set", "evidence_errors", "--packet", str(out), "--to", str(items)])
+    assert json.loads(items.read_text())["packet_id"] == key["packet_id"]
+
+    labels = tmp_path / "labels.json"
+    labels.write_text(json.dumps(export(key, ev_labels(key, {"Q9501": "NEI", "Q9502": "CONTRADICT"}))))
+    # scoring an evidence key without --set is refused, so packet 1's report is never overwritten
+    with pytest.raises(SystemExit, match="--set evidence_errors"):
+        nr.main(["score", "--labels", str(labels), "--key", str(out / "key.json"), "--rag", str(rag),
+                 "--out", str(first)])
+    nr.main(["score", "--set", "evidence_errors", "--labels", str(labels), "--rag", str(rag),
+             "--out", str(out), "--annotator", LLM_ANNOTATOR])
+    rep = json.loads((out / "report.json").read_text())
+    assert rep["target_outcome"]["with_model"] == 1 and rep["target_outcome"]["with_gold"] == 1
+    assert "on 2 labelled S/C-gold errors the annotator sides with gold 1" in capsys.readouterr().out
+    assert (out / "report.md").read_text().startswith("# Blind re-labelling of SciFact SUPPORT/CONTRADICT")
+    assert not (first / "report.json").exists()
+
+
+def test_cli_explicit_exclude_key(tmp_path, monkeypatch):
+    b = blob(evidence_rows())
+    rag = tmp_path / "rag.json"
+    rag.write_text(json.dumps(b))
+    monkeypatch.setattr(nr, "_load_corpus", lambda dataset: corpus(b["rows"]))
+    monkeypatch.setattr(nr, "DEFAULT_OUT", tmp_path / "missing")  # no implicit exclusion
+    out = tmp_path / "ev"
+    nr.main(["build", "--set", "evidence_errors", "--rag", str(rag), "--out", str(out),
+             "--n-nei-controls", "2", "--n-evidence-controls", "2"])
+    assert "controls_exclude" not in json.loads((out / "key.json").read_text())
+    fake_key = tmp_path / "k.json"
+    fake_key.write_text(json.dumps({"packet_id": "p0", "items": [{"claim_id": "Q9200"}]}))
+    nr.main(["build", "--set", "evidence_errors", "--rag", str(rag), "--out", str(out), "--force",
+             "--n-nei-controls", "2", "--n-evidence-controls", "2", "--exclude-key", str(fake_key)])
+    key = json.loads((out / "key.json").read_text())
+    assert key["controls_exclude"] == {"packets": ["p0"], "n_claims": 1}
+    assert "Q9200" not in {e["claim_id"] for e in key["items"]}

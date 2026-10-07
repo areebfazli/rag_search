@@ -358,7 +358,7 @@ DEFAULT_JUDGE_MODEL = Settings.model_fields["openrouter_judge_model"].default
 # Env the harness reads; cleared in every main() test so a developer's shell can't leak in.
 RAG_ENV = (
     "SSR_RAG_N", "SSR_RAG_DATASET", "SSR_EVAL_LIMIT", "SSR_EVAL_REFRESH", "SSR_RAG_CHECK_QUOTA",
-    "SSR_RAG_SKIP_JUDGE",
+    "SSR_RAG_SKIP_JUDGE", "SSR_RAG_CONTEXT",
 )
 PAID_GEN_MODEL = "openai/gpt-oss-120b"
 LUNA = "openai/gpt-6-luna"
@@ -2324,3 +2324,79 @@ def test_a_failed_vote_sample_is_not_cached_and_the_claim_is_listed(tmp_path, mo
     rag_eval.main()  # the re-run draws exactly the missing sample
     _, blob = _votes_dir(tmp_path)
     assert blob["missing_vote_samples"] == [] and len(gen.extra) == 10
+
+
+# --- SSR_RAG_CONTEXT=oracle_cited: the closed-corpus diagnostic ---------------------------
+
+
+def test_rag_context_defaults_to_retrieved_and_rejects_unknown_values():
+    assert rag_eval.rag_context({}) == "retrieved"
+    assert rag_eval.rag_context({"SSR_RAG_CONTEXT": ""}) == "retrieved"
+    assert rag_eval.rag_context({"SSR_RAG_CONTEXT": " Oracle_Cited "}) == "oracle_cited"
+    with pytest.raises(ValueError, match="SSR_RAG_CONTEXT"):
+        rag_eval.rag_context({"SSR_RAG_CONTEXT": "oracle"})
+
+
+def test_oracle_cited_ids_are_the_qrels_docs_plus_rationale_docs_in_id_order():
+    assert rag_eval.oracle_cited_ids({"120", "9"}, ClaimLabel("NEI")) == ["9", "120"]
+    assert rag_eval.oracle_cited_ids({"5"}, ClaimLabel("SUPPORT", {"5", "40"})) == ["5", "40"]
+
+
+def test_oracle_context_is_in_the_signature_and_never_canonical(monkeypatch, tmp_path):
+    monkeypatch.setattr(rag_eval, "_index_fingerprint", lambda: None)
+    gen, judge_ep = _endpoints()
+    base = rag_eval.signature_fields("beir/scifact/train", 100, gen, judge_ep)
+    assert rag_eval.signature_fields(
+        "beir/scifact/train", 100, gen, judge_ep, context="retrieved") == base
+    oracle = rag_eval.signature_fields(
+        "beir/scifact/train", 100, gen, judge_ep, judge_skipped=True, context="oracle_cited")
+    assert oracle == {**base, "judge_skipped": True, "context": "oracle_cited"}
+    monkeypatch.setattr(rag_eval, "OUT", tmp_path / "results")
+    monkeypatch.setattr(rag_eval, "RUNS", tmp_path / "runs")
+    ph, test = "abcdef0123456789", rag_eval.CANONICAL_DATASET
+    assert rag_eval.output_dir(test, 0, 300, ph, split_size=300, context="retrieved")[1] is True
+    path, canonical = rag_eval.output_dir(test, 0, 300, ph, split_size=300, context="oracle_cited")
+    assert not canonical and path.name == "rag_beir-scifact-test_300_abcdef01_oracle-cited"
+    path, _ = rag_eval.output_dir(test, 0, 300, ph, split_size=300, judge_skipped=True,
+                                  context="oracle_cited")
+    assert path.name.endswith("_nojudge_oracle-cited")
+    assert "context" not in rag_eval.run_metadata()
+    assert rag_eval.run_metadata(context="oracle_cited")["context"] == "oracle_cited"
+
+
+def test_oracle_cited_run_gives_the_generator_only_the_cited_abstracts(tmp_path, monkeypatch):
+    seen: dict[str, list[str]] = {}
+
+    class RecordingGenerator(FakeGenerator):
+        def generate(self, query, hits):
+            seen[query] = [h.doc_id for h in hits]
+            return super().generate(query, hits)
+
+    class NoRetrieval:
+        def __init__(self, *a, **kw):
+            raise AssertionError("the oracle_cited diagnostic must not retrieve")
+
+    fake_judge = _patch_main(tmp_path, monkeypatch, tmp_path, generator=RecordingGenerator)
+    corpus = [{"doc_id": d, "title": f"T{d}", "text": f"text {d}"} for d in ("d1", "d2", "d5", "d9")]
+    monkeypatch.setattr(rag_eval, "load_documents", lambda: [dict(d) for d in corpus])
+    monkeypatch.setattr(rag_eval, "SearchService", NoRetrieval)
+    monkeypatch.setenv("SSR_RAG_CONTEXT", "oracle_cited")
+    monkeypatch.setenv("SSR_RAG_SKIP_JUDGE", "1")
+    rag_eval.main()
+    assert fake_judge.calls == 0 and not (tmp_path / "rag.json").exists()  # never canonical
+    assert seen == {QUERIES[q]: rag_eval.oracle_cited_ids(QRELS[q], CLAIM_LABELS[q]) for q in QUERIES}
+    assert seen["Four claim holds."] == ["d2", "d5"]
+    # The re-ask (same policy as the default) sees the same cited passages, same rendering.
+    assert FakeGenerator.reask_calls and all(
+        [(h.doc_id, h.metadata["title"], h.text) for h in hits]
+        == [(d, f"T{d}", f"text {d}") for d in seen[q]]
+        for q, hits in FakeGenerator.reask_calls
+    )
+    (run_dir,) = (tmp_path / "runs").iterdir()
+    assert run_dir.name.endswith("_nojudge_oracle-cited")
+    blob = json.loads((run_dir / "rag.json").read_text())
+    assert blob["run"]["context"] == "oracle_cited" and blob["run"]["canonical"] is False
+    assert {r["query_id"]: r["retrieved_doc_ids"] for r in blob["rows"]} == {
+        q: seen[QUERIES[q]] for q in QUERIES}
+    assert (run_dir / "rag.md").read_text().startswith("> **DIAGNOSTIC")
+    assert rag_eval.markdown_from_json(blob).startswith("> **DIAGNOSTIC")
