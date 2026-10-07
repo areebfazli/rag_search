@@ -93,12 +93,13 @@ really occurs in the cited passage (``quote_found``; measured only, never a verd
 
 Verdict-only re-ask (the product's, SSR_LLM_REASK, default on): a claim whose reply still
 has no verdict gets ONE more call (generator.LLMGenerator.reask_verdict, the prompt and
-budget rag_secondlook froze and measured). The eval applies it as a post-step over the
+budget the post-hoc re-ask experiment froze and measured; that harness,
+app.eval.rag_secondlook, is archived in the experiments-archive tag). The eval applies it as a post-step over the
 finished first-pass rows, never inside the checkpointed generation: the checkpoint keeps
 first-pass rows and its signature does not include the re-ask, so an existing checkpoint
-resumes as-is. Each reply is cached in ``data/eval_cache/secondlook/<dataset>.json``, the
-file rag_secondlook shares (app.eval.reply_cache): a reply either one fetched is a hit for
-the other, and a re-run re-asks from the cache with no LLM call. Keys are versioned: new
+resumes as-is. Each reply is cached in ``data/eval_cache/secondlook/<dataset>.json``
+(app.eval.reply_cache; the path is the one the archived experiment wrote, which holds the
+committed run's replies), and a re-run re-asks from the cache with no LLM call. Keys are versioned: new
 replies go under the v2 key (reask_key_v2: claim, budget, exact messages AND the endpoint
 fingerprint — provider, base URL, model, resolved reasoning effort, temperature policy,
 routing), so a Groq or paid run never reuses a reply another endpoint gave. Migration: a
@@ -388,9 +389,9 @@ def typical_generation_cost(gen: LLMEndpoint) -> float:
 OUT = RESULTS  # canonical run only — the committed artifact (repo-anchored, not cwd)
 RUNS = Path("data/eval_runs")  # every other run (gitignored)
 CACHE = Path("data/eval_cache/rag")  # per-row resume checkpoints (gitignored)
-# Re-ask replies (one file per dataset), in rag_secondlook's ReplyCache format and keys
-# (v2, with the legacy-key migration in reask_lookup): the replies its measured post-hoc
-# re-ask fetched are cache hits here, and vice versa.
+# Re-ask replies (one file per dataset), in ReplyCache format and keys (v2, with the
+# legacy-key migration in reask_lookup). The path is the one the archived post-hoc re-ask
+# experiment wrote: the replies it fetched (behind the committed rag.json) are hits here.
 REASK_CACHE = Path("data/eval_cache/secondlook")
 # Expected share of claims the re-ask fires on, for the up-front request estimate only:
 # 16 of 300 on the committed test run (15 before 3e360cc's scoring rules). A checkpoint's
@@ -834,7 +835,7 @@ def apply_reask(row: Mapping, rec: Mapping | None, error: str | None = None) -> 
 
 def first_pass_row(row: Mapping) -> dict:
     """A row as the first pass left it (the re-ask undone): what the checkpoint stores and
-    what experiments built on the pre-re-ask answers (rag_secondlook) read."""
+    what experiments built on the pre-re-ask answers read."""
     out = {k: v for k, v in row.items() if k not in ("first_pass", "reask", "reask_attempted",
                                                      "reask_error", "judge_scored_placeholder")}
     out.update(row.get("first_pass") or {})

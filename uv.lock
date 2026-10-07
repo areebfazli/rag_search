@@ -1585,7 +1585,6 @@ dependencies = [
     { name = "slowapi" },
     { name = "torch", version = "2.12.1", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
     { name = "torch", version = "2.13.0+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
-    { name = "transformers" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -1612,7 +1611,6 @@ requires-dist = [
     { name = "slowapi", specifier = ">=0.1.9" },
     { name = "torch", marker = "sys_platform != 'linux' and sys_platform != 'win32'", specifier = ">=2.2" },
     { name = "torch", marker = "sys_platform == 'linux' or sys_platform == 'win32'", specifier = ">=2.2", index = "https://download.pytorch.org/whl/cpu" },
-    { name = "transformers", specifier = ">=4.56" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
 ]
 

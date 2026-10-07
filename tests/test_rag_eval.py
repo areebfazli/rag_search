@@ -1886,10 +1886,11 @@ def test_rerun_from_a_complete_checkpoint_reasks_from_the_cache_with_no_llm_call
     assert second["run"]["reask_replies"] == {"cached": 2, "fetched": 0, "failed": 0}
 
 
-def test_a_reply_cached_by_rag_secondlook_is_a_hit_for_a_resumed_row(rate_limited, tmp_path, capsys):
-    # A complete first-pass checkpoint (re-ask off), then a cache file written the way
-    # rag_secondlook writes it, with passages rebuilt from the corpus: the canonical
-    # re-run must take the reply from it and make no call at all.
+def test_a_legacy_v1_cached_reask_reply_is_a_hit_for_a_resumed_row(rate_limited, tmp_path, capsys):
+    # A complete first-pass checkpoint (re-ask off), then a re-ask reply cached under the
+    # legacy v1 key (ReplyCache.key, as 15 of the 16 replies behind the committed rag.json
+    # are), with passages rebuilt from the corpus: the canonical re-run must take the
+    # reply from it and make no call at all.
     setup, _, out = rate_limited
     setup("generate", None, [])
     settings.llm_reask = False

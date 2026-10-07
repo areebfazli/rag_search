@@ -27,12 +27,6 @@ dependencies = [
     # Declared explicitly (it would otherwise arrive transitively via
     # sentence-transformers) so the CPU-only index below applies to it.
     "torch>=2.2",
-    # The NLI verifier (app/verify/nli.py) loads its DeBERTa model with transformers'
-    # Auto* classes directly. Declared explicitly (it also arrives via
-    # sentence-transformers); >=4.56 for the `dtype=` from_pretrained kwarg. The
-    # DeBERTa-v3 tokenizer loads from the checkpoint's tokenizer.json via `tokenizers`,
-    # so neither sentencepiece nor protobuf is needed.
-    "transformers>=4.56",
 ]
 
 [dependency-groups]

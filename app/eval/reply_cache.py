@@ -1,8 +1,10 @@
 """On-disk cache of single LLM replies, keyed by the exact request.
 
-Shared by app.eval.rag_secondlook (its post-hoc re-ask / second-look experiments) and
-app.eval.rag_eval (the re-ask post-step of the canonical eval), so a re-ask reply fetched
-by either is a cache hit for the other and is never paid for (or quota-spent) twice.
+Used by app.eval.rag_eval's re-ask post-step. Its file
+(``data/eval_cache/secondlook/<dataset>.json``) was first written by the post-hoc re-ask
+experiment (app.eval.rag_secondlook, archived in the experiments-archive tag), so the
+replies that experiment fetched — the ones behind the committed eval/results/rag.json —
+are cache hits for the eval and are never fetched (or quota-spent) twice.
 
 Two key formats:
 
@@ -10,9 +12,9 @@ Two key formats:
   (``ReplyCache.key``). It names the model id but not who served it: the same model id
   and messages sent to another provider / base URL, with another reasoning effort,
   temperature policy or routing, would collide. Every re-ask reply cached before the v2
-  format (the 15 behind the committed eval/results/rag.json among them) is under v1, and
-  rag_secondlook's ``secondlook:*`` kinds still are (they only ever run on the exact
-  canonical endpoint, which rag_secondlook.default_generator_endpoint enforces).
+  format (the 15 behind the committed eval/results/rag.json among them) is under v1. The
+  v1 key code must stay: removing it turns those replies into cache misses, and the
+  canonical run could no longer be reproduced with zero LLM calls.
 * **v2** — ``<kind>|v2|<query id>|<sha16 of [request, max_tokens, messages]>``
   (``ReplyCache.key_v2``), where ``request`` is a mapping that fingerprints the endpoint
   and sampling policy (for the re-ask: rag_eval.reask_request_fingerprint — provider,

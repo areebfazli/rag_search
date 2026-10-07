@@ -651,7 +651,7 @@ from app.generate.generator import (  # noqa: E402
 )
 from app.generate.prompts import REASK_SYSTEM, reask_messages  # noqa: E402
 
-# The re-ask prompt as rag_secondlook froze and measured it (test 0.7767 -> 0.8000): an
+# The re-ask prompt as the post-hoc re-ask experiment froze and measured it (test 0.7767 -> 0.8000): an
 # edit must be deliberate, since it invalidates the frozen record and every cached reply.
 FROZEN_REASK_HASH = "a54c51382d6abf1b3689dd3587c732ca18216c91badad3d6983d264354176717"
 

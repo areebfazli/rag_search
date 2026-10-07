@@ -106,10 +106,11 @@ def build_user_prompt(query: str, hits: list[SearchHit]) -> str:
 #
 # Fired only for a CLAIM whose reply carried no parseable verdict (typically: a reasoning
 # model spent its whole budget, retry included, and returned nothing). Frozen as measured
-# by app.eval.rag_secondlook (developed on 99 train claims, then run once on the 300 test
-# claims: verdict accuracy 0.7767 -> 0.8000, 7 fixed / 0 broken, McNemar p=0.016). Its
-# wording is part of that result: an edit moves generator.reask_prompt_hash(), which
-# rag_secondlook's frozen record pins, and invalidates every cached re-ask reply.
+# by the post-hoc re-ask experiment (developed on 99 train claims, then run once on the 300
+# test claims: verdict accuracy 0.7767 -> 0.8000, 7 fixed / 0 broken, McNemar p=0.016; its
+# harness is archived in the experiments-archive tag). Its wording is part of that result:
+# an edit moves generator.reask_prompt_hash(), which rag.json's run.reask.prompt_hash
+# pins, and invalidates every cached re-ask reply.
 REASK_SYSTEM = (
     "You are a careful scientific fact-checker. You are given numbered context passages and "
     "a claim. Decide whether the passages support the claim, refute it, or do not contain "

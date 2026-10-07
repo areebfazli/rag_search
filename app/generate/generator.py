@@ -600,9 +600,9 @@ BATCH_MAX_RETRIES = 5
 # uses REASK_MAX_RETRIES = 1, which absorbs a transient 429/5xx while bounding a timed-out
 # resend to one extra request (~4 min worst case); the API (interactive) uses
 # API_REASK_MAX_RETRIES = 0, since a failed re-ask never fails /answer — the first answer
-# is served with a warning — so a retry would only hold the worker longer. (rag_secondlook,
-# which fetched the committed re-ask replies, sends with no SDK retry and a 300 s timeout,
-# counting every request itself.) None of these values is a request field: no cache key
+# is served with a warning — so a retry would only hold the worker longer. (The archived
+# post-hoc re-ask experiment, which fetched the committed re-ask replies, sent with no SDK
+# retry and a 300 s timeout.) None of these values is a request field: no cache key
 # or prompt hash depends on them.
 # Above this call, the two callers differ deliberately too: the API is interactive, so a
 # re-ask that still fails is dropped and the first answer is served (reask_error
@@ -750,7 +750,8 @@ def reask_display_text(text: str) -> str:
 
 def reask_prompt_hash() -> str:
     """sha256 of the re-ask request rendered on fixed placeholders (the value
-    rag_secondlook froze as prompt_hashes()["reask"]): a wording or layout edit moves it."""
+    the post-hoc re-ask experiment froze and rag.json records as run.reask.prompt_hash): a
+    wording or layout edit moves it."""
     ph = [SearchHit("{doc_id}", 0.0, "{text}", {"title": "{title}"})] * 2
     blob = json.dumps(reask_messages("{claim}", ph), sort_keys=True)
     return hashlib.sha256(blob.encode()).hexdigest()

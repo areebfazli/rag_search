@@ -7,8 +7,7 @@ import pytest
 
 from app.core import paths
 from app.core.paths import REPO_ROOT, RESULTS, assert_outside, display_path, is_within
-from app.eval import judge_agreement, rag_eval, rag_rescore, rag_secondlook, retrieval_eval, verify_combine, web_eval
-from app.eval.verify_eval import UnsafeOutputError
+from app.eval import judge_agreement, rag_eval, rag_rescore, retrieval_eval, web_eval
 
 
 def test_results_is_anchored_to_the_repo_not_the_cwd(tmp_path, monkeypatch):
@@ -75,23 +74,6 @@ def test_rag_rescore_refuses_the_repo_results_from_another_cwd(links):
     for dst in allowed_paths():  # passes the guard, then fails reading the missing source
         with pytest.raises(FileNotFoundError):
             rag_rescore.main(["/nonexistent_src.json", dst])
-
-
-@pytest.mark.parametrize("mod", [rag_secondlook, verify_combine])
-def test_eval_runs_outputs_refuse_the_repo_results_from_another_cwd(links, mod, monkeypatch):
-    for p in refused_paths(links):
-        with pytest.raises(UnsafeOutputError):
-            mod.assert_safe_output(paths.Path(p))
-    # data/eval_runs symlinked into the committed results: a runs path that resolves there.
-    runs = links / "data" / "eval_runs"
-    runs.parent.mkdir()
-    runs.symlink_to(RESULTS, target_is_directory=True)
-    with pytest.raises(UnsafeOutputError):
-        mod.assert_safe_output(runs / "x")
-    real = links / "real_runs"
-    real.mkdir()
-    monkeypatch.setattr("app.eval.verify_eval.RUNS", real)
-    assert mod.assert_safe_output(real / "x") == real / "x"
 
 
 def test_non_canonical_output_dirs_refuse_a_runs_dir_aliasing_the_results(links, monkeypatch):
