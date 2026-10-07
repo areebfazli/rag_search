@@ -26,8 +26,10 @@ RUN uv sync --no-dev --locked --no-cache
 COPY --chown=appuser app ./app
 COPY --chown=appuser frontend ./frontend
 
-# The index (data/) is large and built once — mount it at runtime, or build inside
-# the container:  docker run <img> .venv/bin/python -m app.ingest.build_index
-# Pass the LLM key at runtime:  docker run -e SSR_LLM_API_KEY=... ...
+# The index (data/) is large and built once — mount it at runtime (-v "$PWD/data:/app/data"),
+# or build inside the container:  docker run <img> .venv/bin/python -m app.ingest.build_index
+# Search needs no key. For /answer, pass the default provider's key at runtime (never bake
+# it into the image):  docker run -e SSR_OPENROUTER_API_KEY=... ...
+# (with SSR_LLM_PROVIDER=openai_compat, pass SSR_LLM_BASE_URL and SSR_LLM_API_KEY instead)
 EXPOSE 8000
 CMD [".venv/bin/uvicorn", "app.api.main:app", "--host", "0.0.0.0", "--port", "8000"]

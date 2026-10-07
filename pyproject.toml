@@ -1,7 +1,7 @@
 [project]
 name = "semantic-search-rag"
 version = "0.1.0"
-description = "Hybrid semantic search with RAG engine: BM25 + dense embeddings fused with RRF, cross-encoder reranking, grounded RAG answers, and a retrieval/RAG evaluation harness."
+description = "Scientific claim checker: hand-rolled hybrid retrieval (BM25 + dense embeddings fused with RRF) over SciFact, grounded cited verdicts from free LLMs, and an evaluation harness scored on gold labels."
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
 dependencies = [
@@ -16,7 +16,8 @@ dependencies = [
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
     "numpy>=1.26",
-    # OpenAI-compatible client for RAG generation (Groq/Ollama/OpenAI). Core because
+    # OpenAI-compatible client for RAG generation (OpenRouter by default; any
+    # OpenAI-compatible endpoint such as Groq, Ollama or OpenAI). Core because
     # /answer and app/eval/rag_eval depend on it.
     "openai>=1.40",
     # Per-IP rate limiting for the unauthenticated API.
