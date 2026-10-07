@@ -27,6 +27,11 @@ LOCAL_MODES = ("bm25", "dense", "hybrid", "hybrid_rerank")
 WEB_MODES = ("web", "hybrid_web")
 MODES = LOCAL_MODES + WEB_MODES
 
+# What a title-only web paper carries as its text when web_keep_no_abstract is on, so
+# neither the UI nor the /answer generator (which reads title + text, hit_passage) ever
+# gets an empty passage passed off as an abstract.
+NO_ABSTRACT_TEXT = "[No abstract available: title only.]"
+
 
 def _demote(tail: list[SearchHit], head: list[SearchHit]) -> list[SearchHit]:
     """Restamp `tail` scores to sit strictly below `head`, preserving its order.
@@ -96,9 +101,12 @@ def web_extras(s2) -> dict:
 
 
 class SearchService:
-    def __init__(self, dense=None, lexical=None, reranker=None, web=None):
+    def __init__(self, dense=None, lexical=None, reranker=None, web=None, web_keep_no_abstract: bool = False):
         # Components may be injected (used by tests); otherwise they are built from
         # the on-disk index — which must exist.
+        # `web_keep_no_abstract` (off by default — the committed web numbers were measured
+        # without it) keeps web papers that have a title but no abstract anywhere in the
+        # pool; their text becomes NO_ABSTRACT_TEXT (see _mark_no_abstract).
         if dense is None or lexical is None:
             missing = [p for p in (settings.qdrant_location, settings.bm25_path) if not Path(p).exists()]
             if missing:
@@ -115,6 +123,7 @@ class SearchService:
         self._reranker = reranker
         self._web = web
         self._web_lock = threading.Lock()
+        self.web_keep_no_abstract = web_keep_no_abstract
 
     @property
     def web(self):
@@ -133,6 +142,7 @@ class SearchService:
                         rerank=settings.s2_rerank,
                         embedder=self._web_embedder,
                         rarity=self._term_rarity,
+                        keep_no_abstract=self.web_keep_no_abstract,
                         # Same opt-in as the response cache: public queries must not
                         # grow data/ without bound.
                         emb_cache=(
@@ -290,8 +300,23 @@ class SearchService:
         `local_lock`, like every other use of the shared models; the S2 calls never do.
         An injected plain retriever (tests) is called as-is (no errors, no entries)."""
         if isinstance(self.web, WebSearch):
-            return self.web.run(query, k, lock=local_lock)
-        return WebResult(self.web.search(query, k))
+            res = self.web.run(query, k, lock=local_lock)
+        else:
+            res = WebResult(self.web.search(query, k))
+        res.hits = _mark_no_abstract(res.hits)
+        return res
+
+
+def _mark_no_abstract(hits: list[SearchHit]) -> list[SearchHit]:
+    """Web hits with no abstract (kept only with web_keep_no_abstract) get an explicit
+    NO_ABSTRACT_TEXT and metadata["no_abstract"], never an empty text: /answer passes hits
+    straight to the generator, which must see that the title is all there is."""
+    return [
+        SearchHit(h.doc_id, h.score, NO_ABSTRACT_TEXT, {**h.metadata, "no_abstract": True})
+        if not (h.text or "").strip()
+        else h
+        for h in hits
+    ]
 
 
 def _source_warnings(errors: list[str]) -> list[str]:

@@ -230,3 +230,33 @@ def test_hybrid_is_still_the_default_mode():
     import inspect
 
     assert inspect.signature(SearchService.retrieve).parameters["mode"].default == "hybrid"
+
+
+def test_web_title_only_hits_are_marked_never_empty():
+    from app.retrieve.service import NO_ABSTRACT_TEXT
+
+    bare = SearchHit("w2", 0.9, "", {"title": "Only a title", "source": "s2"})
+    svc = make_web_service(FakeWeb([web_hit("w1"), bare]))
+    hits = svc.retrieve("q", mode="web", top_k=2)
+    assert hits[0].text == "web abstract w1" and "no_abstract" not in hits[0].metadata
+    assert hits[1].text == NO_ABSTRACT_TEXT and hits[1].metadata["no_abstract"] is True
+    fused = {h.doc_id: h for h in svc.retrieve("q", mode="hybrid_web", top_k=10)}
+    assert fused["w2"].text == NO_ABSTRACT_TEXT
+
+
+def test_web_keep_no_abstract_is_off_by_default_and_reaches_the_pipeline(monkeypatch):
+    import app.retrieve.service as service_mod
+
+    assert make_service().web_keep_no_abstract is False
+    seen = {}
+
+    class SpyWebSearch:
+        def __init__(self, s2, **kw):
+            seen.update(kw)
+
+    monkeypatch.setattr(service_mod, "WebSearch", SpyWebSearch)
+    monkeypatch.setattr(service_mod, "web_extras", lambda s2: {})
+    monkeypatch.setattr("app.retrieve.semantic_scholar.SemanticScholarRetriever.for_api", classmethod(lambda cls: None))
+    svc = SearchService(dense=FakeRetriever([]), lexical=FakeRetriever([]), web_keep_no_abstract=True)
+    svc.web  # noqa: B018 - builds the pipeline
+    assert seen["keep_no_abstract"] is True

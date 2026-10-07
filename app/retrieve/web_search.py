@@ -159,8 +159,9 @@ def bm25_order(claim: str, hits: list[SearchHit]) -> list[SearchHit]:
         show_progress=False,
     )
     by_id = {h.doc_id: h for h in hits}
-    ranked = index.search(claim, len(hits))
-    # bm25s returns every doc at k=len; zero-score ties come back in index order.
+    ranked = index.search(claim, len(hits), keep_unmatched=True)
+    # bm25s returns every doc at k=len, zero-score ties in its own tie order; the measured
+    # web rerank ranks the whole pool, so keep that zero tail (keep_unmatched).
     return [SearchHit(r.doc_id, r.score, by_id[r.doc_id].text, by_id[r.doc_id].metadata) for r in ranked]
 
 

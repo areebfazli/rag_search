@@ -51,3 +51,71 @@ def test_a_plain_pool_tag_is_kept(monkeypatch, ok):
 
     monkeypatch.setenv("SSR_POOL_TAG", ok)
     assert pool_tag() == ok
+
+
+def _paper(cid, abstract="An abstract."):
+    return {"corpusId": cid, "title": f"T{cid}", "abstract": abstract, "url": None, "year": 2020}
+
+
+class _FakeS2:
+    def __init__(self, by_query):
+        self.by_query = by_query
+        self.calls: list[str] = []
+
+    def fetch(self, query, limit):
+        self.calls.append(query)
+        return {"response": {"data": self.by_query.get(query, [])[:limit]}, "fetched_at": None}
+
+
+def _sources(s2, rarity=None):
+    from app.eval.web_pool_eval import SOURCE_NAMES, Sources
+
+    src = object.__new__(Sources)  # no network clients: only the S2 fake is used
+    src.s2, src.rarity = s2, rarity
+    src.logical = {n: 0 for n in SOURCE_NAMES + ["resolve"]}
+    return src
+
+
+def test_s2_base_sends_the_fallback_exactly_when_the_live_pipeline_does():
+    from app.retrieve.query_rewrite import rewrite_queries
+
+    claim = (
+        "Citrullinated proteins externalized in neutrophil extracellular traps act "
+        "indirectly to disrupt the inflammatory cycle in mice."
+    )
+    primary, fallback = rewrite_queries(claim)
+    full = _FakeS2({primary: [_paper(i) for i in range(100)], fallback: [_paper(500)]})
+    src = _sources(full)
+    hits = src.s2_base(claim)
+    assert full.calls == [primary] and len(hits) == 100  # page full of abstracts: no fallback
+    assert src.logical["s2"] == 1 and all(h.metadata["source"] == "s2" for h in hits)
+    # Title-only papers do not count towards a full page, but are kept in the pool.
+    thin = _FakeS2({primary: [_paper(i, abstract="") for i in range(100)], fallback: [_paper(500)]})
+    hits = _sources(thin).s2_base(claim)
+    assert thin.calls == [primary, fallback] and len(hits) == 101
+
+
+def test_s2_deep_never_caches_an_error_body(tmp_path):
+    from app.retrieve.semantic_scholar import S2Error, ResponseCache
+
+    class ErrS2:
+        def _request(self, method, path, params, json_body=None):
+            return {"message": "Too Many Requests"}  # HTTP 200, error body
+
+    src = _sources(ErrS2())
+    src.cache = ResponseCache(tmp_path)
+    with pytest.raises(S2Error):
+        src.s2_deep("aspirin platelet")
+    assert not any(p.is_file() for p in tmp_path.rglob("*"))
+
+
+def test_fetch_sources_filter(monkeypatch):
+    from app.eval.web_pool_eval import SOURCE_NAMES, fetch_sources
+
+    monkeypatch.delenv("SSR_POOL_SOURCES", raising=False)
+    assert fetch_sources() == set(SOURCE_NAMES)
+    monkeypatch.setenv("SSR_POOL_SOURCES", "snip_claim, pm_rw")
+    assert fetch_sources() == {"s2", "snip_claim", "pm_rw"}  # s2 is every row's baseline
+    monkeypatch.setenv("SSR_POOL_SOURCES", "s2,nope")
+    with pytest.raises(ValueError):
+        fetch_sources()

@@ -12,7 +12,9 @@ run. So the claim is reduced to its content terms:
     to be in the paper;
   * standalone numbers, percentages and doses ("61%", "40mg/day", "2001") are dropped —
     SciFact also mutates numbers to build false claims — but a number that belongs to an
-    entity is kept with it ("HIV-1", "4-PBA", "CK-2017357", "APOE4", "B12");
+    entity is kept with it ("HIV-1", "4-PBA", "CK-2017357", "APOE4", "B12"), and so is a
+    short number after a name part or a type/class/stage/grade/phase head
+    ("interleukin-2", "caspase-11", "Type 1 diabetes" -> "Type-1"; "2-fold" still drops);
   * a one-token parenthetical is an abbreviation restating the words before it
     ("sudden infant death syndrome (SIDS)") and is dropped: under AND semantics a paper
     that never uses the abbreviation would be excluded;
@@ -20,9 +22,11 @@ run. So the claim is reduced to its content terms:
     spaces — "Hyphenated query terms yield no matches", see
     semantic_scholar.normalize_query) and are split when a part is generic
     ("iPSC-derived" -> "iPSC");
-  * terms are deduplicated by stem and capped; when there are too many, entity-like
-    tokens (codes, gene/drug names) outrank plain words, then longer words, then earlier
-    ones, and the kept terms go out in claim order.
+  * terms are deduplicated by stem (a word already inside a kept compound, "TDP" next to
+    "TDP-43", is dropped) and capped; when there are too many, entity-like tokens (codes,
+    gene/drug names) outrank plain words, then longer words, then earlier ones, and the
+    kept terms go out in claim order. With corpus rarity, a plain word the corpus never
+    saw (often a typo or run-together, "panicprone") ranks last.
 
 `rewrite_queries` returns the primary query plus a shorter fallback (the highest-priority
 terms only). The web pipeline sends both unless the primary alone fills the requested page
@@ -69,6 +73,7 @@ STOPWORDS = frozenset(
     despite unlike like as because due while whereas although though even just very too
     rather quite again further still already ever never always often usually sometimes
     etc ie eg two three four five six seven eight nine ten first second third
+    myself yourself himself herself ourselves yourselves themselves up out
     """.split()
 )
 
@@ -128,7 +133,15 @@ GENERIC = frozenset(f for root in _GENERIC_ROOTS for f in _inflect(root)) | {
 
 DROP = STOPWORDS | HEDGES | GENERIC
 
-_NUMBER = re.compile(r"^[+-]?\d+(?:[.,]\d+)*%?$|^\d+(?:st|nd|rd|th)$")
+# A bare number, optionally signed, comparator-prefixed ("<0.05", "~50") or a currency
+# amount ("$750", "€1,200"), or an ordinal ("21st").
+_NUMBER = re.compile(r"^[~<>≤≥±]?[$€£¥]?[+-]?\d+(?:[.,]\d+)*%?$|^\d+(?:st|nd|rd|th)$")
+# The number in a numbered name: "interleukin-2", "caspase-11", "glucose-6-phosphate",
+# "Type 1 diabetes", "class II". Short, and only AFTER a name part (a leading number,
+# "2-fold" / "12-week", is a measure and is still dropped).
+_NAME_NUMBER = re.compile(r"\d{1,3}")
+_NUMBERED_HEADS = frozenset({"type", "class", "stage", "grade", "phase"})
+_HEAD_NUMBER = re.compile(r"\d{1,2}|I{1,3}|IV|VI{0,3}")
 # A dose/measure: a number glued to a unit, optionally "/unit" ("40mg/day", "100g", "5mm").
 _MEASURE = re.compile(
     r"^\d+(?:[.,]\d+)?(?:mg|g|kg|µg|ug|mcg|ng|ml|l|dl|mm|cm|m|km|nm|um|µm|h|hr|hrs|min|s|"
@@ -179,16 +192,52 @@ def _content_parts(tok: str) -> list[str]:
     def generic(p: str) -> bool:
         return (p.lower() in DROP and not _is_entity(p)) or bool(_MEASURE.match(p))
 
+    def name_number(i: int) -> bool:  # "interleukin-2": a short number right after a name part
+        return (
+            i > 0
+            and bool(_NAME_NUMBER.fullmatch(parts[i]))
+            and any(c.isalpha() for c in parts[i - 1])
+            and not generic(parts[i - 1])
+        )
+
     has_entity = any(_is_entity(p) for p in parts)
-    numbers_ok = has_entity  # "HIV-1", "4-PBA": the number names the entity
-    if not any(generic(p) for p in parts) and (numbers_ok or not any(_is_number(p) for p in parts)):
+    # "HIV-1", "4-PBA": with an entity part the number names the entity; without one,
+    # only a number that follows a name part does ("caspase-11", not "2-fold").
+    numbers_ok = has_entity or all(name_number(i) for i, p in enumerate(parts) if _is_number(p))
+    if not any(generic(p) for p in parts) and numbers_ok:
         return ["-".join(parts)]
-    kept = []
-    for p in parts:
+    kept: list[str] = []
+    prev_kept = False
+    for i, p in enumerate(parts):
+        if _is_number(p) and prev_kept and name_number(i):
+            kept[-1] += "-" + p  # "TDP-43-induced" -> "TDP-43"
+            continue
+        prev_kept = False
         if generic(p) or _is_number(p) or (len(p) == 1 and not p.isupper()):
             continue
         kept.append(p)
+        prev_kept = True
     return kept
+
+
+def _token_parts(tokens: list[str]) -> list[tuple[str, list[str], bool]]:
+    """(token, its content terms, joined) for each token; a numbered-name head followed by its
+    number ("Type 1", "class II", "stage 3") becomes ONE term ("Type-1") — alone, the
+    head is generic and the number is dropped, which would turn "Type 1 diabetes" into
+    "diabetes"."""
+    out: list[tuple[str, list[str], bool]] = []
+    i = 0
+    while i < len(tokens):
+        word = _clean(tokens[i])
+        if word.lower() in _NUMBERED_HEADS and i + 1 < len(tokens):
+            nxt = _clean(tokens[i + 1])
+            if _HEAD_NUMBER.fullmatch(nxt):
+                out.append((tokens[i], [f"{word}-{nxt}"], True))
+                i += 2
+                continue
+        out.append((tokens[i], _content_parts(tokens[i]), False))
+        i += 1
+    return out
 
 
 def _strip_abbreviations(tokens: list[str]) -> list[str]:
@@ -214,14 +263,22 @@ def claim_terms(claim: str) -> list[str]:
     tokens = _strip_abbreviations(_TOKEN.findall(claim or ""))
     terms: list[str] = []
     seen: set[str] = set()
-    for tok in tokens:
-        for part in _content_parts(tok):
+    for _tok, parts, _joined in _token_parts(tokens):
+        for part in parts:
             key = _stem_key(part)
             if key in seen:
                 continue
             seen.add(key)
             terms.append(part)
-    return terms
+    return _drop_compound_parts(terms)
+
+
+def _drop_compound_parts(terms: list[str]) -> list[str]:
+    """Drop a one-word term that is also a part of a kept compound ("TDP" next to
+    "TDP-43", "cells" next to "T-cell"): S2 already gets that word inside the compound,
+    and a duplicate would only take a slot under the term cap."""
+    parts = {w for t in terms if "-" in t for w in _stem_key(t).split()}
+    return [t for t in terms if "-" in t or _stem_key(t) not in parts]
 
 
 _WORD = re.compile(r"\w+")
@@ -254,10 +311,23 @@ class TermRarity:
         best_df = min(self.df.get(_STEMMER.stemWord(w), 0) for w in words)
         return math.log((self.n_docs + 1) / (best_df + 1))
 
+    def seen_idf(self, term: str) -> float | None:
+        """idf() over only the words the corpus has seen; None if it saw none of them."""
+        words = _WORD.findall(term.lower()) or [term.lower()]
+        dfs = [d for d in (self.df.get(_STEMMER.stemWord(w), 0) for w in words) if d > 0]
+        return math.log((self.n_docs + 1) / (min(dfs) + 1)) if dfs else None
+
 
 def _priority(term: str, position: int, rarity: TermRarity | None) -> tuple:
     if rarity is not None:
-        return (-rarity.idf(term), position)
+        if _is_entity(term):  # a code/gene/drug name the corpus never saw is still specific
+            return (0, -rarity.idf(term), position)
+        # A plain word the corpus never saw is more often a typo or a run-together
+        # ("panicprone", "methyltrasnferase") than a specific term, and S2's near-AND
+        # matching loses the paper on it: such words rank LAST, and a compound is ranked
+        # on its seen words only ("glucose-6-phospate" is not boosted by its typo).
+        idf = rarity.seen_idf(term)
+        return (1, 0.0, position) if idf is None else (0, -idf, position)
     return (not _is_entity(term), -len(term), position)
 
 
@@ -312,12 +382,12 @@ def split_terms(claim: str) -> tuple[list[str], list[str]]:
     tail: list[str] = []
     seen: set[str] = set()
     split = False
-    for tok in tokens:
+    for tok, parts, joined in _token_parts(tokens):
         word = _clean(tok).lower()
-        if not split and head and word in _RELATIONAL:
+        if not split and head and not joined and word in _RELATIONAL:
             split = True
             continue
-        for part in _content_parts(tok):
+        for part in parts:
             key = _stem_key(part)
             if key in seen:
                 continue

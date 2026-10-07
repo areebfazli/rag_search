@@ -140,7 +140,10 @@ def _lexical() -> LexicalIndex:
 
 
 def test_rebuilt_contexts_match_bm25_hits():
-    hits = _lexical().search("aspirin platelet", top_k=5)
+    # LexicalIndex.search drops docs that share no term with the query (score 0), so the
+    # query names a term of every fixture doc ("statins" for the padded-title d3) to keep
+    # all five title shapes covered.
+    hits = _lexical().search("aspirin platelet statins", top_k=5)
     assert len(hits) == 5
     ids = [h.doc_id for h in hits]
     assert rebuild_contexts(ids, BY_ID) == [hit_passage(h) for h in hits]

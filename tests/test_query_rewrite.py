@@ -97,3 +97,41 @@ def test_multi_queries_are_distinct_from_the_rewrite_and_each_other():
     assert all(len(q.split()) >= 2 for q in extra)
     assert multi_queries(claim, n=1) == extra[:1]  # deterministic, best first
     assert multi_queries("Charcoal.") == [] and multi_queries("") == []
+
+
+def test_numbered_names_keep_their_number():
+    # A short number right after a name part names it; a leading number is a measure.
+    assert claim_terms("Interleukin-2 and kinesin-8 levels") == ["Interleukin-2", "kinesin-8"]
+    assert claim_terms("glucose-6-phosphate dehydrogenase") == ["glucose-6-phosphate", "dehydrogenase"]
+    assert claim_terms("a 2-fold rise over a 12-week course") == ["fold", "rise", "course"]
+    # A generic part splits the compound, but the number stays with its name.
+    assert claim_terms("TDP-43-induced neuronal loss") == ["TDP-43", "neuronal", "loss"]
+    # "Type 1", "class II", "stage 3": the head alone is generic, the pair is the name.
+    assert claim_terms("Type 1 Diabetes in class II MHC and stage 3 cancer") == [
+        "Type-1", "Diabetes", "class-II", "MHC", "stage-3", "cancer"
+    ]
+    assert normalize_query(keyword_query("Type 1 diabetes")) == "Type 1 diabetes"
+
+
+def test_currency_and_comparator_numbers_are_dropped():
+    assert claim_terms("A $750 subsidy and €1,200 grants at ~50 sites") == ["subsidy", "grants", "sites"]
+
+
+def test_reflexive_pronouns_and_particles_are_stopwords():
+    assert claim_terms("Neurons themselves take up glucose") == ["Neurons", "glucose"]
+
+
+def test_a_word_inside_a_kept_compound_is_not_a_second_term():
+    assert claim_terms("TDP-43 binds TDP proteins") == ["TDP-43", "binds", "proteins"]
+    assert claim_terms("PPAR-RXRs are inhibited by PPAR ligands.") == ["PPAR-RXRs", "ligands"]
+
+
+def test_unseen_plain_words_rank_last_but_unseen_entities_stay_first():
+    rarity = TermRarity({"panic": 5, "disord": 40, "cell": 900, "glucos": 300, "6": 400}, 1000)
+    # "panicprone" (a run-together the corpus never saw) no longer outranks real terms.
+    assert top_terms(["panicprone", "panic", "disorder", "cells"], 2, rarity) == ["panic", "disorder"]
+    # An unseen entity-like code keeps top priority.
+    assert top_terms(["XJ-551", "panic", "disorder"], 1, rarity) == ["XJ-551"]
+    # A compound is ranked on its seen words only: its typo does not make it the rarest.
+    assert top_terms(["glucose-phospate", "panic"], 1, rarity) == ["panic"]
+    assert rarity.seen_idf("panicprone") is None

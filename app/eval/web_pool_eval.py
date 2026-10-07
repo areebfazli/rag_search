@@ -2,8 +2,9 @@
 and pooled, put SciFact's gold papers in front of the local re-ranker?
 
 Sources (each cached on disk, rate-limited per host, bounded retries; no LLM):
-  s2        S2 paper/search with the frozen keyword rewrite (primary + fallback) — the
-            current `web` pool (app/retrieve/web_search.py)
+  s2        S2 paper/search with the frozen keyword rewrite (primary + fallback, the
+            fallback sent only when the live pipeline sends it) — the current `web` pool
+            (WebSearch.candidates, app/retrieve/web_search.py)
   s2_multi  extra deterministic S2 keyword queries (query_rewrite.multi_queries)
   snip_claim / snip_rw   S2 snippet search with the claim / the primary rewrite
   pm_claim / pm_rw       PubMed E-utilities Best Match with the claim / the rewrite
@@ -18,7 +19,9 @@ local RRF(bge-small, BM25) as `web` (web_search.rerank_pool), and scored on the 
 Develop on the seeded 100-claim train sample only:
     SSR_EVAL_DATASET=beir/scifact/train SSR_WEB_EVAL_N=100 \
         uv run --locked python -m app.eval.web_pool_eval
-Writes data/eval_runs/web_pool_<dataset>_<n>/web_pool.{md,json}. Never the canonical
+SSR_POOL_SOURCES=s2,snip_claim,pm_rw,pm_claim fetches only the live pool's sources.
+Writes data/eval_runs/web_pool_<dataset>_<n>/web_pool.{md,json} (+ runs.json, the
+per-claim ranked lists, for paired comparisons between runs). Never the canonical
 eval/results/ (the frozen choice is run on test through app.eval.web_eval).
 """
 from __future__ import annotations
@@ -44,6 +47,20 @@ N_SEEDS = int(os.environ.get("SSR_POOL_SEEDS", "3"))  # citation seeds: top-N of
 SCREEN = bool(os.environ.get("SSR_POOL_SCREEN"))  # cheap BM25+source pre-rank, no embedding
 CITE_CAP = int(os.environ.get("SSR_POOL_CITE_CAP", "30"))
 SEED_POOL = os.environ.get("SSR_POOL_SEED_POOL", "s2").split("+")
+
+
+def fetch_sources() -> set[str]:
+    """SSR_POOL_SOURCES (comma list of SOURCE_NAMES): fetch only these (s2 is always
+    fetched — it is every row's baseline). Unset = all. Lets a rewrite change be measured
+    on the live pool (s2,snip_claim,pm_rw,pm_claim) without paying for every other source."""
+    raw = os.environ.get("SSR_POOL_SOURCES", "")
+    if not raw.strip():
+        return set(SOURCE_NAMES)
+    chosen = {s.strip() for s in raw.split(",") if s.strip()}
+    unknown = chosen - set(SOURCE_NAMES)
+    if unknown:
+        raise ValueError(f"SSR_POOL_SOURCES: unknown source(s) {sorted(unknown)}; expected {SOURCE_NAMES}")
+    return chosen | {"s2"}
 
 
 def _ids(hits):
@@ -72,6 +89,21 @@ class Sources:
         self.rarity = env["rarity"]
         self.logical: dict[str, int] = {n: 0 for n in SOURCE_NAMES + ["resolve"]}
 
+    def s2_base(self, claim: str) -> list[SearchHit]:
+        """The live `web` base pool: WebSearch.candidates with the frozen rewrite, so the
+        fallback query is sent exactly when the live pipeline sends it (not when the
+        primary alone filled the page with abstract-bearing papers). Title-only papers
+        are kept (another source may lend the abstract; each view filters at merge)."""
+        from app.retrieve.web_search import WebSearch
+
+        entries: list[dict] = []
+        ws = WebSearch(self.s2, rewrite=True, rarity=self.rarity, strict=True)
+        hits = ws.candidates(claim, 100, keep_no_abstract=True, entries=entries)
+        self.logical["s2"] += len(entries)
+        for h in hits:
+            h.metadata["source"] = "s2"
+        return hits
+
     def s2_queries(self, queries: list[str], name: str) -> list[SearchHit]:
         from app.retrieve.semantic_scholar import parse_search
 
@@ -89,22 +121,32 @@ class Sources:
 
     def s2_deep(self, query: str) -> list[SearchHit]:
         """Pages 2-3 (offsets 100, 200) of the primary rewrite query."""
-        from app.retrieve.semantic_scholar import SEARCH_FIELDS, SEARCH_PATH, normalize_query, parse_search
+        from app.retrieve.semantic_scholar import (
+            SEARCH_FIELDS,
+            SEARCH_PATH,
+            S2Error,
+            normalize_query,
+            parse_search,
+            payload_error,
+            valid_search_payload,
+        )
 
         out: list[SearchHit] = []
         for off in (100, 200):
             p = {"query": normalize_query(query), "limit": 100, "fields": SEARCH_FIELDS, "offset": off}
             self.logical["s2_deep"] += 1
             hit = self.cache.get(SEARCH_PATH, p)
+            if hit is not None and not valid_search_payload(hit.get("response")):
+                hit = None  # an error body cached by older code is a miss
             if hit is None:
-                from app.retrieve.semantic_scholar import S2Error
-
                 try:
                     payload = self.s2._request("GET", SEARCH_PATH, p)
                 except S2Error as e:
                     if "HTTP 400" in str(e):  # offset past the matches
                         break
                     raise
+                if not valid_search_payload(payload):  # a 200 with an error body: never cached
+                    raise S2Error(payload_error(payload))
                 payload.setdefault("data", [])
                 hit = self.cache.put(SEARCH_PATH, p, payload)
             got = parse_search(hit["response"], 100, keep_no_abstract=True)
@@ -115,7 +157,7 @@ class Sources:
                 break
         return out
 
-    def external(self, claim: str, idx: int, only: str = "") -> dict[str, list]:
+    def external(self, claim: str, idx: int, only: str = "", sources: set[str] | None = None) -> dict[str, list]:
         """ExternalPaper lists per external source (before id resolution). `only` =
         "ext" fetches the non-S2 hosts only (PubMed/OpenAlex), "s2" the S2 ones only."""
         from app.retrieve.query_rewrite import rewrite_queries
@@ -135,7 +177,7 @@ class Sources:
             ]
         out = {}
         for name, host, cost, fn in plan:
-            if only and host != only:
+            if (only and host != only) or (sources is not None and name not in sources):
                 continue
             self.logical[name] = self.logical.get(name, 0) + cost
             out[name] = fn()
@@ -202,6 +244,7 @@ def main() -> int:
     from app.retrieve.web_search import EmbeddingCache, merge_pools, prerank, rerank_pool
 
     tag = pool_tag()  # refuse a bad tag up front, not after hours of fetching
+    wanted = fetch_sources()
     quiet_http_logs()
     queries, qrels = load_queries_qrels()
     n = int(os.environ.get("SSR_WEB_EVAL_N", "100"))
@@ -224,11 +267,14 @@ def main() -> int:
     for i, qid in enumerate(ids, 1):
         claim = queries[qid]
         rws = rewrite_queries(claim, env["rarity"]) or [claim]
-        ext_all[qid] = src.external(claim, i - 1, only)
+        ext_all[qid] = src.external(claim, i - 1, only, wanted)
         if only == "ext":
             continue
-        per[qid] = {"s2": src.s2_queries(rws, "s2"), "s2_multi": src.s2_queries(multi_queries(claim, env["rarity"]), "s2_multi"),
-                    "s2_deep": [] if os.environ.get("SSR_POOL_NO_DEEP") else src.s2_deep(rws[0])}
+        per[qid] = {"s2": src.s2_base(claim)}
+        if "s2_multi" in wanted:
+            per[qid]["s2_multi"] = src.s2_queries(multi_queries(claim, env["rarity"]), "s2_multi")
+        if "s2_deep" in wanted and not os.environ.get("SSR_POOL_NO_DEEP"):
+            per[qid]["s2_deep"] = src.s2_deep(rws[0])
         if i % 10 == 0:
             print(f"  fetched {i}/{len(ids)} ({(time.time() - t0) / 60:.1f} min, S2 requests {src.s2.requests_sent})", flush=True)
 
@@ -253,7 +299,7 @@ def main() -> int:
         src.logical["resolve"] += 1
 
     # 3. Citation expansion from (SSR_POOL_NO_CITES=1 skips it) the top seeds of the reranked base (s2) pool.
-    for qid in (ids if not os.environ.get("SSR_POOL_NO_CITES") else []):
+    for qid in (ids if "cites" in wanted and not os.environ.get("SSR_POOL_NO_CITES") else []):
         claim = queries[qid]
         base = prerank(claim, merge_pools([per[qid][s] for s in SEED_POOL]))
         seeds = [h.doc_id for h in base[:N_SEEDS] if h.doc_id.isdigit()]
@@ -331,6 +377,8 @@ def main() -> int:
     (out / "web_pool.md").write_text(md)
     (out / "web_pool.json").write_text(json.dumps({"results": results, "logical": src.logical, "n": len(ids),
                                                    "dense_cap": dense_cap}, indent=2))
+    # Per-claim ranked lists, for paired comparisons between two harness runs.
+    (out / "runs.json").write_text(json.dumps(runs))
     print(md)
     return 0
 

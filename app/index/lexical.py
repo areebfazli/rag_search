@@ -60,12 +60,24 @@ class LexicalIndex:
         self.docs = json.loads((p / "docs.json").read_text())
         return self
 
-    def search(self, query: str, top_k: int) -> list[SearchHit]:
+    def search(self, query: str, top_k: int, keep_unmatched: bool = False) -> list[SearchHit]:
+        """Top `top_k` docs by BM25, best first.
+
+        Docs sharing no term with the query score 0, and bm25s still returns them to fill
+        k (in index order); they are dropped, so a query with no in-vocabulary token
+        ("5-HT2A" tokenizes to nothing known, "α", a stopword-only query) returns [] rather
+        than k arbitrary docs that RRF would then fuse as BM25 ranks 1..k.
+        `keep_unmatched` keeps them: bm25_order (web rerank) ranks a whole candidate pool
+        and relies on the zero-score tail staying in pool order."""
         q_tokens = bm25s.tokenize(query, stemmer=self.stemmer, show_progress=False)
         k = min(top_k, len(self.docs))
+        if k <= 0:
+            return []
         idxs, scores = self.retriever.retrieve(q_tokens, k=k, show_progress=False)
         hits: list[SearchHit] = []
         for idx, score in zip(idxs[0], scores[0]):
+            if score <= 0 and not keep_unmatched:
+                continue
             doc = self.docs[int(idx)]
             hits.append(
                 SearchHit(
