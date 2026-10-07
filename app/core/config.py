@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -71,120 +71,6 @@ class Settings(BaseSettings):
     # a small batch keeps the footprint flat on memory-constrained hosts; on CPU the
     # throughput cost is minor, and it is a large win when the alternative is swapping.
     rerank_batch_size: int = Field(default=8, ge=1)
-
-    # --- Semantic Scholar web search (optional modes `web` / `hybrid_web`) ---
-    # Never used by the default mode. Without a key, requests go to S2's shared public
-    # pool ("1000 requests per second shared among all unauthenticated users", and "may
-    # be further throttled during periods of heavy use" — it 429s often); a key, sent as
-    # the `x-api-key` header only when set, has an "introductory rate limit of 1 RPS on
-    # all endpoints" (semanticscholar.org/product/api). The key only ever goes to
-    # api.semanticscholar.org (the base URL is fixed in app/retrieve/semantic_scholar.py).
-    s2_api_key: str = ""
-    # Process-wide request spacing for every S2 call, retries included — the documented
-    # per-key rate, and a polite one for the shared pool. Per process: with N uvicorn
-    # workers, set it to 1/N.
-    s2_rate_per_s: float = Field(default=1.0, gt=0)
-    s2_timeout_s: float = Field(default=10.0, gt=0)
-    # Retries after the first attempt, on 429 / 5xx / network errors, honouring
-    # Retry-After. The API caps this at 1 (SemanticScholarRetriever.for_api).
-    s2_max_retries: int = Field(default=3, ge=0)
-    # API only: the longest a request waits for a rate-limiter slot or a single retry
-    # sleep before giving up — hybrid_web then degrades to local results, web returns
-    # 503. Bounded so a flood of web-mode requests cannot park every worker thread.
-    s2_max_wait_s: float = Field(default=5.0, ge=0)
-    # Raw-response cache (gitignored under data/). web_eval always uses it; the API only
-    # when s2_api_cache is on — arbitrary public queries would otherwise grow it unbounded.
-    s2_cache_dir: str = "./data/s2_cache"
-    s2_api_cache: bool = False
-    # Web-mode pipeline (app/retrieve/web_search.py), both deterministic and LLM-free:
-    # send S2 a keyword rewrite of the claim (a 6-term query + a 3-term one, results
-    # pooled) instead of the raw sentence, and re-rank the S2 candidates locally with
-    # RRF(bge-small dense, BM25 over the candidates). Defaults follow web_eval's measured
-    # result (eval/results/web_retrieval.md): on the 300 SciFact test claims (rules
-    # frozen on 100 train claims), rewrite+rerank lifts gold-paper Recall@5 from 0.040 to
-    # 0.185 and nDCG@10 from 0.035 to 0.159 vs the raw-claim query (45 better / 1 worse,
-    # p<0.0001). Rerank alone does nothing (p=1.0); the rewrite is what lets it work.
-    s2_query_rewrite: bool = True
-    s2_rerank: bool = True
-    # Extra web CANDIDATE sources (web_search.WebSearch.search_pooled), pooled with the S2
-    # rewrite results and re-ranked together by the same local RRF. Chosen on 100 train
-    # claims (app/eval/web_pool_eval.py), frozen, then measured once on the 300 test claims
-    # (eval/results/web_retrieval.md, "Pooled ... (live)"): vs rewrite+rerank, Recall@5
-    # 0.185 -> 0.228 (p=0.012), Recall@100 0.244 -> 0.384 (46 better / 0 worse, p<0.0001),
-    # nDCG@10 0.159 -> 0.203 (p=0.002). Hence ON by default:
-    #   web_pubmed: PubMed E-utilities Best Match (app/retrieve/pubmed.py; keyless — NCBI
-    #     allows 3 req/s per IP; `tool` param only, no email), on web_pubmed_queries
-    #   web_snippets: S2 snippet search (app/retrieve/s2_extra.py) on web_snippet_queries;
-    #     papers quoting the claim verbatim or mentioning SciFact are excluded
-    #   web_dense_cap: embed/re-rank only the top N of a cheap BM25 pre-rank (0 = all) —
-    #     embedding is ~60 ms per candidate on CPU, the main latency cost of a big pool
-    # Off by default (more S2 requests for no significant gain):
-    #   s2_multi_query: extra deterministic S2 keyword queries (query_rewrite.multi_queries);
-    #     the "offline" test row (3 of them + rewrite snippets) vs live: R@100 +0.013, p=0.17
-    #   web_citation_seeds: references+citations of the top-N pre-ranked S2 hits (train
-    #     only: +0 Recall@100 on top of the live pool, ~2-3 extra S2 requests)
-    s2_multi_query: int = Field(default=0, ge=0, le=5)
-    web_pubmed: bool = True
-    web_pubmed_queries: str = "rewrite,claim"  # comma list of "rewrite" / "claim"
-    web_snippets: bool = True
-    web_snippet_queries: str = "claim"
-    web_citation_seeds: int = Field(default=0, ge=0, le=10)
-    web_citation_cap: int = Field(default=30, ge=1, le=1000)
-    web_dense_cap: int = Field(default=50, ge=0)
-    pubmed_rate_per_s: float = Field(default=2.0, gt=0, le=3.0)
-    # API guards for web modes (web / hybrid_web) only, on top of the per-endpoint limits
-    # (/search 30/minute, /answer 10/minute), which still apply. One web request fans out
-    # to several S2 + PubMed calls, so: a stricter per-IP limit, ONE bucket shared by
-    # /search and /answer (a limits-library string, e.g. "6/minute"), and a process-wide
-    # cap on concurrent web retrievals — when every slot is busy the request gets 503 +
-    # Retry-After at once instead of queueing a worker thread. Per process, like the
-    # rate limiter's in-memory storage. Local modes never touch either.
-    web_rate_limit: str = "6/minute"
-    web_max_concurrent: int = Field(default=2, ge=1)
-
-    @field_validator("web_rate_limit")
-    @classmethod
-    def _valid_web_rate_limit(cls, v: str) -> str:
-        """Fail at startup, not as a 500 on the first web request."""
-        from limits import parse
-
-        try:
-            parse(v)
-        except ValueError as e:
-            raise ValueError(f"SSR_WEB_RATE_LIMIT is not a rate limit string: {v!r}") from e
-        return v
-
-    # API web-request bounds (WebSearch / service.web_extras). The eval sets neither, so
-    # the committed web numbers (eval/results/web_retrieval.*) were measured WITHOUT them:
-    # no deadline, and dense cap 50 (web_pool_live) / 100 (web_pool_offline) per
-    # web_eval.POOL_VARIANTS — never the API's 30. API results can therefore differ.
-    #   web_deadline_s: per-request budget for a pooled web search (0 = none); an extra
-    #     source still pending or running when it runs out is abandoned and reported in
-    #     `warnings`, and its HTTP calls stop. The base S2 failure path never waits.
-    #     Unmeasured on the gold qrels (API-only latency guard).
-    #   web_api_dense_cap: the API embeds at most this many candidates per request (the
-    #     rerank runs under the global retrieval lock). Unmeasured at 30: the eval rows
-    #     use 50 / 100. 0 = no extra cap.
-    web_deadline_s: float = Field(default=20.0, ge=0)
-    web_api_dense_cap: int = Field(default=30, ge=0)
-    # NCBI E-utilities identification (NBK25497, https://www.ncbi.nlm.nih.gov/books/
-    # NBK25497/): `email` "should be a complete and valid e-mail address of the software
-    # developer", and an `api_key` raises the limit from 3 to 10 requests/second. This
-    # app still caps PubMed at 3 req/s (pubmed_rate_per_s, default 2, bound le=3.0): to
-    # use the key's higher limit, set SSR_PUBMED_RATE_PER_S and raise that bound (the
-    # PubMedSource limiter itself allows up to 10 with a key). Both
-    # optional and empty by default; sent only to eutils.ncbi.nlm.nih.gov, only when set,
-    # and never part of a cache key or cache file.
-    ncbi_email: str = ""
-    ncbi_api_key: str = ""
-    # API only: drop S2 snippets that look like a dataset dump ("Claim: ..." / "Evidence:"
-    # formatting) whose claim text overlaps a SciFact claim (token Jaccard >= 0.6)
-    # (s2_extra.DatasetSnippetFilter). OFF in web_eval (the committed numbers). Measured
-    # offline on the cached 300-claim test pools (2026-10-05, filter on vs off): it drops
-    # 2 snippet papers (2 claims) from web_pool_live and 4 drops covering 3 distinct
-    # papers across 4 claims from web_pool_offline, none of them gold; R@5 / R@10 / R@100 / nDCG@10 are identical
-    # (live .2283 / .2661 / .3843 / .2030). A contamination guard, not a recall change.
-    web_snippet_dataset_filter: bool = True
 
     # --- LLM providers (generator and RAG-eval judge) ---
     # Each role picks a provider; the PROVIDER decides the base URL, the API key and

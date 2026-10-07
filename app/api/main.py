@@ -6,17 +6,13 @@ Run:
 from __future__ import annotations
 
 import ipaddress
-import math
 import re
 import threading
-import time
-from collections.abc import Iterable, Iterator
-from contextlib import contextmanager
+from collections.abc import Iterable
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse
-from limits import parse as parse_rate_limit
 from openai import OpenAIError
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -30,16 +26,10 @@ from app.core.llm_endpoints import (
     SpendPolicyError,
     resolve_endpoint,
 )
-from app.retrieve.pubmed import quiet_http_logs
-from app.retrieve.semantic_scholar import S2Error, safe_http_url
-from app.retrieve.service import MODES, WEB_MODES, SearchService
+from app.retrieve.service import MODES, SearchService
 from app.schemas.api import AnswerResponse, Hit, SearchResponse
 
-# httpx logs every outbound request's full URL at INFO, and the optional NCBI api_key is
-# a URL parameter: keep those loggers at WARNING (and redacting) in the API process.
-quiet_http_logs()
-
-app = FastAPI(title="Semantic Search with RAG")
+app = FastAPI(title="Scientific Claim Checker")
 
 # The API is unauthenticated; without a limit, a public deploy could be spammed to
 # burn the LLM token budget or pin the CPU. Per-IP rate limiting mitigates that.
@@ -126,102 +116,10 @@ def get_generator():
 
 
 def _to_hits(hits) -> list[Hit]:
-    out = []
-    for h in hits:
-        year = h.metadata.get("year")
-        out.append(
-            Hit(
-                doc_id=h.doc_id,
-                score=h.score,
-                title=h.metadata.get("title", ""),
-                text=h.text,
-                # Web hits only; re-checked here so a non-http(s) URL can never reach a
-                # client, whatever produced the hit.
-                url=safe_http_url(h.metadata.get("url")) or None,
-                year=year if isinstance(year, int) and not isinstance(year, bool) else None,
-                source=h.metadata.get("source") or "local",
-            )
-        )
-    return out
-
-
-# --- Web-mode guards ------------------------------------------------------------------
-# A web-mode request (web / hybrid_web) fans out to several Semantic Scholar + PubMed
-# calls, so on top of the per-endpoint limits it passes two extra guards. Local modes
-# never touch either: they cost no outbound requests and keep exactly their old limits.
-#
-# 1. A stricter per-IP rate limit (settings.web_rate_limit). It is checked by hand
-#    rather than with @limiter.limit, because a decorator limit cannot see the `mode`
-#    query parameter (exempt_when gets no request). It goes through the SAME slowapi
-#    backend and storage (so limiter.reset() clears it and a storage_uri scales it out),
-#    keyed on the same _client_ip under a "web-modes" namespace, which no endpoint-limit
-#    key can collide with. One bucket is shared by /search and /answer: the budget is
-#    outbound web load per client, whichever endpoint it arrives through.
-# 2. A process-wide cap on concurrent web retrievals (settings.web_max_concurrent).
-#    Acquisition never blocks: with every slot busy the request gets 503 + Retry-After
-#    at once, rather than parking a worker thread behind a slow upstream. A counter under
-#    a lock (not a Semaphore built at import) reads the setting live, so changing it
-#    never strands a held slot on a discarded semaphore.
-#
-# Order: endpoint limit (decorator) -> mode check -> web rate limit -> web slot. A 503 for
-# "busy" therefore still spends one web token, so a client retrying in a tight loop is
-# throttled by its own bucket rather than by everyone else's capacity.
-_WEB_RATE_SCOPE = "web-modes"
-_WEB_BUSY_RETRY_AFTER_S = 5
-_web_slots_lock = threading.Lock()
-_web_active = 0
-
-
-def _check_web_rate_limit(request: Request) -> None:
-    """Spend one token of the client's web-mode bucket, or raise 429 with Retry-After."""
-    if not limiter.enabled:
-        return
-    item = parse_rate_limit(settings.web_rate_limit)  # read live: tests/ops can change it
-    key = _client_ip(request)
-    backend = limiter.limiter
-    if backend.hit(item, _WEB_RATE_SCOPE, key):
-        return
-    reset_at = backend.get_window_stats(item, _WEB_RATE_SCOPE, key).reset_time
-    retry_after = max(1, math.ceil(reset_at - time.time()))
-    raise HTTPException(
-        status_code=429,
-        detail=f"Rate limit exceeded for web search modes: {item}",
-        headers={"Retry-After": str(retry_after)},
-    )
-
-
-def _try_acquire_web_slot() -> bool:
-    global _web_active
-    with _web_slots_lock:
-        if _web_active >= settings.web_max_concurrent:
-            return False
-        _web_active += 1
-        return True
-
-
-def _release_web_slot() -> None:
-    global _web_active
-    with _web_slots_lock:
-        _web_active = max(0, _web_active - 1)
-
-
-@contextmanager
-def _web_guard(request: Request, mode: str) -> Iterator[None]:
-    """Hold a web slot for the block (web modes only); a no-op for local modes."""
-    if mode not in WEB_MODES:
-        yield
-        return
-    _check_web_rate_limit(request)
-    if not _try_acquire_web_slot():
-        raise HTTPException(
-            status_code=503,
-            detail="Web search is busy; try again shortly.",
-            headers={"Retry-After": str(_WEB_BUSY_RETRY_AFTER_S)},
-        )
-    try:
-        yield
-    finally:
-        _release_web_slot()
+    return [
+        Hit(doc_id=h.doc_id, score=h.score, title=h.metadata.get("title", ""), text=h.text)
+        for h in hits
+    ]
 
 
 def _add_warnings(warnings: list[str], extra: Iterable | None) -> list[str]:
@@ -246,30 +144,10 @@ def _reask_warning(ans) -> str | None:
     return f"Verdict check failed{name}; showing the first answer without a verdict."
 
 
-def _retrieve(q: str, mode: str, top_k: int) -> tuple[list, list[str]]:
-    """Retrieval for one request, returning (hits, warnings).
-
-    Local modes run entirely under the retrieval lock, exactly as before. Web modes hold
-    it only around the local part (SearchService's local_lock), so a slow or throttled
-    Semantic Scholar never blocks other users' local searches. `web` has no local
-    fallback, so an S2 failure is a 503; hybrid_web degrades to local results + warning.
-    Any `warnings` attribute the returned hits carry (a hook for the retrieval layer) is
-    merged in, de-duplicated. Callers hold the web slot (_web_guard) around this.
-    """
-    warnings: list[str] = []
-    if mode not in WEB_MODES:
-        with _retrieval_lock:
-            hits = get_service().retrieve(q, mode=mode, top_k=top_k)
-        return hits, _add_warnings(warnings, getattr(hits, "warnings", None))
-    with _retrieval_lock:  # first-call construction opens embedded Qdrant: never twice
-        service = get_service()
-    try:
-        hits = service.retrieve(
-            q, mode=mode, top_k=top_k, warnings=warnings, local_lock=_retrieval_lock
-        )
-    except S2Error as e:
-        raise HTTPException(status_code=503, detail=f"Semantic Scholar search unavailable ({e})")
-    return hits, _add_warnings(warnings, getattr(hits, "warnings", None))
+def _retrieve(q: str, mode: str, top_k: int) -> list:
+    """Retrieval for one request, entirely under the retrieval lock."""
+    with _retrieval_lock:
+        return get_service().retrieve(q, mode=mode, top_k=top_k)
 
 
 @app.get("/")
@@ -292,9 +170,7 @@ def search(
 ) -> SearchResponse:
     if mode not in MODES:
         raise HTTPException(status_code=422, detail=f"mode must be one of {MODES}")
-    with _web_guard(request, mode):  # web modes: stricter limit + concurrency slot
-        hits, warnings = _retrieve(q, mode, top_k)
-    return SearchResponse(query=q, mode=mode, hits=_to_hits(hits), warnings=warnings)
+    return SearchResponse(query=q, mode=mode, hits=_to_hits(_retrieve(q, mode, top_k)))
 
 
 @app.get("/answer", response_model=AnswerResponse)
@@ -311,16 +187,8 @@ def answer(
         resolve_endpoint("generator")
     except (MissingApiKey, EndpointConfigError, SpendPolicyError) as e:
         raise HTTPException(status_code=503, detail=f"LLM not configured ({e})")
-    # Web hits go to the generator unchanged: the same grounded prompt (context as
-    # data, question delimited and sanitised) applies, and their text was already
-    # normalised as untrusted by the S2 retriever.
-    # The web slot covers RETRIEVAL only. It exists to bound concurrent outbound
-    # S2/PubMed load, and generation makes none of that; holding it across an LLM call
-    # (tens of seconds with reasoning + a re-ask) would let two slow answers lock web
-    # search out for everyone. Generation has its own guards: this endpoint's per-IP
-    # limit, the OpenRouter spend policy and the key's credit limit.
-    with _web_guard(request, mode):
-        hits, warnings = _retrieve(q, mode, top_k)
+    hits = _retrieve(q, mode, top_k)
+    warnings: list[str] = []
     try:
         ans = get_generator().generate(q, hits)  # network call — safe outside the lock
     except OpenAIError as e:  # bad key, model gone, provider down — not a server bug

@@ -21,8 +21,8 @@ dependencies = [
     "openai>=1.40",
     # Per-IP rate limiting for the unauthenticated API.
     "slowapi>=0.1.9",
-    # HTTP client for the optional Semantic Scholar web-search retriever. Declared
-    # explicitly (it also arrives transitively via openai) since app code imports it.
+    # The tests import httpx directly (and FastAPI's TestClient needs it). Declared
+    # explicitly, though it also arrives transitively via openai.
     "httpx>=0.27",
     # Declared explicitly (it would otherwise arrive transitively via
     # sentence-transformers) so the CPU-only index below applies to it.

@@ -7,7 +7,7 @@ import pytest
 
 from app.core import paths
 from app.core.paths import REPO_ROOT, RESULTS, assert_outside, display_path, is_within
-from app.eval import judge_agreement, rag_eval, rag_rescore, retrieval_eval, web_eval
+from app.eval import judge_agreement, rag_eval, rag_rescore, retrieval_eval
 
 
 def test_results_is_anchored_to_the_repo_not_the_cwd(tmp_path, monkeypatch):
@@ -15,7 +15,7 @@ def test_results_is_anchored_to_the_repo_not_the_cwd(tmp_path, monkeypatch):
     assert REPO_ROOT == paths.Path(paths.__file__).resolve().parents[2]
     assert (REPO_ROOT / "pyproject.toml").exists()
     assert RESULTS == REPO_ROOT / "eval" / "results" and RESULTS.is_absolute()
-    for mod in (rag_eval, judge_agreement, retrieval_eval, web_eval):
+    for mod in (rag_eval, judge_agreement, retrieval_eval):
         assert mod.OUT == RESULTS
     assert judge_agreement.SOURCE == RESULTS / "rag.json"
 

@@ -1,4 +1,4 @@
-.PHONY: install index api eval eval-rag rag-compare rag-audit analysis latency web-eval test lint ci
+.PHONY: install index api eval eval-rag rag-compare rag-audit analysis latency test lint ci
 
 install:  ## create env + install deps
 	uv sync
@@ -20,9 +20,6 @@ latency:  ## per-query retrieval latency for every eval config -> eval/results/l
 
 eval-rag:  ## RAG answer-quality eval (needs SSR_OPENROUTER_API_KEY in .env; $0 on the default free models; an optional paid generator costs ~$0.005-0.10/run depending on model and SSR_RAG_N, capped by SSR_RAG_MAX_SPEND_USD). Default SSR_RAG_N=50 -> data/eval_runs/; only SSR_RAG_N=all on the test split with the default models, and every claim scored, writes eval/results/rag.{md,json}
 	uv run python -m app.eval.rag_eval
-
-web-eval:  ## S2 web search vs local hybrid on gold qrels -> eval/results/web_retrieval.{md,json} (set SSR_S2_API_KEY; pooled S2 + PubMed, a few thousand requests at 1 req/s)
-	uv run --locked python -m app.eval.web_eval
 
 rag-compare:  ## paired McNemar of two RAG runs: make rag-compare A=path/rag.json B=path/rag.json [ARGS=--labels=audit]
 	uv run --locked python -m app.eval.rag_compare $(A) $(B) $(ARGS)
