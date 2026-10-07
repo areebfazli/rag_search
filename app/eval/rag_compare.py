@@ -104,6 +104,12 @@ SETTINGS: tuple[tuple[str, Callable[[Mapping], object]], ...] = (
     ("reask.prompt_hash", lambda b: (b["run"].get("reask") or {}).get("prompt_hash")),
     ("reask.max_tokens", lambda b: (b["run"].get("reask") or {}).get("max_tokens")),
     ("reask.trigger", lambda b: (b["run"].get("reask") or {}).get("trigger")),
+    # Opt-in experiment switches (rag_eval): the product prompt variant, the
+    # self-consistency vote's k, and a run with no judge (its no-verdict rows score
+    # NO_VERDICT). A file written before they existed ran the defaults: "default", 1, False.
+    ("prompt_variant", lambda b: b["run"].get("prompt_variant") or "default"),
+    ("votes.k", lambda b: (b["run"].get("votes") or {}).get("k", 1)),
+    ("judge_skipped", lambda b: bool(b["run"].get("judge_skipped"))),
     # True for a rag_rescore output (same replies, re-read by a newer parser).
     ("rescored", lambda b: b["run"].get("rescored")),
     ("git_sha", lambda b: b["run"].get("git_sha")),

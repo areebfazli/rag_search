@@ -358,11 +358,39 @@ rules.
 | Fine-tuned PubMedBERT verifier (Kaggle; HealthVer + PubMedQA, then SciFact train) | alone 0.66; combined with Ling via rule R3 0.787 vs 0.777 (before the re-ask) | no gain (11 fixed, 8 broken, p = 0.65); R3 won on its 99 tuning claims (0.859 vs 0.828) and didn't transfer |
 | Evidence-first prompt (quote the finding sentence first) | 0.847 vs 0.837 on 100 *train* claims | no gain (p = 1.0); only 64 of 98 replies followed the format |
 | Disagreement-triggered second look (Ling vs the verifier) | 0.8033 vs 0.7767 (before the re-ask) | not significant alone (p = 0.057), adds nothing on top of the re-ask (0.8067 vs 0.80, p = 0.75), and costs citations (0.94 → 0.92) |
+| Majority vote over k=3 samples (`SSR_LLM_VOTES=3`), 100 *train* claims | 0.82 vs 0.81 | no gain (2 fixed, 1 broken, p = 1.00); fails the gate; 3.0x generation calls |
+| "Finding" prompt variant (`SSR_LLM_PROMPT_VARIANT=finding`), 100 *train* claims, judge skipped | 0.83 vs 0.81 | not adopted (5 fixed, 3 broken, p = 0.73); passes the gate exactly at the threshold, with the disclosures below |
 
 Verdict accuracy and abstention are judge-free and comparable across all runs, including the
 oldest Groq/Qwen-judged gpt-oss run (0.70 → 0.78 on 50 claims after a larger token budget and a
 `Verdict: REFUTED[1]` parser fix); its faithfulness and context-relevance numbers are **not**
 comparable to the Nemotron-judged runs.
+
+**Majority voting and the "finding" prompt (train, pre-registered).** Both were run on the seeded
+100-claim `beir/scifact/train` sample (seed 13) with the free Ling generator, and both were
+pre-registered before any LLM call: k=3 samples at temperature 0.1, each with its own verdict
+re-ask; plurality vote, ties going to the lowest-numbered sample; the answer text taken from the
+lowest-numbered majority sample; at most one judge call per claim. The gate: accuracy must not
+drop, fixed minus broken must be at least 2, and for the prompt NEI net must be at least -1.
+Paired exact McNemar against the single-sample baseline, which scored **0.81 (81/100)**. The test
+split was never run.
+
+- **Majority vote, k=3: 0.82, 2 fixed / 1 broken, p = 1.00, fails the gate.** 90 of 100 claims
+  were unanimous, 10 split 2-1 and none split three ways; the individual samples scored
+  0.81 / 0.80 / 0.81. Cost: 3.0x the generation calls with all samples drawn (as the eval does),
+  about 2.2x with `/answer`'s early stop; latency scales the same way. Kept as an opt-in setting
+  (`SSR_LLM_VOTES`), off by default.
+- **"Finding" prompt variant** (judge the claim by its main finding, not its exact wording, with a
+  guard against over-reaching on NEI), single sample, judge skipped (a reply with no verdict
+  counts as wrong): **0.83, 5 fixed / 3 broken, p = 0.73.** That passes the gate exactly at the
+  threshold, and it is not adopted. Disclosures: the first scoring was 0.82 (net +1, a fail); a
+  rate-limited re-ask (claim 1054) was then retried by the eval's normal resume, after that score
+  had been seen, which tipped it to 0.83; 2 of the 5 fixes (claims 1114 and 9) were read while
+  writing the wording, so the net is 0 without them; against same-day single samples it is only
+  +1 to +2. The error category it targets came from the *test*-set analysis.
+- **Next step:** replicate on unused train claims (101-300 of the seeded shuffle) before any test
+  run. A test run would be variant #9 or later on the same 300 claims
+  ([below](#how-much-to-trust-the-test-set)).
 
 ### How much to trust the test set
 
@@ -632,6 +660,14 @@ Things that are deliberate rather than accidental, and the reasoning behind them
   "5-HT2A", or only stopwords) gets no BM25 hits instead of k arbitrary ones that fusion would
   rank. The web re-rank keeps them, since it orders a whole candidate pool. Local retrieval
   metrics are unchanged on all 300 test claims.
+- **Opt-in generation experiments (all off by default, none in the committed numbers).**
+  `SSR_LLM_VOTES` (default 1, up to 5) draws k samples for a claim and takes a plurality verdict,
+  so `/answer` can cost up to k times the calls. `SSR_LLM_PROMPT_VARIANT` (`default` | `finding`)
+  picks the product system prompt; `default` is the one every committed result used.
+  `SSR_RAG_SKIP_JUDGE=1` is eval-only: no judge calls, so no faithfulness or context relevance, and
+  a reply with no verdict scores as wrong. A rag_eval run with any of them is **never canonical**
+  and writes to `data/eval_runs/`: a skipped-judge run gets a `_nojudge` suffix and a voting run
+  `_votes<k>`. Commented examples are in `.env.example`.
 - **Only one RAG run writes the committed artifact.** `make eval-rag` writes
   `eval/results/rag.{md,json}` only for a full test-split run (`SSR_RAG_N=all`, no
   `SSR_EVAL_LIMIT`) with both models on the code defaults and the re-ask on. Every other run,

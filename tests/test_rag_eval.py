@@ -358,6 +358,7 @@ DEFAULT_JUDGE_MODEL = Settings.model_fields["openrouter_judge_model"].default
 # Env the harness reads; cleared in every main() test so a developer's shell can't leak in.
 RAG_ENV = (
     "SSR_RAG_N", "SSR_RAG_DATASET", "SSR_EVAL_LIMIT", "SSR_EVAL_REFRESH", "SSR_RAG_CHECK_QUOTA",
+    "SSR_RAG_SKIP_JUDGE",
 )
 PAID_GEN_MODEL = "openai/gpt-oss-120b"
 LUNA = "openai/gpt-6-luna"
@@ -384,6 +385,9 @@ def _patch_main(
     monkeypatch.setattr(rag_eval, "REASK_CACHE", tmp_path / "reask_cache")
     monkeypatch.setattr(rag_eval, "load_documents", lambda: [dict(d) for d in CORPUS])
     monkeypatch.setattr(settings, "llm_reask", True)
+    # The opt-in vote and prompt variant off (code defaults), whatever the developer's .env.
+    monkeypatch.setattr(settings, "llm_votes", 1)
+    monkeypatch.setattr(settings, "llm_prompt_variant", "default")
     # The code default: the re-ask cache's legacy-key migration depends on it.
     monkeypatch.setattr(settings, "llm_reasoning_effort", "auto")
     monkeypatch.setattr(FakeGenerator, "reask_calls", [])
@@ -529,8 +533,11 @@ def test_eval_generator_uses_the_batch_retry_policy(rag_run):
     # batch and keeps quick SDK retries in front of its own 429 / empty-completion layer.
     from app.generate.generator import BATCH_MAX_RETRIES, REASK_MAX_RETRIES
 
+    # votes=1: the eval draws a vote's extra samples itself; the prompt variant is the
+    # setting's (the default here).
     assert FakeGenerator.init_kwargs[-1] == {
         "max_retries": BATCH_MAX_RETRIES, "reask_max_retries": REASK_MAX_RETRIES,
+        "votes": 1, "prompt_variant": "default",
     }
 
 
@@ -2059,3 +2066,261 @@ def test_committed_rag_md_is_the_render_of_the_committed_json():
     md = (rag_eval.OUT / "rag.md").read_text()
     assert rag_eval.markdown_from_json(json.loads(path.read_text())) == md
     assert "empty first reply" not in md and "scored as written" not in md
+
+
+# --- opt-in experiments: self-consistency vote, prompt variant, no judge ----------------------
+
+# The signature keys of a default run: the vote, the prompt variant (via prompt_hash) and the
+# judge switch must add none, so existing checkpoints keep matching.
+DEFAULT_SIGNATURE_KEYS = {
+    "dataset", "n_sample", "sample_seed", "generator", "judge", "prompt_hash",
+    "judge_prompt_hash", "top_k", "mode", "reranker", "rerank_candidates",
+    "max_completion_tokens", "reasoning_effort", "rrf_k", "candidate_k", "embedding_model",
+    "embedding_query_prefix",
+}
+
+
+def test_default_signature_has_no_new_keys_and_the_default_prompt_hash_is_pinned(monkeypatch):
+    monkeypatch.setattr(rag_eval, "_index_fingerprint", lambda: None)
+    monkeypatch.setattr(settings, "llm_prompt_variant", "default")
+    gen, judge_ep = _endpoints()
+    base = rag_eval.signature_fields("beir/scifact/train", 100, gen, judge_ep)
+    assert set(base) == DEFAULT_SIGNATURE_KEYS
+    assert rag_eval.prompt_hash().startswith("d0921f4e")  # the committed runs' prompt
+    monkeypatch.setattr(settings, "llm_votes", 3)  # the vote is not in the base signature
+    assert rag_eval.signature_fields("beir/scifact/train", 100, gen, judge_ep) == base
+    skipped = rag_eval.signature_fields("beir/scifact/train", 100, gen, judge_ep, judge_skipped=True)
+    assert skipped == {**base, "judge_skipped": True}
+    monkeypatch.setattr(settings, "llm_prompt_variant", "finding")
+    finding = rag_eval.signature_fields("beir/scifact/train", 100, gen, judge_ep)
+    assert set(finding) == DEFAULT_SIGNATURE_KEYS and finding["prompt_hash"] != base["prompt_hash"]
+    assert rag_eval.prompt_hash() == rag_eval.prompt_hash("finding") != rag_eval.prompt_hash("default")
+
+
+def test_output_dir_opt_in_experiments_are_never_canonical(monkeypatch, tmp_path):
+    monkeypatch.setattr(rag_eval, "OUT", tmp_path / "results")
+    monkeypatch.setattr(rag_eval, "RUNS", tmp_path / "runs")
+    ph, test = "abcdef0123456789", rag_eval.CANONICAL_DATASET
+    assert rag_eval.output_dir(test, 0, 300, ph, split_size=300)[1] is True
+    for kw, suffix in (({"votes": 3}, "_votes3"), ({"judge_skipped": True}, "_nojudge"),
+                       ({"prompt_variant": "finding"}, "_abcdef01"),
+                       ({"votes": 5, "judge_skipped": True}, "_votes5_nojudge")):
+        path, canonical = rag_eval.output_dir(test, 0, 300, ph, split_size=300, **kw)
+        assert not canonical and path.name.endswith(suffix), (kw, path)
+
+
+# Extra samples (2, 3, ...) per claim; sample #1 is the ordinary first pass (REPLIES).
+SAMPLE_REPLIES = {
+    "One claim holds.": ["Yes [1].\nVerdict: SUPPORTED", "Yes [2].\nVerdict: SUPPORTED"],
+    "Two claim holds.": ["Supported [2].\nVerdict: SUPPORTED", "Supported [1].\nVerdict: SUPPORTED"],
+    "Three claim holds.": ["Yes [1].\nVerdict: SUPPORTED", "No [1].\nVerdict: REFUTED"],
+    "Four claim holds.": ["Yes [2].\nVerdict: SUPPORTED", "Yes [1].\nVerdict: SUPPORTED"],
+    "Five claim holds.": ["Nothing here settles it.", "Refuted [1].\nVerdict: REFUTED"],
+}
+
+
+def _voting_generator():
+    """A FakeGenerator whose first call per claim (ever, across main() runs in one test) is
+    the first pass and every later one the claim's next vote sample. ``fail_at``: raise the
+    OpenRouter daily cap on that (0-based) extra call."""
+
+    class Voting(FakeGenerator):
+        first_pass: set = set()
+        extra: list = []
+        fail_at: int | None = None
+
+        def generate(self, query, hits):
+            cls = type(self)
+            if query not in cls.first_pass:
+                cls.first_pass.add(query)
+                return super().generate(query, hits)
+            if cls.fail_at is not None and len(cls.extra) == cls.fail_at:
+                raise rate_limit_error(OPENROUTER_DAILY_MESSAGE)
+            j = sum(q == query for q in cls.extra)
+            cls.extra.append(query)
+            text, verdict = split_verdict(SAMPLE_REPLIES[query][j])
+            return GeneratedAnswer(text=text, citations=[], hits=hits, verdict=verdict,
+                                   finish_reason="stop", attempts=1, cost_usd=0.0)
+
+    return Voting
+
+
+def _vote_main(tmp_path, monkeypatch, gen, votes=3, judge=None):
+    fake_judge = _patch_main(tmp_path, monkeypatch, tmp_path, generator=gen, judge=judge)
+    monkeypatch.setattr(settings, "llm_votes", votes)
+    monkeypatch.setattr(rag_eval.time, "sleep", lambda s: None)
+    rag_eval.main()
+    return fake_judge
+
+
+def _votes_dir(tmp_path, k=3):
+    (run_dir,) = [d for d in (tmp_path / "runs").iterdir() if d.name.endswith(f"_votes{k}")]
+    return run_dir, json.loads((run_dir / "rag.json").read_text())
+
+
+def test_votes3_run_is_non_canonical_with_vote_blocks_and_judges_only_a_new_served_sample(
+    tmp_path, monkeypatch,
+):
+    gen = _voting_generator()
+    fake_judge = _vote_main(tmp_path, monkeypatch, gen)
+    assert not (tmp_path / "rag.json").exists()  # never OUT
+    run_dir, blob = _votes_dir(tmp_path)
+    rows = {r["query_id"]: r for r in blob["rows"]}
+    assert len(gen.extra) == 10  # samples 2 and 3 of all 5 claims (the eval draws all k)
+    chosen = {q: r["vote"]["chosen"] for q, r in rows.items()}
+    assert chosen == {"1": 1, "2": 2, "3": 1, "4": 2, "5": 3}
+    # 5 first-pass judge calls + exactly one per claim whose served sample is not #1.
+    assert fake_judge.calls == blob["judge_calls"] == 5 + 3
+    assert rows["2"]["verdict"] == "SUPPORTED" and rows["2"]["vote"]["changed"] is True
+    assert rows["2"]["answer"] == "Supported [2]." and rows["2"]["faithfulness"] == 0.9
+    assert rows["3"]["vote"]["split"] == "1-1-1" and rows["3"]["vote"]["tie"] is True
+    assert rows["3"]["predicted_label"] == "NEI"  # a tie keeps sample #1
+    assert rows["5"]["vote"]["verdicts"] == [None, None, "REFUTED"]
+    assert rows["5"]["vote"]["abstained"] == 2 and rows["5"]["predicted_label"] == "CONTRADICT"
+    # Sample 2 of claim 5 had no verdict: its OWN re-ask (pass 3 re-asked claims 4 and 5).
+    assert sorted(q for q, _ in FakeGenerator.reask_calls) == sorted(
+        ["Four claim holds.", "Five claim holds.", "Five claim holds."])
+    v = blob["votes"]
+    assert v["k"] == 3 and v["splits"] == {"1": 1, "1-1-1": 1, "2": 1, "2-1": 1, "3": 1}
+    assert v["ties"] == 1 and v["changed_vs_sample1"] == 3
+    assert v["sample_accuracy"] == [0.6, 0.4, 0.6] and v["tie_nei_accuracy"] == 0.8
+    assert blob["verdict_accuracy"] == 0.8 and blob["missing_vote_samples"] == []
+    run = blob["run"]
+    assert run["canonical"] is False and run["votes"]["k"] == 3
+    assert run["votes"]["vote_signature"] != run["checkpoint_signature"]
+    assert run["requests_this_session"]["vote_sample_requests"] == 10 + 1  # 10 samples + 1 re-ask
+    samples = json.loads((tmp_path / "cache" / f"{run['checkpoint_signature']}.samples.json").read_text())
+    assert samples["signature"] == run["checkpoint_signature"]
+    assert set(samples["samples"]["2"]) == {"2", "3"} and "judge" in samples["samples"]["2"]["2"]
+    assert samples["samples"]["5"]["2"]["requests"] == 2  # generation + its own re-ask
+    assert "## Self-consistency vote (k=3)" in (run_dir / "rag.md").read_text()
+
+    # A re-run draws nothing and judges nothing: every sample, re-ask and judge is cached.
+    before = (len(gen.extra), fake_judge.calls, len(FakeGenerator.reask_calls))
+    rag_eval.main()
+    assert (len(gen.extra), fake_judge.calls, len(FakeGenerator.reask_calls)) == before
+    assert json.loads((run_dir / "rag.json").read_text())["rows"] == blob["rows"]
+
+
+def test_sample_one_reuses_the_unchanged_checkpoint_of_a_k1_run(tmp_path, monkeypatch):
+    gen = _voting_generator()
+    _vote_main(tmp_path, monkeypatch, gen, votes=1)
+    k1 = json.loads((tmp_path / "rag.json").read_text())  # k = 1: canonical as before
+    assert "vote" not in k1["rows"][0] and "votes" not in k1 and "votes" not in k1["run"]
+    first_pass = len(gen.first_pass)
+    _vote_main(tmp_path, monkeypatch, gen, votes=3)
+    _, blob = _votes_dir(tmp_path)
+    assert len(gen.first_pass) == first_pass == 5 and len(gen.extra) == 10  # no first pass redone
+    assert blob["run"]["checkpoint_signature"] == k1["run"]["checkpoint_signature"]
+
+
+def test_a_daily_cap_in_the_sample_pass_resumes_drawing_only_the_missing_samples(
+    tmp_path, monkeypatch,
+):
+    gen = _voting_generator()
+    gen.fail_at = 3  # the 4th extra sample hits the daily cap
+    with pytest.raises(SystemExit) as exc:
+        _vote_main(tmp_path, monkeypatch, gen)
+    msg = str(exc.value.code)
+    assert "Stopped in the vote pass" in msg and "only the missing samples are drawn" in msg
+    assert not (tmp_path / "runs").exists() or not any((tmp_path / "runs").iterdir())
+    (spath,) = (tmp_path / "cache").glob("*.samples.json")
+    cached = json.loads(spath.read_text())["samples"]
+    assert sum(len(v) for v in cached.values()) == 3
+    gen.fail_at = None
+    drawn = len(gen.extra)
+    rag_eval.main()
+    assert len(gen.extra) - drawn == 10 - 3  # only the missing samples
+    _, blob = _votes_dir(tmp_path)
+    assert all(r["vote"]["missing"] == [] for r in blob["rows"])
+
+
+def test_skip_judge_makes_no_judge_call_and_scores_no_verdict_rows_no_verdict(tmp_path, monkeypatch):
+    fake_judge = _patch_main(tmp_path, monkeypatch, tmp_path)
+    monkeypatch.setenv("SSR_RAG_SKIP_JUDGE", "1")
+    rag_eval.main()
+    assert fake_judge.calls == 0
+    assert not (tmp_path / "rag.json").exists()
+    (run_dir,) = (tmp_path / "runs").iterdir()
+    assert run_dir.name.endswith("_nojudge")
+    blob = json.loads((run_dir / "rag.json").read_text())
+    rows = {r["query_id"]: r for r in blob["rows"]}
+    assert all(r["judge_answered"] is None and r["faithfulness"] is None
+               and r["context_relevance"] is None for r in rows.values())
+    for qid in ("4", "5"):  # no verdict even after the re-ask: no judge fallback
+        assert rows[qid]["predicted_label"] == "NONE" and rows[qid]["answered_source"] == "no_judge"
+    assert blob["faithfulness_answered"] is None and blob["context_relevance"] is None
+    assert blob["judge_verdict_agreement"] is None and blob["judge_calls"] == 0
+    assert blob["judge_skipped"] is True and blob["no_judge_no_verdict"] == 2
+    assert blob["run"]["judge_skipped"] is True and blob["run"]["canonical"] is False
+    assert blob["run"]["requests_this_session"]["judge_calls"] == 0
+    md = (run_dir / "rag.md").read_text()
+    assert "Judge skipped (SSR_RAG_SKIP_JUDGE=1)" in md and "judge=skipped" in md
+    # Its own checkpoint: never mixed with judged rows.
+    gen, judge_ep = rag_eval.resolve_endpoint("generator"), rag_eval.resolve_endpoint("judge")
+    assert blob["run"]["checkpoint_signature"] != rag_eval.rag_signature(
+        rag_eval.signature_fields("beir/scifact/test", 5, gen, judge_ep))
+
+
+def test_aggregate_tolerates_none_judge_fields():
+    rows = [row(True, True), {**row(True, True), "faithfulness": None, "context_relevance": None,
+                              "judge_answered": None}]
+    agg = aggregate(rows)
+    assert agg["faithfulness_answered"] == 1.0 and agg["faithfulness_n"] == 1
+    assert agg["context_relevance"] == 1.0 and agg["judge_verdict_agreement"] == 1.0
+    assert resolve_answered(None, None) == (True, "no_judge")
+    assert predicted_label(None, True) == rag_eval.NO_VERDICT
+
+
+def test_request_estimate_counts_vote_samples_and_rejudges():
+    gen, judge_ep = _endpoints()
+    est = rag_eval.request_estimate(10, gen, judge_ep, 12.0, 0.2, reask_rate=0.1, reask=True,
+                                    vote_samples=20, vote_rejudges=10, vote_throttle=8.0)
+    # 10 x (gen + judge + retries + re-asks) + 20 samples x 1.3 + 0.15 x 10 re-judges
+    assert est["requests"] == 51 and est["free_requests"] == 51
+    assert est["free_requests_worst"] == 10 * 4 + 20 * 3 + 10
+    nojudge = rag_eval.request_estimate(10, gen, judge_ep, 12.0, 0.2, reask_rate=0.1, reask=True,
+                                        judge=False, vote_samples=20, vote_rejudges=10)
+    assert nojudge["requests"] == 39 and nojudge["free_requests_worst"] == 10 * 3 + 20 * 3
+    # Without the vote and with the judge on: exactly as before.
+    assert rag_eval.request_estimate(300, gen, judge_ep, 12.0, 0.24)["requests"] == 672
+
+
+def test_a_votes_run_prints_the_samples_it_will_draw(tmp_path, monkeypatch, capsys):
+    _vote_main(tmp_path, monkeypatch, _voting_generator())
+    head = capsys.readouterr().out.split("[1/5]")[0]
+    assert "vote samples: 0 cached" in head and "10 to draw" in head
+    assert "self-consistency vote: 10 extra samples still to draw" in head
+
+
+def test_skip_judge_counts_no_judge_requests(monkeypatch):
+    monkeypatch.setattr(rag_eval, "THROTTLE_S", None)
+    gen, judge_ep = _endpoints()
+    assert rag_eval.free_requests_per_query(gen, judge_ep, judge_skipped=True) == (1, 2)
+    assert rag_eval.default_throttle_s(gen, judge_ep, judge_skipped=True) == 8.0
+    assert rag_eval.default_throttle_s(gen, judge_ep) == 12.0
+    assert "judge: skipped" in rag_eval._estimate_line(5, gen, judge_ep, 8.0, judge_skipped=True)
+
+
+def test_a_failed_vote_sample_is_not_cached_and_the_claim_is_listed(tmp_path, monkeypatch):
+    gen = _voting_generator()
+    real = gen.generate
+
+    def flaky(self, query, hits):
+        if query in gen.first_pass and query == "Two claim holds." and not getattr(gen, "boom", 0):
+            gen.boom = 1
+            raise RuntimeError("upstream 500")
+        return real(self, query, hits)
+
+    monkeypatch.setattr(gen, "generate", flaky)
+    _vote_main(tmp_path, monkeypatch, gen)
+    _, blob = _votes_dir(tmp_path)
+    rows = {r["query_id"]: r for r in blob["rows"]}
+    # Sample 2 of claim 2 failed (the fake then serves sample 3 its first scripted reply).
+    assert blob["missing_vote_samples"] == ["2"] and rows["2"]["vote"]["missing"] == [2]
+    assert rows["2"]["vote"]["verdicts"] == ["REFUTED", None, "SUPPORTED"]
+    assert rows["2"]["vote"]["split"] == "1-1" and rows["2"]["vote"]["chosen"] == 1  # tie: #1
+    assert blob["votes"]["claims_missing_samples"] == 1 and blob["run"]["votes"]["samples"]["failed"] == 1
+    rag_eval.main()  # the re-run draws exactly the missing sample
+    _, blob = _votes_dir(tmp_path)
+    assert blob["missing_vote_samples"] == [] and len(gen.extra) == 10
