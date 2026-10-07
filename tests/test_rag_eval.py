@@ -358,7 +358,7 @@ DEFAULT_JUDGE_MODEL = Settings.model_fields["openrouter_judge_model"].default
 # Env the harness reads; cleared in every main() test so a developer's shell can't leak in.
 RAG_ENV = (
     "SSR_RAG_N", "SSR_RAG_DATASET", "SSR_EVAL_LIMIT", "SSR_EVAL_REFRESH", "SSR_RAG_CHECK_QUOTA",
-    "SSR_RAG_SKIP_JUDGE", "SSR_RAG_CONTEXT",
+    "SSR_RAG_SKIP_JUDGE", "SSR_RAG_CONTEXT", "SSR_RAG_OFFSET",
 )
 PAID_GEN_MODEL = "openai/gpt-oss-120b"
 LUNA = "openai/gpt-6-luna"
@@ -2400,3 +2400,60 @@ def test_oracle_cited_run_gives_the_generator_only_the_cited_abstracts(tmp_path,
         q: seen[QUERIES[q]] for q in QUERIES}
     assert (run_dir / "rag.md").read_text().startswith("> **DIAGNOSTIC")
     assert rag_eval.markdown_from_json(blob).startswith("> **DIAGNOSTIC")
+
+
+# --- SSR_RAG_OFFSET: a later slice of the same seeded shuffle ---------------------------------
+
+
+def test_offset_sample_is_a_slice_of_the_same_shuffle():
+    ids = [str(i) for i in range(1, 400)]
+    full = rag_eval.sample_claims(ids, None)
+    assert rag_eval.offset_sample(ids, 100) == rag_eval.sample_claims(ids, 100) == full[:100]
+    assert rag_eval.offset_sample(ids, 100, 100) == full[100:200]
+    assert rag_eval.offset_sample(ids, None, 300) == full[300:]
+    assert rag_eval.offset_sample(ids, 500, 350) == full[350:]
+    assert rag_eval.rag_offset({}) == 0 and rag_eval.rag_offset({"SSR_RAG_OFFSET": " "}) == 0
+    assert rag_eval.rag_offset({"SSR_RAG_OFFSET": "100"}) == 100
+    for bad in ("-1", "x"):
+        with pytest.raises(ValueError):
+            rag_eval.rag_offset({"SSR_RAG_OFFSET": bad})
+
+
+def test_offset_changes_signature_and_dir_only_when_set(monkeypatch, tmp_path):
+    monkeypatch.setattr(rag_eval, "_index_fingerprint", lambda: None)
+    monkeypatch.setattr(rag_eval, "OUT", tmp_path / "results")
+    monkeypatch.setattr(rag_eval, "RUNS", tmp_path / "runs")
+    gen, judge_ep = _endpoints()
+    base = rag_eval.signature_fields("beir/scifact/train", 100, gen, judge_ep)
+    assert rag_eval.signature_fields("beir/scifact/train", 100, gen, judge_ep, offset=0) == base
+    off = rag_eval.signature_fields("beir/scifact/train", 100, gen, judge_ep, offset=100)
+    assert off == {**base, "sample_offset": 100}
+    ph, test = "abcdef0123456789", rag_eval.CANONICAL_DATASET
+    path, canonical = rag_eval.output_dir(test, 0, 300, ph, split_size=300, offset=5)
+    assert not canonical and path.name.endswith("_offset5")
+    path, _ = rag_eval.output_dir("beir/scifact/train", 0, 100, ph, judge_skipped=True, offset=100)
+    assert path.name == "rag_beir-scifact-train_100_abcdef01_nojudge_offset100"
+
+
+def test_offset_run_scores_the_later_slice_and_records_it(tmp_path, monkeypatch, capsys):
+    out = tmp_path / "results"
+    _patch_main(tmp_path, monkeypatch, out)
+    monkeypatch.setenv("SSR_RAG_DATASET", "beir/scifact/train")
+    monkeypatch.setenv("SSR_RAG_OFFSET", "2")
+    monkeypatch.setenv("SSR_RAG_N", "2")
+    rag_eval.main()
+    assert not out.exists()
+    (run_dir,) = (tmp_path / "runs").iterdir()
+    assert run_dir.name.endswith("_offset2") and "_2_" in run_dir.name
+    blob = json.loads((run_dir / "rag.json").read_text())
+    assert [r["query_id"] for r in blob["rows"]] == rag_eval.sample_claims(QUERIES, None)[2:4]
+    assert blob["run"]["sample_offset"] == 2 and blob["run"]["n_sample"] == 2
+    assert blob["run"]["canonical"] is False
+    assert "SSR_RAG_OFFSET=2: claims 3-4 of the seeded shuffle" in capsys.readouterr().out
+
+
+def test_offset_past_the_split_stops_before_any_call(tmp_path, monkeypatch):
+    _patch_main(tmp_path, monkeypatch, tmp_path / "results")
+    monkeypatch.setenv("SSR_RAG_OFFSET", "5")
+    with pytest.raises(SystemExit, match="leaves no claims"):
+        rag_eval.main()

@@ -118,11 +118,18 @@ against the quota) and aborts before any LLM call if they are fewer than needed.
 
 Opt-in experiments (all default off; each makes a run non-canonical and names its run dir):
 
-* ``SSR_LLM_PROMPT_VARIANT=finding`` — the product prompt with prompts.FINDING_RULE added.
+* ``SSR_LLM_PROMPT_VARIANT=finding`` — the product prompt with prompts.FINDING_RULE added;
+  ``SSR_LLM_PROMPT_VARIANT=fewshot`` — the product prompt followed by the worked examples
+  of prompts.fewshot_system (app/generate/fewshot_examples.json, app.eval.fewshot_select).
   prompt_hash() renders the variant's system prompt, so the hash, the checkpoint signature
   and the run dir (``..._<hash8>``) all move with it; the default variant's hash is
   unchanged. The re-ask prompt is the same for every variant, so a re-ask reply already in
   the re-ask cache for the same claim + passages + endpoint is reused (an identical request).
+* ``SSR_RAG_OFFSET=k`` (eval only) — skip the first k claims of the seeded shuffle, then take
+  SSR_RAG_N: ``SSR_RAG_OFFSET=100 SSR_RAG_N=100`` scores claims 101-200 of the same order
+  the default sample prefixes (sample_claims), e.g. to replicate a 100-claim train result
+  on fresh claims without re-running the first 100. Its signature gains ``sample_offset``
+  (only when k > 0), its dir ends in ``_offset<k>``, and it is never canonical.
 * ``SSR_RAG_SKIP_JUDGE=1`` (eval only) — no judge call at all: judge_answered, faithfulness
   and context_relevance are None, a reply with no verdict even after the re-ask is
   ``answered`` with answered_source "no_judge" and so scores NO_VERDICT (conservative: no
@@ -158,6 +165,7 @@ Run:
     uv run python -m app.eval.rag_eval
     SSR_RAG_N=all uv run python -m app.eval.rag_eval --check-quota     # full 300-claim test
     SSR_RAG_DATASET=beir/scifact/train SSR_RAG_N=100 uv run python -m app.eval.rag_eval
+    SSR_RAG_DATASET=beir/scifact/train SSR_RAG_OFFSET=100 SSR_RAG_N=100 uv run python -m app.eval.rag_eval
     SSR_RAG_DATASET=beir/scifact/train SSR_RAG_N=100 SSR_LLM_VOTES=3 uv run python -m app.eval.rag_eval
     uv run python -m app.eval.rag_compare A.json B.json                 # McNemar, paired
 """
@@ -1485,6 +1493,25 @@ def parse_n(raw: str | None) -> int | None:
     return n
 
 
+def rag_offset(env: Mapping[str, str] | None = None) -> int:
+    """SSR_RAG_OFFSET: how many claims of the seeded shuffle to skip (default 0)."""
+    env = os.environ if env is None else env
+    raw = (env.get("SSR_RAG_OFFSET") or "").strip()
+    if not raw:
+        return 0
+    k = int(raw)
+    if k < 0:
+        raise ValueError(f"SSR_RAG_OFFSET must be >= 0, got {raw!r}")
+    return k
+
+
+def offset_sample(query_ids: Collection[str], n: int | None, offset: int = 0) -> list[str]:
+    """Claims offset+1 .. offset+n of the seeded shuffle (to the end for n=None). Offset 0
+    is exactly sample_claims(query_ids, n)."""
+    qids = sample_claims(query_ids, None)[offset:]
+    return qids if n is None else qids[:n]
+
+
 def rag_dataset(env: Mapping[str, str] | None = None) -> str:
     env = os.environ if env is None else env
     return env.get("SSR_RAG_DATASET") or settings.eval_dataset
@@ -1557,6 +1584,7 @@ def output_dir(
     votes: int = 1,
     judge_skipped: bool = False,
     context: str = CONTEXT_DEFAULT,
+    offset: int = 0,
 ) -> tuple[Path, bool]:
     """Where this run's rag.{md,json} go, and whether it is the canonical run.
 
@@ -1574,13 +1602,14 @@ def output_dir(
     and its directory ends in ``_noreask``. Neither is a run with a non-default prompt
     variant (its prompt hash already names the directory apart), a self-consistency vote
     (SSR_LLM_VOTES = k > 1: ``_votes<k>``), no judge (SSR_RAG_SKIP_JUDGE: ``_nojudge``)
-    or the oracle-context diagnostic (SSR_RAG_CONTEXT=oracle_cited: ``_oracle-cited``).
+    or the oracle-context diagnostic (SSR_RAG_CONTEXT=oracle_cited: ``_oracle-cited``),
+    nor a sample that skips the start of the shuffle (SSR_RAG_OFFSET=k: ``_offset<k>``).
     """
     changed = non_default_roles(gen, judge_ep) if gen and judge_ep else []
     whole_split = split_size is not None and n_sample == split_size
     defaults = (
         reask and prompt_variant == "default" and votes == 1 and not judge_skipped
-        and context == CONTEXT_DEFAULT
+        and context == CONTEXT_DEFAULT and offset == 0
     )
     if not limit and dataset == CANONICAL_DATASET and whole_split and not changed and defaults:
         return OUT, True
@@ -1597,6 +1626,8 @@ def output_dir(
         name += "_nojudge"
     if context != CONTEXT_DEFAULT:
         name += f"_{_slug(context)}"
+    if offset:
+        name += f"_offset{offset}"
     return assert_outside(RUNS / name), False
 
 
@@ -1665,7 +1696,7 @@ _CHECKPOINT_ROW_KEYS = (
 
 def signature_fields(
     dataset: str, n_sample: int, gen: LLMEndpoint, judge_ep: LLMEndpoint,
-    judge_skipped: bool = False, context: str = CONTEXT_DEFAULT,
+    judge_skipped: bool = False, context: str = CONTEXT_DEFAULT, offset: int = 0,
 ) -> dict:
     """Everything that changes a row's content. Nothing git-specific: a commit that
     leaves every one of these alone must not invalidate hours of rate-limited work.
@@ -1676,7 +1707,9 @@ def signature_fields(
     reasoning setting, and the retrieval that produced its context. ``judge_skipped``
     (SSR_RAG_SKIP_JUDGE: rows carry no judge scores) adds a key ONLY when set, so every
     default signature — and the checkpoint it names — is unchanged; so does ``context``
-    (SSR_RAG_CONTEXT, only when not the default "retrieved"). The vote's k is not
+    (SSR_RAG_CONTEXT, only when not the default "retrieved") and ``sample_offset``
+    (SSR_RAG_OFFSET, only when > 0: the sample is then a different slice of the shuffle,
+    not a prefix of the offset-0 one). The vote's k is not
     here: sample #1 is the ordinary row, and the extra samples live in their own cache
     (samples_path) under this same signature, so runs with different k share them.
     """
@@ -1706,6 +1739,8 @@ def signature_fields(
         fields["judge_skipped"] = True
     if context != CONTEXT_DEFAULT:
         fields["context"] = context
+    if offset:
+        fields["sample_offset"] = offset
     return fields
 
 
@@ -2136,6 +2171,7 @@ def main(argv: Sequence[str] = ()) -> None:
     # Opt-in experiment switches; every one of them makes the run non-canonical.
     skip_judge = os.environ.get("SSR_RAG_SKIP_JUDGE", "") not in ("", "0")
     context = rag_context()
+    offset = rag_offset()
     k_votes = settings.llm_votes
     variant = settings.llm_prompt_variant
 
@@ -2150,9 +2186,12 @@ def main(argv: Sequence[str] = ()) -> None:
     ceiling = settings.rag_max_spend_usd
 
     queries, qrels = load_queries_qrels(dataset)
-    qids = sample_claims(queries, n_req)
+    qids = offset_sample(queries, n_req, offset)
     if os.environ.get("SSR_RAG_N") and n_req is not None and n_req > len(qids):
-        print(f"SSR_RAG_N={n_req} exceeds the {len(qids)} claims in {dataset}: using all.")
+        print(f"SSR_RAG_N={n_req} exceeds the {len(qids)} claims left in {dataset} after "
+              f"SSR_RAG_OFFSET={offset}: using all of them.")
+    if not qids:
+        raise SystemExit(f"SSR_RAG_OFFSET={offset} leaves no claims in {dataset}")
     if limit:
         qids = qids[:limit]
     labels = load_claim_labels(dataset=dataset, query_ids=set(queries))
@@ -2161,6 +2200,7 @@ def main(argv: Sequence[str] = ()) -> None:
     out, canonical = output_dir(
         dataset, limit, len(qids), phash, gen_ep, judge_ep, reask=reask_on, split_size=len(queries),
         prompt_variant=variant, votes=k_votes, judge_skipped=skip_judge, context=context,
+        offset=offset,
     )
     if changed := non_default_roles(gen_ep, judge_ep):
         print(_non_default_notice(changed, gen_ep, judge_ep), flush=True)
@@ -2176,12 +2216,16 @@ def main(argv: Sequence[str] = ()) -> None:
     if context != CONTEXT_DEFAULT:
         print(f"SSR_RAG_CONTEXT={context}: {CONTEXT_DEFINITIONS[context]}; this run "
               f"never writes {OUT}", flush=True)
+    if offset:
+        print(f"SSR_RAG_OFFSET={offset}: claims {offset + 1}-{offset + len(qids)} of the seeded "
+              f"shuffle; this run never writes {OUT}", flush=True)
     if skip_judge:
         print(f"SSR_RAG_SKIP_JUDGE: no judge calls (no faithfulness / context relevance; a reply "
               f"with no verdict scores {NO_VERDICT}); this run never writes {OUT}", flush=True)
     n_label = "all" if n_req is None else n_req
     print(
         f"Sample: {len(qids)} claims from {dataset} (SSR_RAG_N={n_label}, seed={SEED}"
+        + (f", SSR_RAG_OFFSET={offset}" if offset else "")
         + (f", SSR_EVAL_LIMIT={limit}" if limit else "")
         + f") -> {out}"
         + ("" if canonical else f" (non-canonical: never writes {OUT})"),
@@ -2201,6 +2245,7 @@ def main(argv: Sequence[str] = ()) -> None:
     # Resume: rows completed under the same signature are reused, never re-generated.
     sig_fields = signature_fields(
         dataset, len(qids), gen_ep, judge_ep, judge_skipped=skip_judge, context=context,
+        offset=offset,
     )
     sig = rag_signature(sig_fields)
     ckpt = checkpoint_path(sig)
@@ -2823,6 +2868,8 @@ def main(argv: Sequence[str] = ()) -> None:
                     **run_metadata(gen_ep, judge_ep, dataset=dataset, n_requested=n_label,
                                    judge_skipped=skip_judge, votes=votes_meta, context=context),
                     "n_sample": len(qids),
+                    # SSR_RAG_OFFSET (absent at 0, so a default rag.json is unchanged).
+                    **({"sample_offset": offset} if offset else {}),
                     "eval_limit": limit,
                     "canonical": canonical,
                     "checkpoint_signature": sig,

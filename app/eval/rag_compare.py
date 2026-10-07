@@ -73,6 +73,8 @@ SETTINGS: tuple[tuple[str, Callable[[Mapping], object]], ...] = (
     ("n (scored claims)", lambda b: b.get("n")),
     ("n_requested", lambda b: b["run"].get("n_requested")),
     ("n_sample", lambda b: b["run"].get("n_sample")),
+    # SSR_RAG_OFFSET: which slice of the seeded shuffle (absent = 0, the prefix).
+    ("sample_offset", lambda b: b["run"].get("sample_offset", 0)),
     ("eval_limit", lambda b: b["run"].get("eval_limit")),
     ("sample_seed", _run("sample_seed")),
     # The SciFact label file the gold labels were read from.

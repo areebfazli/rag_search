@@ -1,8 +1,11 @@
 """Grounded RAG prompt: answer strictly from retrieved context, with [n] citations."""
 from __future__ import annotations
 
+import functools
+import json
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from pathlib import Path
 
 from app.core.interfaces import SearchHit
 
@@ -68,15 +71,76 @@ SYSTEM_FINDING = SYSTEM.replace(
 )
 PROMPT_VARIANTS = {"default": SYSTEM, "finding": SYSTEM_FINDING}
 
+# --- opt-in prompt variant "fewshot" (settings.llm_prompt_variant) ------------------------
+#
+# SYSTEM, unchanged, followed by a block of short worked claim checks: claim + a one-sentence
+# excerpt of its cited SciFact abstract + a one-line reason + the verdict line. The examples
+# show SciFact's threshold (a stance needs a passage that states the finding, possibly in
+# other words; an on-topic passage that does not state it is NOT ENOUGH EVIDENCE) instead of
+# describing it. They are chosen by a fixed rule over beir/scifact/train labels and rationale
+# sentences, never from model errors, and exclude every claim rag_eval scores on train (the
+# first 300 of the seeded shuffle), every test claim and every abstract those claims cite:
+# app.eval.fewshot_select writes FEWSHOT_PATH and documents the rule. The block is built on
+# first use (system_prompt("fewshot")), so a missing file can only break this variant.
+FEWSHOT_PATH = Path(__file__).with_name("fewshot_examples.json")
+FEWSHOT_HEADER = (
+    "Worked examples of checking a claim. They are illustrations only, not context "
+    "passages: never cite them or use their content in an answer."
+)
+_EXAMPLE_KEYS = ("query_id", "claim", "excerpt", "reason", "verdict")
+
+
+def load_fewshot_examples(path: Path = FEWSHOT_PATH) -> list[dict]:
+    """The committed worked examples, each checked for the fields the prompt renders."""
+    blob = json.loads(path.read_text())
+    examples = blob.get("examples") if isinstance(blob, dict) else None
+    if not isinstance(examples, list) or not examples:
+        raise ValueError(f"{path}: no `examples` list")
+    for e in examples:
+        if not isinstance(e, dict) or any(not isinstance(e.get(k), str) or not e[k].strip()
+                                          for k in _EXAMPLE_KEYS):
+            raise ValueError(f"{path}: an example lacks one of {_EXAMPLE_KEYS}")
+        if e["verdict"] not in VERDICTS:
+            raise ValueError(f"{path}: example {e['query_id']} has verdict {e['verdict']!r}")
+    return examples
+
+
+def render_fewshot_block(examples: Sequence[Mapping[str, str]]) -> str:
+    """The examples as the model sees them. Claim, excerpt and reason go through the same
+    sanitizer as a user question (one line, no quote runs), so no example text can forge
+    the delimiters or the turn structure."""
+    parts = [FEWSHOT_HEADER]
+    for i, e in enumerate(examples, 1):
+        parts.append(
+            f"Example {i}\n"
+            f'Claim: """{_sanitize_question(e["claim"])}"""\n'
+            f"Passage [1]: {_sanitize_question(e['excerpt'])}\n"
+            f"Answer: {_sanitize_question(e['reason'])}\n"
+            f"Verdict: {e['verdict']}"
+        )
+    return "\n\n".join(parts)
+
+
+@functools.cache
+def fewshot_system() -> str:
+    return SYSTEM + "\n\n" + render_fewshot_block(load_fewshot_examples())
+
+
+_LAZY_VARIANTS = {"fewshot": fewshot_system}
+
 
 def system_prompt(variant: str) -> str:
-    """The product system prompt for `variant` (PROMPT_VARIANTS); KeyError on an unknown
-    name, so a typo can never silently fall back to another prompt."""
+    """The product system prompt for `variant` (PROMPT_VARIANTS, or a lazily built one in
+    _LAZY_VARIANTS); KeyError on an unknown name, so a typo can never silently fall back to
+    another prompt."""
+    if variant in _LAZY_VARIANTS:
+        return _LAZY_VARIANTS[variant]()
     try:
         return PROMPT_VARIANTS[variant]
     except KeyError:
         raise KeyError(
-            f"unknown prompt variant {variant!r}; expected one of {sorted(PROMPT_VARIANTS)}"
+            f"unknown prompt variant {variant!r}; expected one of "
+            f"{sorted(PROMPT_VARIANTS.keys() | _LAZY_VARIANTS.keys())}"
         ) from None
 
 

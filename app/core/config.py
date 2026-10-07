@@ -307,9 +307,12 @@ class Settings(BaseSettings):
     # SSR_LLM_PROMPT_VARIANT: which product system prompt the generator sends
     # (prompts.PROMPT_VARIANTS). "default" is prompts.SYSTEM, the prompt every committed
     # number was measured with; "finding" adds prompts.FINDING_RULE (judge a claim by its
-    # main finding, not its exact wording). Opt-in; a rag_eval run with a non-default
-    # variant is never canonical (its prompt hash, cache keys and run dir all differ).
-    llm_prompt_variant: Literal["default", "finding"] = "default"
+    # main finding, not its exact wording); "fewshot" appends a few worked claim checks
+    # from SciFact train (prompts.fewshot_system; examples in
+    # app/generate/fewshot_examples.json, chosen by app.eval.fewshot_select). Opt-in; a
+    # rag_eval run with a non-default variant is never canonical (its prompt hash, cache
+    # keys and run dir all differ), and /answer uses one only if explicitly configured.
+    llm_prompt_variant: Literal["default", "finding", "fewshot"] = "default"
     # RAG-eval judge on the "groq" provider (openrouter_judge_model is the same model's
     # free OpenRouter variant). Deliberately a different model FAMILY from the generator,
     # not just a smaller size: same-family judging compounds shared preferences.
