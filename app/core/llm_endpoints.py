@@ -1,5 +1,5 @@
 """Where each LLM request goes — provider -> (base URL, API key, model id) — and the
-OpenRouter spend policy that every request to openrouter.ai must pass.
+OpenRouter free-only guard that every request to openrouter.ai must pass.
 
 One resolver for both roles (the answer generator and the RAG-eval judge), so the API
 and rag_eval cannot disagree about which endpoint, key or model they use.
@@ -7,37 +7,27 @@ and rag_eval cannot disagree about which endpoint, key or model they use.
 Precedence — the PROVIDER setting decides everything else:
 
 * ``openrouter``: base URL is the constant ``OPENROUTER_BASE_URL`` (SSR_LLM_BASE_URL is
-  never consulted), key is ``openrouter_api_key``, model is ``openrouter_judge_model``
-  with ``:free`` appended if missing (judge) / ``openrouter_llm_model`` (generator), which
-  is sent as-is only if it is in ``openrouter_paid_model_allowlist`` and otherwise also
-  gets ``:free`` appended — so the default free generator never meets the allowlist.
-* ``groq`` (any OpenAI-compatible endpoint): ``llm_base_url`` / ``llm_api_key`` /
-  ``llm_model`` or ``judge_model``. An openrouter.ai base URL is refused here, so the
-  Groq key is never sent to OpenRouter, and the OpenRouter key is only ever paired with
-  the constant OpenRouter URL.
+  never consulted), key is ``openrouter_api_key``, model is ``openrouter_llm_model``
+  (generator) / ``openrouter_judge_model`` (judge), each with ``:free`` appended if
+  missing — only free models are ever sent to OpenRouter.
+* ``openai_compat`` (any OpenAI-compatible endpoint: Groq, Ollama, OpenAI, ...):
+  ``llm_base_url`` / ``llm_api_key`` / ``llm_model`` or ``judge_model``. An openrouter.ai
+  base URL is refused here, so the SSR_LLM_API_KEY is never sent to OpenRouter, and the
+  OpenRouter key is only ever paired with the constant OpenRouter URL.
 
-Spend policy (``enforce_spend_policy``), checked BEFORE any network call on every
+Free-only guard (``enforce_spend_policy``), checked BEFORE any network call on every
 request to an openrouter.ai URL — at resolution, at client construction, on every
 ``chat.completions.create`` through ``GuardedClient``, and in LLMGenerator's own path:
 
-1. A ``:free`` model id is always allowed, and is sent with ``allow_fallbacks: false``
-   and a $0/$0 ``max_price``, so only a zero-priced endpoint can serve it.
-2. The judge must be ``:free`` — a paid judge id is refused outright.
-3. A paid generator id is allowed only if it is in ``openrouter_paid_model_allowlist``
-   (default: ``openai/gpt-oss-120b`` and ``openai/gpt-6-luna``) AND has an entry in
-   ``PAID_ROUTES`` — the per-model paid routing table — and only if the request carries
-   exactly that model's routing: its pinned provider ``order``, ``allow_fallbacks:
-   false``, its ``quantizations`` filter (or none, where the table has none) and its
-   ``max_price`` caps. With fallbacks off and an explicit order, OpenRouter fails the
-   request rather than route to an endpoint outside the list, and max_price "will
-   prevent your request from running if the price is not available". An allowlisted
-   id with no table entry is refused, as is any other routing for a table model.
-4. Request fields that could add spend on their own (``models`` fallback lists,
-   ``route``, ``plugins`` such as web search) are refused on any OpenRouter request.
+1. Only a ``:free`` model id may be sent; any other id is refused.
+2. Every request carries ``allow_fallbacks: false`` and a $0/$0 ``max_price``, so only a
+   zero-priced endpoint can serve it.
+3. Request fields that could add spend on their own (``models`` fallback lists,
+   ``route``, ``plugins`` such as web search) are refused.
 
 Provider-routing field names, units and failure semantics are from
-https://openrouter.ai/docs/features/provider-routing (``order``, ``allow_fallbacks``,
-``quantizations``, ``max_price`` in USD per million tokens).
+https://openrouter.ai/docs/features/provider-routing (``allow_fallbacks``, ``max_price``
+in USD per million tokens).
 
 Secrets: API keys live only in ``LLMEndpoint.api_key``, which is excluded from repr and
 from ``metadata()``; error messages name the env var, never its value.
@@ -52,7 +42,7 @@ from typing import Literal
 
 from app.core.config import Settings, settings
 
-Provider = Literal["groq", "openrouter"]
+Provider = Literal["openai_compat", "openrouter"]
 Role = Literal["generator", "judge"]
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
@@ -66,85 +56,22 @@ FREE_ROUTING: dict = {
     "max_price": {"prompt": 0, "completion": 0},
 }
 
-
-@dataclass(frozen=True)
-class PaidRoute:
-    """The exact provider routing a paid generator model must be sent with.
-
-    ``order`` is a list of OpenRouter provider slugs / endpoint tags, tried in order and
-    nothing else (``allow_fallbacks`` is always false). ``max_price`` is the per-model
-    ceiling, USD per 1M tokens, and also the rate the spend ceiling counts an unreported
-    cost at. ``quantizations`` is None where the provider does not publish one (the
-    filter is then not sent, rather than one that could match nothing).
-
-    ``bill_rate`` is the highest per-1M rate a call can actually be BILLED at, for spend
-    accounting only (never sent): max_price filters on the listed prompt/completion
-    price, but an endpoint can bill some input above it (e.g. a prompt-cache write).
-    None = max_price."""
-
-    order: tuple[str, ...]
-    max_price: Mapping[str, float]
-    quantizations: tuple[str, ...] | None = None
-    bill_rate: Mapping[str, float] | None = None
-
-    def routing(self) -> dict:
-        r: dict = {"order": list(self.order), "allow_fallbacks": False}
-        if self.quantizations is not None:
-            r["quantizations"] = list(self.quantizations)
-        r["max_price"] = dict(self.max_price)
-        return r
-
-
-# Paid generator routing, per model. A paid id is sendable only if it is here AND in
-# settings.openrouter_paid_model_allowlist. Prices per GET
-# /api/v1/models/<id>/endpoints; `order` semantics per
-# https://openrouter.ai/docs/features/provider-routing: a base slug ("openai") matches
-# that provider's endpoints but NOT its service-tier endpoints ("openai/fast",
-# "openai/flex"), which need explicit opt-in; "provider/tag" targets one endpoint.
-PAID_ROUTES: dict[str, PaidRoute] = {
-    # AkashML bf16 ($0.03 / $0.17 per M on 2026-09-24) sits exactly at the cap. DeepInfra's
-    # bf16 endpoint is listed second for reproducibility, but at $0.037/M prompt it is
-    # ABOVE the prompt cap, so max_price filters it out: if AkashML is down the request
-    # fails, which is the intended behaviour (fail, never route elsewhere); raising the
-    # prompt cap to 0.037 would make it a live second choice. The bf16 filter excludes
-    # CoreWeave's fp4 at the same price.
-    "openai/gpt-oss-120b": PaidRoute(
-        order=("akashml/bf16", "deepinfra/bf16"),
-        max_price={"prompt": 0.03, "completion": 0.17},
-        quantizations=("bf16",),
-    ),
-    # OpenAI's standard endpoint (tag "openai", $0.10 / $0.50 per M on 2026-09-25) only:
-    # the base slug does not match openai/flex or openai/fast (service tiers), Azure and
-    # Bedrock are not in the order, and fallbacks are off. OpenRouter reports the
-    # quantization as "unknown" for OpenAI, so no quantizations filter is sent. The same
-    # endpoint lists input_cache_write at $0.125/M, and a live 2026-09-25 call was billed
-    # at exactly that for its whole prompt (1,829 prompt + 104 completion tokens ->
-    # $0.00028055), so accounting bounds the prompt at $0.125, not the $0.10 filter cap.
-    # (Prompts >= 272k tokens are priced higher; ours are ~2-4k.)
-    "openai/gpt-6-luna": PaidRoute(
-        order=("openai",),
-        max_price={"prompt": 0.10, "completion": 0.50},
-        bill_rate={"prompt": 0.125, "completion": 0.50},
-    ),
-}
-
 # Body fields that can add cost independently of the model's price.
 FORBIDDEN_OPENROUTER_FIELDS = frozenset({"models", "route", "plugins", "web_search_options"})
 
 # The judge's reply budget is max_tokens=120 (rag_eval.judge). OpenRouter counts reasoning
 # tokens against max_tokens (docs: /docs/use-cases/reasoning-tokens), so a reasoning-on
-# Qwen3 would spend the budget thinking and return empty content. effort "none" disables
-# it — matching the Groq judge the committed numbers came from, which fit its JSON in 120
-# tokens on all 50 calls (0 parse failures).
+# judge would spend the budget thinking and return empty content. effort "none" disables
+# it.
 OPENROUTER_JUDGE_REASONING = {"effort": "none"}
 
-KEY_ENV: dict[str, str] = {"groq": "SSR_LLM_API_KEY", "openrouter": "SSR_OPENROUTER_API_KEY"}
+KEY_ENV: dict[str, str] = {"openai_compat": "SSR_LLM_API_KEY", "openrouter": "SSR_OPENROUTER_API_KEY"}
 PROVIDER_ENV: dict[str, str] = {"generator": "SSR_LLM_PROVIDER", "judge": "SSR_JUDGE_PROVIDER"}
 # Settings that only apply to one provider, per role: set-but-ignored ones are reported.
 _PROVIDER_ONLY: dict[tuple[str, str], tuple[str, ...]] = {
-    ("generator", "groq"): ("llm_base_url", "llm_model"),
+    ("generator", "openai_compat"): ("llm_base_url", "llm_model"),
     ("generator", "openrouter"): ("openrouter_llm_model",),
-    ("judge", "groq"): ("judge_model",),
+    ("judge", "openai_compat"): ("judge_model",),
     ("judge", "openrouter"): ("openrouter_judge_model",),
 }
 
@@ -154,7 +81,7 @@ class SpendPolicyError(RuntimeError):
 
 
 class PaidModelRefused(SpendPolicyError):
-    """A paid model id that the policy does not allow would have been sent to OpenRouter."""
+    """A non-``:free`` model id would have been sent to OpenRouter."""
 
 
 class MissingApiKey(RuntimeError):
@@ -184,41 +111,9 @@ def is_free(model: str) -> bool:
     return str(model).endswith(FREE_SUFFIX)
 
 
-def paid_route(model: str) -> PaidRoute:
-    """The paid routing-table entry for `model`; PaidModelRefused if it has none."""
-    route = PAID_ROUTES.get(model)
-    if route is None:
-        raise PaidModelRefused(
-            f"refusing to send paid model {model!r} to OpenRouter: it has no entry in the "
-            f"paid routing table (llm_endpoints.PAID_ROUTES: {sorted(PAID_ROUTES)})"
-        )
-    return route
-
-
-def paid_routing(model: str) -> dict:
-    """The exact provider-routing object a paid `model` must carry (a fresh copy)."""
-    return paid_route(model).routing()
-
-
-def paid_max_price(model: str) -> dict[str, float]:
-    """`model`'s max_price caps, USD per 1M tokens."""
-    return dict(paid_route(model).max_price)
-
-
-def paid_bill_rate(model: str) -> dict[str, float]:
-    """The per-1M rates spend accounting bounds a `model` call at (>= its max_price)."""
-    route = paid_route(model)
-    return dict(route.bill_rate if route.bill_rate is not None else route.max_price)
-
-
-def routing_for(model: str) -> dict:
-    """The provider-routing object an OpenRouter request for `model` carries."""
-    return _copy(FREE_ROUTING) if is_free(model) else paid_routing(model)
-
-
-def _copy(d: dict) -> dict:
-    return {k: (dict(v) if isinstance(v, dict) else list(v) if isinstance(v, list) else v)
-            for k, v in d.items()}
+def free_routing() -> dict:
+    """A fresh copy of FREE_ROUTING, the provider routing every OpenRouter request carries."""
+    return {**FREE_ROUTING, "max_price": dict(FREE_ROUTING["max_price"])}
 
 
 def _price_ok(max_price: object, cap: Mapping[str, float]) -> bool:
@@ -233,13 +128,7 @@ def _price_ok(max_price: object, cap: Mapping[str, float]) -> bool:
     return True
 
 
-def enforce_spend_policy(
-    role: str,
-    base_url: str,
-    model: str,
-    body: Mapping | None,
-    allowlist: tuple[str, ...] | list[str] | None = None,
-) -> None:
+def enforce_spend_policy(role: str, base_url: str, model: str, body: Mapping | None) -> None:
     """Raise SpendPolicyError unless this request is allowed. `body` is the merged
     ``extra_body`` that will be sent. No-op for non-OpenRouter URLs."""
     if not is_openrouter(base_url):
@@ -253,53 +142,13 @@ def enforce_spend_policy(
         raise SpendPolicyError(
             "refusing OpenRouter request without provider.allow_fallbacks=false"
         )
-    if is_free(model):
-        if not _price_ok(routing.get("max_price"), {"prompt": 0.0, "completion": 0.0}):
-            raise SpendPolicyError("refusing ':free' request without a $0/$0 provider.max_price")
-        return
-    if role != "generator":
+    if not is_free(model):
         raise PaidModelRefused(
-            f"refusing to send model {model!r} to OpenRouter: the {role} must be a ':free' id"
+            f"refusing to send model {model!r} to OpenRouter as the {role}: only ':free' ids "
+            f"are allowed"
         )
-    allowed = settings.openrouter_paid_model_allowlist if allowlist is None else allowlist
-    if model not in allowed:
-        raise PaidModelRefused(
-            f"refusing to send paid model {model!r} to OpenRouter: not in "
-            f"SSR_OPENROUTER_PAID_MODEL_ALLOWLIST (only ':free' ids and allowlisted models)"
-        )
-    route = paid_route(model)  # refuses an allowlisted id with no routing-table entry
-    if not _price_ok(routing.get("max_price"), route.max_price):
-        raise SpendPolicyError(
-            f"refusing paid OpenRouter request: provider.max_price must be <= "
-            f"{dict(route.max_price)} USD per 1M tokens for {model}"
-        )
-    order = routing.get("order")
-    if not isinstance(order, list | tuple) or list(order) != list(route.order):
-        raise SpendPolicyError(
-            f"refusing paid OpenRouter request: provider.order must be exactly "
-            f"{list(route.order)} for {model}"
-        )
-    quant = routing.get("quantizations")
-    if route.quantizations is None:
-        if "quantizations" in routing:
-            raise SpendPolicyError(
-                f"refusing paid OpenRouter request: {model} is routed with no "
-                f"provider.quantizations filter"
-            )
-    elif not isinstance(quant, list | tuple) or list(quant) != list(route.quantizations):
-        raise SpendPolicyError(
-            f"refusing paid OpenRouter request: provider.quantizations must be exactly "
-            f"{list(route.quantizations)} for {model}"
-        )
-    # Nothing beyond the table's own fields (no sort, ignore, only, ... that could widen
-    # or reorder the endpoint set), and the max_price carries only the capped keys.
-    expected = route.routing()
-    extra = set(routing) - set(expected)
-    if extra or set(routing["max_price"]) != set(route.max_price):
-        raise SpendPolicyError(
-            f"refusing paid OpenRouter request: provider routing for {model} must be exactly "
-            f"{expected} (unexpected: {sorted(extra) or 'max_price keys'})"
-        )
+    if not _price_ok(routing.get("max_price"), {"prompt": 0.0, "completion": 0.0}):
+        raise SpendPolicyError("refusing ':free' request without a $0/$0 provider.max_price")
 
 
 def provider_of(role: Role, s: Settings | None = None) -> Provider:
@@ -307,24 +156,12 @@ def provider_of(role: Role, s: Settings | None = None) -> Provider:
     return s.llm_provider if role == "generator" else s.judge_provider
 
 
-def openrouter_generator_id(model: str, allowlist: tuple[str, ...] | list[str]) -> str:
-    """The generator id sent to OpenRouter: an allowlisted paid id as-is (it then needs
-    its PAID_ROUTES entry's exact routing), anything else normalised to its ``:free`` variant (FREE_ROUTING) —
-    the judge's rule, minus the allowlist exception. A free id is never checked against
-    the allowlist, and a non-allowlisted id can only ever be sent as ``:free``."""
-    return model if model in allowlist else free_id(model)
-
-
 def model_id(role: Role, s: Settings | None = None, provider: Provider | None = None) -> str:
     """The model id a role sends, with no key or URL checks (safe at import time)."""
     s = settings if s is None else s
     provider = provider or provider_of(role, s)
     if provider == "openrouter":
-        if role == "generator":
-            return openrouter_generator_id(
-                s.openrouter_llm_model, tuple(s.openrouter_paid_model_allowlist)
-            )
-        return free_id(s.openrouter_judge_model)
+        return free_id(s.openrouter_llm_model if role == "generator" else s.openrouter_judge_model)
     return s.llm_model if role == "generator" else base_model(s.judge_model)
 
 
@@ -335,21 +172,16 @@ class LLMEndpoint:
     base_url: str
     model: str
     api_key: str = field(default="", repr=False, compare=False)
-    allowlist: tuple[str, ...] = ()
 
     @property
     def key_env(self) -> str:
         return KEY_ENV[self.provider]
 
-    @property
-    def paid(self) -> bool:
-        return self.provider == "openrouter" and not is_free(self.model)
-
     def extra_body(self) -> dict:
         """Provider-specific request fields every call to this endpoint must carry."""
         if not is_openrouter(self.base_url):
             return {}
-        body: dict = {"provider": routing_for(self.model)}
+        body: dict = {"provider": free_routing()}
         if self.role == "judge":
             body["reasoning"] = dict(OPENROUTER_JUDGE_REASONING)
         return body
@@ -360,7 +192,6 @@ class LLMEndpoint:
             self.base_url,
             self.model if model is None else model,
             self.extra_body() if body is None else body,
-            self.allowlist,
         )
 
     def metadata(self) -> dict:
@@ -373,7 +204,7 @@ class LLMEndpoint:
         }
 
     def describe(self) -> str:
-        return f"{self.provider} {self.model}{' (paid)' if self.paid else ''} @ {self.base_url}"
+        return f"{self.provider} {self.model} @ {self.base_url}"
 
 
 def resolve_endpoint(
@@ -389,13 +220,13 @@ def resolve_endpoint(
     provider = provider or provider_of(role, s)
     if provider == "openrouter":
         url, key = OPENROUTER_BASE_URL, s.openrouter_api_key
-    elif provider == "groq":
+    elif provider == "openai_compat":
         url, key = s.llm_base_url, s.llm_api_key
         if is_openrouter(url):
             raise EndpointConfigError(
-                f"SSR_LLM_BASE_URL points at openrouter.ai but the {role} provider is 'groq'; "
-                f"set {PROVIDER_ENV[role]}=openrouter instead (refusing to send "
-                f"SSR_LLM_API_KEY to OpenRouter)"
+                f"SSR_LLM_BASE_URL points at openrouter.ai but the {role} provider is "
+                f"'openai_compat'; set {PROVIDER_ENV[role]}=openrouter instead (refusing to "
+                f"send SSR_LLM_API_KEY to OpenRouter)"
             )
     else:
         raise EndpointConfigError(f"unknown {role} provider {provider!r}")
@@ -405,7 +236,6 @@ def resolve_endpoint(
         base_url=url,
         model=model_id(role, s, provider),
         api_key=key,
-        allowlist=tuple(s.openrouter_paid_model_allowlist),
     )
     ep.check()  # a disallowed model fails at startup, not on the first request
     if require_key and not key:
@@ -422,21 +252,21 @@ def endpoint_for_url(
     so the default key — follows the URL, so an explicit URL can't pick up the other
     provider's key."""
     s = settings if s is None else s
-    provider: Provider = "openrouter" if is_openrouter(base_url) else "groq"
+    provider: Provider = "openrouter" if is_openrouter(base_url) else "openai_compat"
     key = api_key if api_key is not None else (
         s.openrouter_api_key if provider == "openrouter" else s.llm_api_key
     )
-    ep = LLMEndpoint(role, provider, base_url, model, key, tuple(s.openrouter_paid_model_allowlist))
+    ep = LLMEndpoint(role, provider, base_url, model, key)
     ep.check()
     return ep
 
 
 def ignored_settings(role: Role, s: Settings | None = None, provider: Provider | None = None) -> list[str]:
     """Env vars explicitly set (env or .env) that the provider in use ignores — e.g. a
-    Groq SSR_LLM_MODEL left in .env under llm_provider=openrouter. Names only."""
+    SSR_LLM_MODEL left in .env under llm_provider=openrouter. Names only."""
     s = settings if s is None else s
     provider = provider or provider_of(role, s)
-    other = "groq" if provider == "openrouter" else "openrouter"
+    other = "openai_compat" if provider == "openrouter" else "openrouter"
     return [f"SSR_{f.upper()}" for f in _PROVIDER_ONLY[(role, other)] if f in s.model_fields_set]
 
 
@@ -453,7 +283,7 @@ def describe_with_ignored(ep: LLMEndpoint, s: Settings | None = None) -> str:
 def response_cost(resp: object) -> float | None:
     """OpenRouter's reported cost of one response, in credits (USD), from usage.cost —
     always included in OpenRouter responses (docs: /docs/use-cases/usage-accounting).
-    None when the provider doesn't report it (Groq, Ollama)."""
+    None when the provider doesn't report it (most openai_compat backends)."""
     usage = getattr(resp, "usage", None)
     cost = getattr(usage, "cost", None)
     if cost is None:
@@ -536,16 +366,6 @@ def completion_choice(resp: object):
         f"LLM backend returned no completion ({what})" + (f": {detail}" if detail else ""),
         code=code,
     )
-
-
-def cost_upper_bound(prompt_tokens: int | None, completion_tokens: int | None, model: str) -> float:
-    """What a paid call to `model` can have cost at most, at that model's billing bound
-    (paid_bill_rate: its max_price caps, or higher where the endpoint bills some input
-    above them) — used when the provider reports no cost, so the spend ceiling never
-    counts an unknown as zero. PaidModelRefused for a model with no routing-table entry."""
-    caps = paid_bill_rate(model)
-    p, c = caps["prompt"], caps["completion"]
-    return ((prompt_tokens or 0) * p + (completion_tokens or 0) * c) / 1e6
 
 
 class GuardedClient:

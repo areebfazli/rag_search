@@ -34,9 +34,8 @@ evidence was actually retrieved, and scored under two definitions of evidence:
 
 Generator and judge use different model families, each on the provider its setting names
 (app.core.llm_endpoints; default: free Ling 3.0 Flash Sante generator and free Nemotron 3
-Ultra judge on OpenRouter, under the spend policy — a $0 run), with a provider-aware
-throttle so the run stays under the free-tier limits and a hard per-run spend ceiling
-(SSR_RAG_MAX_SPEND_USD) for when a paid generator is configured.
+Ultra judge on OpenRouter, under the free-only guard — a $0 run), with a provider-aware
+throttle so the run stays under the free-tier limits.
 
 Alongside the aggregates, rag.json keeps every scored query (gold label, rationale
 docs, verdict, both evidence flags, answer text, citations, and how generation ended:
@@ -61,8 +60,8 @@ ONLY by a run that covers the WHOLE canonical test split (SSR_RAG_N=all, or an N
 least the split size), with no SSR_EVAL_LIMIT, whose generator AND judge are the code
 defaults (Settings field defaults for the providers and OpenRouter model ids — not .env).
 Every other run — the default SSR_RAG_N=50 sample, any other partial sample, any
-train-split run, any limited run, any run with another generator or judge (e.g. a paid
-openai/gpt-6-luna comparison on all 300 test claims) — writes to
+train-split run, any limited run, any run with another generator or judge (e.g. another
+model on an openai_compat endpoint, even on all 300 test claims) — writes to
 ``data/eval_runs/rag_<dataset-slug>_<n>_<prompt-hash8>/``, with ``_<generator-slug>``
 (and ``_judge-<judge-slug>``) appended when the models differ (gitignored), says so up
 front, and can never touch eval/results/. A canonical run must also be COMPLETE: if any
@@ -79,7 +78,7 @@ os.replace) to ``data/eval_cache/rag/<signature>.json``, where the signature cov
 everything that changes a row (dataset, sample size, seed, both endpoints, both prompt
 hashes, top_k, mode, token budget, reasoning setting, retrieval settings) and nothing
 git-specific. A re-run of the same command skips completed rows, so a provider's daily
-cap (Groq tokens/day, OpenRouter's free requests/day) just pauses the run: it stops with
+cap (e.g. Groq's tokens/day, OpenRouter's free requests/day) just pauses the run: it stops with
 the checkpoint saved and the output dir untouched, and resumes after the quota resets.
 Skipped rows (pipeline errors, unparseable judge replies) are never checkpointed, so a
 re-run retries them. ``SSR_EVAL_REFRESH=1`` ignores the checkpoint; a corrupt or
@@ -102,7 +101,7 @@ resumes as-is. Each reply is cached in ``data/eval_cache/secondlook/<dataset>.js
 committed run's replies), and a re-run re-asks from the cache with no LLM call. Keys are versioned: new
 replies go under the v2 key (reask_key_v2: claim, budget, exact messages AND the endpoint
 fingerprint — provider, base URL, model, resolved reasoning effort, temperature policy,
-routing), so a Groq or paid run never reuses a reply another endpoint gave. Migration: a
+routing), so a run on another endpoint never reuses a reply this one gave. Migration: a
 lookup (reask_lookup) tries v2, then the legacy v1 key (model + budget + messages) but only
 for the canonical OpenRouter Ling endpoint every v1 entry was fetched with — which is how
 the committed rag.json's 15 re-ask replies stay cache hits with zero LLM calls (whether a reply came from the cache is counted in ``run.reask_replies``, not in
@@ -149,11 +148,8 @@ from app.core.llm_endpoints import (
     SpendPolicyError,
     build_client,
     completion_choice,
-    cost_upper_bound,
     describe_with_ignored,
     model_id,
-    paid_bill_rate,
-    paid_max_price,
     resolve_endpoint,
 )
 from app.core.interfaces import SearchHit, hit_passage
@@ -163,9 +159,9 @@ from app.generate.generator import (
     REASK_MAX_RETRIES,
     REASK_MAX_TOKENS,
     REASK_NOTE,
+    GENERATION_TEMPERATURE,
     TRUNCATION_NOTE,
     LLMGenerator,
-    generation_temperature,
     looks_like_claim,
     map_citations,
     needs_reask,
@@ -194,7 +190,7 @@ from app.retrieve.service import SearchService
 
 # Generator and judge are different model families, so the judge isn't grading its own
 # or a sibling model's output. The ids are what llm_endpoints resolves for the provider
-# in use (main() re-resolves them with key + spend-policy checks).
+# in use (main() re-resolves them with key + free-only checks).
 N = 50  # default sample size; SSR_RAG_N overrides (an int, or "all")
 SEED = 13  # fixed sample: reproducible, and not just the first N ids in dataset order
 GEN_PROVIDER = settings.llm_provider
@@ -205,20 +201,20 @@ TOP_K = 5
 MODE = "hybrid"  # the API's default mode — the eval scores what users actually get
 # Seconds slept after each query. SSR_RAG_THROTTLE_S overrides; otherwise it depends on
 # the providers (default_throttle_s):
-# * Groq's free tier caps each model at 8,000 tokens/minute (x-ratelimit-limit-tokens).
-#   With reasoning_effort=medium a generation is ~2-3k tokens (prompt + reasoning +
-#   answer) and a judge call ~2k, so one query per 15 s overran the generator's bucket
-#   and 4 of 50 queries were skipped. 30 s keeps each model under ~6k tokens/minute.
+# * An openai_compat endpoint in either role: 30 s, sized for Groq's free tier, which caps
+#   each model at 8,000 tokens/minute (x-ratelimit-limit-tokens). A generation is ~2-3k
+#   tokens (prompt + reasoning + answer) and a judge call ~2k, so one query per 15 s
+#   overran the generator's bucket and 4 of 50 queries were skipped. 30 s keeps each
+#   model under ~6k tokens/minute. SSR_RAG_THROTTLE_S overrides it for a faster backend.
 # * OpenRouter's free tier allows 20 requests/min account-wide across ALL `:free`
-#   models (paid models are not under that cap). With the default free generator AND free
-#   judge, one query is up to 3 free requests (generation, its truncation retry, the
-#   judge). The sleep is 4 s per possible free request (12 s/query), and it comes on top
-#   of the calls' own latency, so any 60 s window holds at most 5 query starts: <= 15
-#   requests even if every generation retries (~10 typical), vs the cap of 20. A paid
-#   generator leaves only the judge on the free cap: the 5 s floor, <= 12/min.
+#   models. With the default free generator AND free judge, one query is up to 3 free
+#   requests (generation, its truncation retry, the judge). The sleep is 4 s per possible
+#   free request (12 s/query), and it comes on top of the calls' own latency, so any 60 s
+#   window holds at most 5 query starts: <= 15 requests even if every generation retries
+#   (~10 typical), vs the cap of 20.
 _THROTTLE_ENV = os.environ.get("SSR_RAG_THROTTLE_S")
 THROTTLE_S: float | None = float(_THROTTLE_ENV) if _THROTTLE_ENV else None
-GROQ_THROTTLE_S = 30.0
+OPENAI_COMPAT_THROTTLE_S = 30.0
 OPENROUTER_S_PER_FREE_REQUEST = 4.0
 OPENROUTER_MIN_THROTTLE_S = 5.0
 OPENROUTER_FREE_REQUESTS_PER_MIN = 20  # account-wide, all `:free` models
@@ -227,18 +223,13 @@ OPENROUTER_FREE_REQUESTS_PER_MIN = 20  # account-wide, all `:free` models
 # and the sample is fixed (seed) so runs stay comparable.
 RATE_LIMIT_RETRIES = 3
 RATE_LIMIT_WAIT_S = 60.0
-# Groq also caps tokens per DAY (rolling 24 h; 200k for gpt-oss-120b on the free
-# tier), and the rate-limit headers don't expose it. Waiting a minute can't clear that,
-# so a daily-cap 429 ends the run at once, before anything is written: a partial run
-# must never overwrite the committed artifact. Rough per-query cost (prompt + medium
-# reasoning + answer, and the judge call), measured on the 2026-09 runs:
-EST_GEN_PROMPT_TOKENS = 2500
-EST_GEN_COMPLETION_TOKENS = 1000
-EST_GEN_TOKENS_PER_QUERY = EST_GEN_PROMPT_TOKENS + EST_GEN_COMPLETION_TOKENS
+# Some providers also cap tokens per DAY (Groq: rolling 24 h, 200k for gpt-oss-120b on the
+# free tier), and the rate-limit headers don't expose it. Waiting a minute can't clear
+# that, so a daily-cap 429 ends the run at once, before anything is written: a partial run
+# must never overwrite the committed artifact. Rough per-query tokens (prompt + reasoning
+# + answer, and the judge call), measured on the 2026-09 runs:
+EST_GEN_TOKENS_PER_QUERY = 3500
 EST_JUDGE_TOKENS_PER_QUERY = 2000
-# Upper bound on one generation prompt (system + 5 abstracts + claim), for the worst-case
-# per-query cost the spend ceiling checks BEFORE each query.
-MAX_GEN_PROMPT_TOKENS = 4000
 # OpenRouter's free tier caps `:free` requests per day (1,000 with >= $10 of credits ever
 # bought, 50 otherwise), account-wide. Its daily-cap 429 names the window
 # ("free-models-per-day"); it is treated exactly like Groq's tokens-per-day cap.
@@ -246,12 +237,8 @@ OPENROUTER_FREE_REQUESTS_PER_DAY = 1000
 
 
 class DailyTokenBudgetExhausted(RuntimeError):
-    """The provider's per-day cap (Groq: tokens, OpenRouter free tier: requests) is hit;
-    retrying within the run is pointless."""
-
-
-class SpendCeilingReached(RuntimeError):
-    """The next query could take the run's reported spend past SSR_RAG_MAX_SPEND_USD."""
+    """The provider's per-day cap (e.g. Groq: tokens, OpenRouter free tier: requests) is
+    hit; retrying within the run is pointless."""
 
 
 def _is_daily_cap(e: Exception) -> bool:
@@ -271,7 +258,7 @@ def _is_daily_cap(e: Exception) -> bool:
 
 def _is_fatal(e: Exception) -> bool:
     """Errors every later query would hit too: skipping them would just write an empty
-    or thinned artifact. A spend-policy refusal, bad key (401) or no credits (402)."""
+    or thinned artifact. A free-only guard refusal, bad key (401) or no credits (402)."""
     if isinstance(e, SpendPolicyError):
         return True
     return isinstance(e, APIStatusError) and e.status_code in (401, 402)
@@ -281,8 +268,8 @@ def free_requests_per_query(gen: LLMEndpoint, judge: LLMEndpoint) -> tuple[int, 
     """(typical, worst) requests one query makes against OpenRouter's free-tier caps:
     the judge's one call if it is a free OpenRouter model, plus 1 for a free OpenRouter
     generator — 2 in the worst case (the truncation retry)."""
-    judge_free = int(judge.provider == "openrouter" and not judge.paid)
-    gen_free = int(gen.provider == "openrouter" and not gen.paid)
+    judge_free = int(judge.provider == "openrouter")
+    gen_free = int(gen.provider == "openrouter")
     return judge_free + gen_free, judge_free + 2 * gen_free
 
 
@@ -292,30 +279,10 @@ def default_throttle_s(gen: LLMEndpoint | None = None, judge: LLMEndpoint | None
         return THROTTLE_S
     gen = gen or resolve_endpoint("generator", require_key=False)
     judge = judge or resolve_endpoint("judge", require_key=False)
-    if "groq" in (gen.provider, judge.provider):
-        return GROQ_THROTTLE_S
+    if "openai_compat" in (gen.provider, judge.provider):
+        return OPENAI_COMPAT_THROTTLE_S
     _, worst = free_requests_per_query(gen, judge)
     return max(OPENROUTER_MIN_THROTTLE_S, worst * OPENROUTER_S_PER_FREE_REQUEST)
-
-
-def worst_case_generation_cost(gen: LLMEndpoint) -> float:
-    """Most one query's generation can cost: both attempts (the truncation retry runs
-    at 2x the budget) at THIS generator's billing bound (llm_endpoints.paid_bill_rate),
-    with a generous prompt. 0 unless paid."""
-    if not gen.paid:
-        return 0.0
-    budget = settings.llm_max_completion_tokens
-    return cost_upper_bound(MAX_GEN_PROMPT_TOKENS, budget, gen.model) + cost_upper_bound(
-        MAX_GEN_PROMPT_TOKENS, budget * 2, gen.model
-    )
-
-
-def typical_generation_cost(gen: LLMEndpoint) -> float:
-    """A typical query's generation at this generator's billing bound (an upper-bound
-    estimate: the endpoint actually served may bill less)."""
-    if not gen.paid:
-        return 0.0
-    return cost_upper_bound(EST_GEN_PROMPT_TOKENS, EST_GEN_COMPLETION_TOKENS, gen.model)
 
 
 OUT = RESULTS  # canonical run only — the committed artifact (repo-anchored, not cwd)
@@ -618,14 +585,14 @@ def reask_request_fingerprint(gen: LLMEndpoint) -> dict:
     """Everything about the endpoint that can change a re-ask reply besides the messages
     and budget: provider, base URL, model id, the reasoning effort LLMGenerator resolves
     for it (from settings.llm_reasoning_effort, as main() builds it), the temperature
-    policy (generator.generation_temperature; None = not sent) and the provider routing
+    (generator.GENERATION_TEMPERATURE) and the provider routing
     every call carries (endpoint.extra_body()). Never the key."""
     return {
         "provider": gen.provider,
         "base_url": gen.base_url,
         "model": gen.model,
-        "reasoning_effort": resolve_reasoning_effort(gen.model, settings.llm_reasoning_effort),
-        "temperature": generation_temperature(gen.model),
+        "reasoning_effort": resolve_reasoning_effort(settings.llm_reasoning_effort),
+        "temperature": GENERATION_TEMPERATURE,
         "extra_body": gen.extra_body(),
     }
 
@@ -667,7 +634,7 @@ def reask_lookup(
     """The cached re-ask reply for this request, or None. The v2 key first; then — key
     migration — the legacy v1 key, but ONLY when ``gen`` is exactly the canonical endpoint
     the v1 entries were fetched with (is_legacy_reask_endpoint). Any other endpoint (a
-    Groq or paid run with the same model id and messages) never reads a v1 entry."""
+    run on another endpoint with the same model id and messages) never reads a v1 entry."""
     rec = cache.get(reask_key_v2(qid, gen, messages))
     if rec is None and is_legacy_reask_endpoint(gen):
         rec = cache.get(reask_key(qid, gen.model, messages))
@@ -813,7 +780,7 @@ def run_metadata(
     each role's provider, base URL, model id and the provider fields sent — never a key."""
     gen = gen or resolve_endpoint("generator", require_key=False)
     judge_ep = judge_ep or resolve_endpoint("judge", require_key=False)
-    effort = resolve_reasoning_effort(gen.model, settings.llm_reasoning_effort)
+    effort = resolve_reasoning_effort(settings.llm_reasoning_effort)
     dataset = dataset or settings.eval_dataset
     return {
         "git_sha": _git_sha(),
@@ -833,8 +800,7 @@ def run_metadata(
             None if effort is None
             else "reasoning.effort" if gen.provider == "openrouter" else "reasoning_effort"
         ),
-        # None when the model is sent no temperature at all (e.g. openai/gpt-6-luna).
-        "generator_temperature": generation_temperature(gen.model),
+        "generator_temperature": GENERATION_TEMPERATURE,
         # Both roles are the code defaults: the only runs that may be canonical.
         "default_models": not non_default_roles(gen, judge_ep),
         "judge_model": judge_ep.model,
@@ -1223,18 +1189,10 @@ def _estimate_line(n: int, gen: LLMEndpoint, judge_ep: LLMEndpoint, throttle: fl
         ("generator", gen, EST_GEN_TOKENS_PER_QUERY),
         ("judge", judge_ep, EST_JUDGE_TOKENS_PER_QUERY),
     ):
-        if ep.provider == "groq":
+        if ep.provider == "openai_compat":
             parts.append(
-                f"  {role}: ~{n * toks:,} tokens on {ep.model} (Groq free tier caps tokens "
-                f"per day: 200k/day for gpt-oss-120b)"
-            )
-        elif ep.paid:
-            parts.append(
-                f"  {role}: {n}-{2 * n} paid requests to {ep.model} (1 + the truncation retry "
-                f"when needed); est. ${n * typical_generation_cost(gen):.4f}, worst case "
-                f"${n * worst_case_generation_cost(gen):.4f} at {ep.model}'s billing bound "
-                f"{paid_bill_rate(ep.model)} USD/1M tokens (max_price caps "
-                f"{paid_max_price(ep.model)})"
+                f"  {role}: ~{n * toks:,} tokens on {ep.model} at {ep.base_url} (that "
+                f"provider's own rate and daily limits apply)"
             )
         else:
             count = f"{n}" if role == "judge" else f"{n}-{2 * n}"  # generator may retry once
@@ -1248,12 +1206,9 @@ def _estimate_line(n: int, gen: LLMEndpoint, judge_ep: LLMEndpoint, throttle: fl
             f"{OPENROUTER_FREE_REQUESTS_PER_MIN}/min and {OPENROUTER_FREE_REQUESTS_PER_DAY:,}"
             f"/day account-wide, shared with everything else on the account today)"
         )
-    ceiling = f"${settings.rag_max_spend_usd:.2f} (SSR_RAG_MAX_SPEND_USD)"
-    if not gen.paid:
-        ceiling += ", est. and worst-case spend $0 (no paid role)"
     return (
         "Estimated LLM usage:\n" + "\n".join(parts) + "\n"
-        f"  spend ceiling: {ceiling}; ~{n * throttle / 60:.0f} min at a {throttle:.1f}s throttle."
+        f"  ~{n * throttle / 60:.0f} min at a {throttle:.1f}s throttle."
     )
 
 
@@ -1332,8 +1287,8 @@ def output_dir(
     number of claims in the split), with no SSR_EVAL_LIMIT, AND both roles on the code
     defaults (default_endpoints) may write to eval/results/. Anything else — a partial
     sample such as the default SSR_RAG_N=50 (or an unknown split size), every
-    train-split run, every smoke subset, every run with another generator or judge (a
-    paid-model comparison, even on the full test split) — goes to
+    train-split run, every smoke subset, every run with another generator or judge (even
+    on the full test split) — goes to
     data/eval_runs/rag_<dataset-slug>_<n>_<prompt-hash8>[_<generator-slug>]
     [_judge-<judge-slug>]/, so experiments under different prompts or models don't
     collide and can never overwrite the committed free-model artifact. (gen/judge_ep
@@ -1440,7 +1395,7 @@ def signature_fields(dataset: str, n_sample: int, gen: LLMEndpoint, judge_ep: LL
         "reranker": reranker,
         "rerank_candidates": settings.rerank_candidates if reranker else None,
         "max_completion_tokens": settings.llm_max_completion_tokens,
-        "reasoning_effort": resolve_reasoning_effort(gen.model, settings.llm_reasoning_effort),
+        "reasoning_effort": resolve_reasoning_effort(settings.llm_reasoning_effort),
         "rrf_k": settings.rrf_k,
         "candidate_k": settings.dense_top_k,
         "embedding_model": settings.embedding_model,
@@ -1599,8 +1554,8 @@ def request_estimate(
     rate per new claim and the re-asks resumed rows still need (`reask_pending`: their
     exact count of cache misses); and the share of those on OpenRouter's free caps
     (expected, and worst case with every generation retrying and re-asking)."""
-    gen_free = int(gen.provider == "openrouter" and not gen.paid)
-    judge_free = int(judge_ep.provider == "openrouter" and not judge_ep.paid)
+    gen_free = int(gen.provider == "openrouter")
+    judge_free = int(judge_ep.provider == "openrouter")
     _, worst = free_requests_per_query(gen, judge_ep)
     reask_rate = reask_rate if reask else 0.0
     reask_pending = reask_pending if reask else 0
@@ -1745,7 +1700,6 @@ def main(argv: Sequence[str] = ()) -> None:
     print(describe_with_ignored(gen_ep), describe_with_ignored(judge_ep), sep="\n", flush=True)
     throttle = default_throttle_s(gen_ep, judge_ep)
     free_lo, free_hi = free_requests_per_query(gen_ep, judge_ep)
-    ceiling = settings.rag_max_spend_usd
 
     queries, qrels = load_queries_qrels(dataset)
     qids = sample_claims(queries, n_req)
@@ -1906,25 +1860,14 @@ def main(argv: Sequence[str] = ()) -> None:
     )
     judge_client = build_client(judge_ep, factory=OpenAI, timeout=60.0)  # Nemotron Ultra: rare 20-27 s calls
 
-    # Spend accounting. `reported` is what OpenRouter billed per its usage.cost; `counted`
-    # adds the worst-case bound for any paid generation whose cost went unreported, and
-    # is what the ceiling is enforced on — an unknown is never counted as zero. Resumed
-    # rows count too: the ceiling is per run, however many sessions it takes.
-    worst_q = worst_case_generation_cost(gen_ep)
-    worst_reask = (
-        cost_upper_bound(MAX_GEN_PROMPT_TOKENS, REASK_MAX_TOKENS, gen_ep.model) if gen_ep.paid else 0.0
-    )
-    reported = counted = 0.0
-    unreported_paid = 0
+    # Reported cost: what the provider billed per its usage.cost (OpenRouter reports it;
+    # $0 on free models). Resumed rows count too: it is per run, however many sessions.
+    reported = 0.0
 
-    def account(cost: float | None, worst: float | None = None) -> None:
-        nonlocal reported, counted, unreported_paid
+    def account(cost: float | None) -> None:
+        nonlocal reported
         if cost is not None:
             reported += cost
-            counted += cost
-        elif gen_ep.paid:
-            unreported_paid += 1
-            counted += worst_q if worst is None else worst
 
     for r in done.values():
         account(r.get("generation_cost_usd"))
@@ -1935,10 +1878,6 @@ def main(argv: Sequence[str] = ()) -> None:
 
     def judge_usd() -> float:
         return prior_judge_usd + getattr(judge_client, "cost_usd", 0.0)
-
-    def spent() -> float:
-        # The judge is `:free` by policy, but anything OpenRouter does report counts.
-        return counted + judge_usd()
 
     def checkpoint() -> None:
         save_checkpoint(
@@ -1973,15 +1912,7 @@ def main(argv: Sequence[str] = ()) -> None:
                 time.sleep(RATE_LIMIT_WAIT_S)
 
     def generate_once(q: str, hits: list[SearchHit], counter: str = "generation_attempts"):
-        # Checked BEFORE every attempt, retries included: the next attempt's worst
-        # case must fit under the ceiling, so the ceiling holds even if this query
-        # is the expensive one. A failed attempt's cost is counted (unknown = the
-        # worst case on a paid generator) — it may have been billed.
-        if spent() + worst_q > ceiling:
-            raise SpendCeilingReached(
-                f"spent ${spent():.4f} so far and the next query could cost up to "
-                f"${worst_q:.4f}, over SSR_RAG_MAX_SPEND_USD=${ceiling:.2f}"
-            )
+        # A failed attempt's reported cost is counted: it may have been billed.
         try:
             ans = generator.generate(q, hits)
         except EmptyCompletionError as e:
@@ -2018,10 +1949,6 @@ def main(argv: Sequence[str] = ()) -> None:
             # must not re-run (and re-pay for) a generation that already succeeded.
             ans = with_rate_limit_retries(lambda q=q, hits=hits: generate_once(q, hits), n, qid)
             account(getattr(ans, "cost_usd", None))
-            if spent() > ceiling:
-                raise SpendCeilingReached(
-                    f"spent ${spent():.4f}, over SSR_RAG_MAX_SPEND_USD=${ceiling:.2f}"
-                )
             judge_calls += 1
             s = with_rate_limit_retries(
                 lambda q=q, hits=hits, ans=ans: judge_once(q, hits, ans.text), n, qid,
@@ -2030,18 +1957,13 @@ def main(argv: Sequence[str] = ()) -> None:
             remaining = len(qids) - len(done)
             raise SystemExit(
                 f"\nStopped at query {n}/{len(qids)}: the provider's daily cap is exhausted "
-                f"(Groq: tokens/day; OpenRouter free tier: "
+                f"(e.g. Groq: tokens/day; OpenRouter free tier: "
                 f"{OPENROUTER_FREE_REQUESTS_PER_DAY:,} requests/day).\n  {str(e)[:300]}\n"
                 f"Nothing was written to {out}; {kept()}.\n"
                 f"Resume by re-running the same command after the quota resets: only the "
                 f"{remaining} remaining rows run (~{remaining * EST_GEN_TOKENS_PER_QUERY:,} "
                 f"generator + ~{remaining * EST_JUDGE_TOKENS_PER_QUERY:,} judge tokens, "
                 f"{remaining * free_lo}-{remaining * free_hi} free OpenRouter requests)."
-            ) from None
-        except SpendCeilingReached as e:
-            raise SystemExit(
-                f"\nStopped at query {n}/{len(qids)}: spend ceiling reached — {e}.\n"
-                f"Nothing was written to {out}; {kept()}."
             ) from None
         except JudgeParseError as e:
             parse_failures += 1  # not checkpointed: a re-run retries it
@@ -2073,8 +1995,8 @@ def main(argv: Sequence[str] = ()) -> None:
 
     # Pass 3 — the verdict-only re-ask, over every finished row (resumed ones included)
     # whose claim got no verdict: the reply comes from the re-ask cache when it is there
-    # (no LLM call), else from ONE call that is then cached at once. Same retries, spend
-    # ceiling and daily-cap stop as pass 2; nothing is written until every row is done.
+    # (no LLM call), else from ONE call that is then cached at once. Same retries and
+    # daily-cap stop as pass 2; nothing is written until every row is done.
     final: dict[str, dict] = {}
     reask_stats = {"cached": 0, "fetched": 0, "failed": 0}
     for qid in qids if reask_on else ():
@@ -2085,27 +2007,22 @@ def main(argv: Sequence[str] = ()) -> None:
         rec = reask_lookup(reask_cache, qid, gen_ep, msgs)
         if rec is not None:
             reask_stats["cached"] += 1
-            account(rec.get("cost_usd"), worst_reask)
+            account(rec.get("cost_usd"))
             final[qid] = apply_reask(r, rec)
             continue
         n = position[qid]
 
         def reask_once(q=queries[qid], hits=passages(qid)):
-            if spent() + worst_reask > ceiling:
-                raise SpendCeilingReached(
-                    f"spent ${spent():.4f} so far and the next re-ask could cost up to "
-                    f"${worst_reask:.4f}, over SSR_RAG_MAX_SPEND_USD=${ceiling:.2f}"
-                )
             session["reask_calls"] += 1
             try:
                 return generator.reask_verdict(q, hits)
             except EmptyCompletionError as e:
-                account(e.cost_usd, worst_reask)
+                account(e.cost_usd)
                 raise
 
         try:
             reply = with_rate_limit_retries(reask_once, n, qid)
-        except (DailyTokenBudgetExhausted, SpendCeilingReached) as e:
+        except DailyTokenBudgetExhausted as e:
             raise SystemExit(
                 f"\nStopped in the re-ask pass at query {n}/{len(qids)}: {str(e)[:300]}\n"
                 f"Nothing was written to {out}; {kept()}; re-ask replies so far are cached "
@@ -2123,7 +2040,7 @@ def main(argv: Sequence[str] = ()) -> None:
             final[qid] = apply_reask(r, None, error=type(e).__name__)
             time.sleep(throttle)
             continue
-        account(reply.cost_usd, worst_reask)
+        account(reply.cost_usd)
         rec = {
             "raw": reply.raw, "finish_reason": reply.finish_reason,
             "completion_tokens": reply.completion_tokens, "reasoning_tokens": reply.reasoning_tokens,
@@ -2182,12 +2099,6 @@ def main(argv: Sequence[str] = ()) -> None:
                 "judge_calls": judge_calls,
                 "cost": {
                     "reported_usd": round(reported, 6),
-                    # reported + worst-case bounds for unreported paid generations: the
-                    # figure the ceiling was enforced on.
-                    "counted_usd": round(counted, 6),
-                    "unreported_paid_generations": unreported_paid,
-                    "ceiling_usd": ceiling,
-                    "generator_paid": gen_ep.paid,  # False: a $0 run (both roles free)
                     "judge_reported_usd": round(judge_usd(), 6),
                 },
                 # Provenance + per-query detail go after the aggregates, so the headline
@@ -2227,7 +2138,7 @@ def main(argv: Sequence[str] = ()) -> None:
         f"reasked={agg['reasked_answers']} ({agg['reask_verdicts']} verdicts; "
         f"{reask_stats['cached']} cached, {reask_stats['fetched']} fetched, "
         f"{reask_stats['failed']} failed)  "
-        f"cost=${reported:.4f} reported (${counted:.4f} counted)"
+        f"cost=${reported:.4f} reported"
     )
     if missing_ids:
         bar = "!" * 88

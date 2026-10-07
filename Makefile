@@ -18,7 +18,7 @@ analysis:  ## label-stratified re-score of the cached eval runs -> eval/results/
 latency:  ## per-query retrieval latency for every eval config -> eval/results/latency.{md,json}
 	uv run --locked python -m app.eval.latency
 
-eval-rag:  ## RAG answer-quality eval (needs SSR_OPENROUTER_API_KEY in .env; $0 on the default free models; an optional paid generator costs ~$0.005-0.10/run depending on model and SSR_RAG_N, capped by SSR_RAG_MAX_SPEND_USD). Default SSR_RAG_N=50 -> data/eval_runs/; only SSR_RAG_N=all on the test split with the default models, and every claim scored, writes eval/results/rag.{md,json}
+eval-rag:  ## RAG answer-quality eval (needs SSR_OPENROUTER_API_KEY in .env; $0 on the default free models). Default SSR_RAG_N=50 -> data/eval_runs/; only SSR_RAG_N=all on the test split with the default models, and every claim scored, writes eval/results/rag.{md,json}
 	uv run python -m app.eval.rag_eval
 
 rag-compare:  ## paired McNemar of two RAG runs: make rag-compare A=path/rag.json B=path/rag.json [ARGS=--labels=audit]

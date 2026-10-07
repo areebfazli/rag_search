@@ -17,7 +17,6 @@ from app.core.llm_endpoints import (
     FREE_ROUTING,
     EmptyCompletionError,
     LLMEndpoint,
-    paid_routing,
 )
 from app.core.interfaces import Answer, SearchHit
 from app.eval import rag_eval
@@ -359,8 +358,8 @@ DEFAULT_JUDGE_MODEL = Settings.model_fields["openrouter_judge_model"].default
 RAG_ENV = (
     "SSR_RAG_N", "SSR_RAG_DATASET", "SSR_EVAL_LIMIT", "SSR_EVAL_REFRESH", "SSR_RAG_CHECK_QUOTA",
 )
-PAID_GEN_MODEL = "openai/gpt-oss-120b"
-LUNA = "openai/gpt-6-luna"
+# A non-default (free) generator: runs with it are never canonical.
+OTHER_GEN_MODEL = "openai/gpt-oss-120b:free"
 
 
 def _patch_main(
@@ -370,12 +369,11 @@ def _patch_main(
     fake_judge = judge if judge is not None else FakeJudge()
     # Pin the provider mix and generator model with a fake key, so the run neither depends
     # on the developer's .env nor needs one (CI has none). Nothing here touches the network.
-    # gen_model=PAID_GEN_MODEL exercises the paid, spend-capped path.
+    # gen_model=OTHER_GEN_MODEL exercises a non-default (non-canonical) generator.
     monkeypatch.setattr(settings, "llm_provider", "openrouter")
     monkeypatch.setattr(settings, "judge_provider", "openrouter")
     monkeypatch.setattr(settings, "openrouter_llm_model", gen_model)
     monkeypatch.setattr(settings, "openrouter_judge_model", DEFAULT_JUDGE_MODEL)
-    monkeypatch.setattr(settings, "openrouter_paid_model_allowlist", (PAID_GEN_MODEL, LUNA))
     monkeypatch.setattr(settings, "openrouter_api_key", FAKE_OPENROUTER_KEY)
     monkeypatch.setattr(rag_eval, "OUT", out)
     # Checkpoints and non-canonical runs stay under tmp_path, never the real data/.
@@ -429,9 +427,9 @@ def rag_run(tmp_path, monkeypatch):
 
 
 @pytest.fixture()
-def paid_rag_run(tmp_path, monkeypatch):
-    blob, fake_judge = _run_main(tmp_path, monkeypatch, gen_model=PAID_GEN_MODEL)
-    return _written_dir(tmp_path, PAID_GEN_MODEL), blob, fake_judge
+def other_rag_run(tmp_path, monkeypatch):
+    blob, fake_judge = _run_main(tmp_path, monkeypatch, gen_model=OTHER_GEN_MODEL)
+    return _written_dir(tmp_path, OTHER_GEN_MODEL), blob, fake_judge
 
 
 def test_rag_json_keeps_every_scored_query(rag_run):
@@ -728,7 +726,7 @@ def test_per_minute_rate_limit_retries_the_same_query(rate_limited, source):
     rag_eval.main()  # completes: no SystemExit
     assert sleeps.count(WAIT_S) == fails
     # Only the rate-limited step retries, for the SAME query with the same hits: a judge
-    # 429 must not re-run (and, on a paid generator, re-pay for) a finished generation.
+    # 429 must not re-run a finished generation.
     tries = [hits for q, hits in gen.calls if q == "Two claim holds."]
     assert len(tries) == (fails + 1 if source == "generate" else 1)
     assert all(h == tries[0] for h in tries)
@@ -776,7 +774,7 @@ def test_a_non_canonical_run_with_a_missing_claim_writes_with_a_loud_note(rate_l
     assert "INCOMPLETE: 1 of 5 sampled claims have no row" in capsys.readouterr().out
 
 
-# --- providers, spend ceiling, fatal errors ------------------------------------------------
+# --- providers, cost, fatal errors ------------------------------------------------
 
 # OpenRouter's free-tier daily cap, as the openai client stringifies the 429 body.
 OPENROUTER_DAILY_MESSAGE = (
@@ -807,19 +805,16 @@ def test_default_run_is_all_free(capsys, rag_run):
     run = blob["run"]
     assert run["generator_model"] == DEFAULT_GEN_MODEL and DEFAULT_GEN_MODEL.endswith(":free")
     assert run["judge_model"].endswith(":free")
-    assert run["generator_extra_body"] == {"provider": FREE_ROUTING}  # no paid pinning
+    assert run["generator_extra_body"] == {"provider": FREE_ROUTING}
     assert run["generator_reasoning_effort"] is None and run["generator_reasoning_param"] is None
-    # A free generator is never counted at the paid worst case, even when unreported (q5).
-    assert blob["cost"]["generator_paid"] is False
-    assert blob["cost"]["unreported_paid_generations"] == 0
-    assert blob["cost"]["counted_usd"] == blob["cost"]["reported_usd"]
+    assert set(blob["cost"]) == {"reported_usd", "judge_reported_usd"}
     out = capsys.readouterr().out
-    assert "both roles are free: $0 run" in out and "worst-case spend $0 (no paid role)" in out
+    assert "both roles are free: $0 run" in out
     assert "total: 10-15 free OpenRouter requests" in out  # 5 claims x (1-2 gen + 1 judge)
-    assert "paid requests" not in out and "(paid)" not in out
+    assert "paid" not in out and "ceiling" not in out
 
 
-def test_estimate_line_free_vs_paid():
+def test_estimate_line_free_vs_openai_compat():
     url = "https://openrouter.ai/api/v1"
     judge_ep = LLMEndpoint("judge", "openrouter", url, "nvidia/nemotron-3-ultra-550b-a55b:free")
     free = rag_eval._estimate_line(
@@ -829,56 +824,52 @@ def test_estimate_line_free_vs_paid():
     assert "judge: 50 free requests" in free
     assert "total: 100-150 free OpenRouter requests (both roles are free: $0 run" in free
     assert "1,000/day" in free and "~10 min at a 12.0s throttle" in free
-    paid = rag_eval._estimate_line(
-        50, LLMEndpoint("generator", "openrouter", url, PAID_GEN_MODEL), judge_ep, 5.0
+    compat = rag_eval._estimate_line(
+        50, LLMEndpoint("generator", "openai_compat", "http://localhost:11434/v1", "qwen3:4b"),
+        judge_ep, 30.0,
     )
-    assert "generator: 50-100 paid requests" in paid and "worst case $" in paid
-    assert "total: 50 free OpenRouter requests (free tier" in paid  # the judge only
-    assert "both roles are free" not in paid and "no paid role" not in paid
+    assert "generator: ~175,000 tokens on qwen3:4b at http://localhost:11434/v1" in compat
+    assert "total: 50 free OpenRouter requests (free tier" in compat  # the judge only
+    assert "both roles are free" not in compat
 
 
-def test_rag_json_records_providers_and_cost_but_never_the_key(paid_rag_run):
-    path, blob, _ = paid_rag_run
+def test_rag_json_records_providers_and_cost_but_never_the_key(other_rag_run):
+    path, blob, _ = other_rag_run
     run = blob["run"]
     assert run["generator_provider"] == "openrouter" and run["judge_provider"] == "openrouter"
     assert run["generator_base_url"] == run["judge_base_url"] == "https://openrouter.ai/api/v1"
-    assert run["generator_model"] == PAID_GEN_MODEL and run["judge_model"].endswith(":free")
-    assert run["generator_extra_body"] == {"provider": paid_routing(PAID_GEN_MODEL)}
-    assert run["generator_reasoning_param"] == "reasoning.effort"
-    assert blob["cost"]["generator_paid"] is True
-    # q5's generator is a plain Answer (no cost side channel): counted at the worst case.
+    assert run["generator_model"] == OTHER_GEN_MODEL and run["judge_model"].endswith(":free")
+    assert run["generator_extra_body"] == {"provider": FREE_ROUTING}
+    # q5's generator is a plain Answer (no cost side channel): left out of the reported sum.
     assert blob["cost"]["reported_usd"] == pytest.approx((len(QUERIES) - 1) * GEN_COST_USD)
-    assert blob["cost"]["unreported_paid_generations"] == 1
-    assert blob["cost"]["counted_usd"] > blob["cost"]["reported_usd"]
     for f in ("rag.json", "rag.md"):
         assert FAKE_OPENROUTER_KEY not in (path / f).read_text()
     assert "(openrouter)" in (path / "rag.md").read_text()
 
 
 def test_a_failed_generation_with_a_billed_attempt_is_counted(tmp_path, monkeypatch):
-    # generate() attaches the billed cost of an attempt that preceded a failure (e.g. the
-    # truncation retry hit a 429): the spend ceiling must count it, not lose it.
+    # generate() attaches the reported cost of an attempt that preceded a failure (e.g.
+    # the truncation retry hit a 429): the reported cost must count it, not lose it.
     err = rate_limit_error(TPM_MESSAGE)
     err.cost_usd = 0.002
     gen = type("Gen", (FlakyGenerator,), {"calls": [], "fail_query": "Two claim holds.", "errors": [err]})
     monkeypatch.setattr(rag_eval.time, "sleep", lambda s: None)
-    _patch_main(tmp_path, monkeypatch, tmp_path, generator=gen, gen_model=PAID_GEN_MODEL)
+    _patch_main(tmp_path, monkeypatch, tmp_path, generator=gen, gen_model=OTHER_GEN_MODEL)
     rag_eval.main()
-    blob = json.loads((_written_dir(tmp_path, PAID_GEN_MODEL) / "rag.json").read_text())
+    blob = json.loads((_written_dir(tmp_path, OTHER_GEN_MODEL) / "rag.json").read_text())
     assert blob["cost"]["reported_usd"] == pytest.approx((len(QUERIES) - 1) * GEN_COST_USD + 0.002)
 
 
 def test_throttle_is_provider_aware(monkeypatch):
     monkeypatch.setattr(rag_eval, "THROTTLE_S", None)  # no SSR_RAG_THROTTLE_S override
     url = "https://openrouter.ai/api/v1"
-    paid = LLMEndpoint("generator", "openrouter", url, "openai/gpt-oss-120b")
     free_gen = LLMEndpoint("generator", "openrouter", url, DEFAULT_GEN_MODEL)
     judge_ep = LLMEndpoint("judge", "openrouter", url, "nvidia/nemotron-3-ultra-550b-a55b:free")
-    groq = LLMEndpoint("generator", "groq", "https://api.groq.com/openai/v1", "openai/gpt-oss-120b")
-    assert rag_eval.default_throttle_s(groq, judge_ep) == 30.0
-    # One free request per query (the judge): the 5 s floor, <= 12 free requests/min.
-    assert rag_eval.default_throttle_s(paid, judge_ep) == 5.0
-    assert rag_eval.free_requests_per_query(paid, judge_ep) == (1, 1)
+    compat = LLMEndpoint("generator", "openai_compat", "https://api.groq.com/openai/v1",
+                         "openai/gpt-oss-120b")
+    assert rag_eval.default_throttle_s(compat, judge_ep) == 30.0
+    # One free request per query (the judge) when the generator is off OpenRouter.
+    assert rag_eval.free_requests_per_query(compat, judge_ep) == (1, 1)
     # The default: free generator (1, or 2 with the truncation retry) + free judge.
     assert rag_eval.free_requests_per_query(free_gen, judge_ep) == (2, 3)
     throttle = rag_eval.default_throttle_s(free_gen, judge_ep)
@@ -888,35 +879,7 @@ def test_throttle_is_provider_aware(monkeypatch):
     worst_per_min = (60 // throttle) * 3
     assert worst_per_min <= 15 < rag_eval.OPENROUTER_FREE_REQUESTS_PER_MIN
     monkeypatch.setattr(rag_eval, "THROTTLE_S", 1.0)
-    assert rag_eval.default_throttle_s(paid, judge_ep) == 1.0
-
-
-def test_spend_ceiling_stops_the_run_before_writing(tmp_path, monkeypatch):
-    out = tmp_path / "results"
-    _patch_main(tmp_path, monkeypatch, out, gen_model=PAID_GEN_MODEL)
-    # Room for exactly two queries at the worst-case bound: the third is refused up front.
-    worst = rag_eval.worst_case_generation_cost(rag_eval.resolve_endpoint("generator"))
-    monkeypatch.setattr(settings, "rag_max_spend_usd", 2 * GEN_COST_USD + worst)
-    with pytest.raises(SystemExit) as exc:
-        rag_eval.main()
-    msg = str(exc.value.code)
-    assert "spend ceiling reached" in msg and "Nothing was written" in msg
-    assert not out.exists()
-
-
-def test_unreported_paid_cost_counts_at_the_worst_case(tmp_path, monkeypatch):
-    class Unreported(FakeGenerator):
-        def generate(self, query, hits):
-            ans = super().generate(query, hits)
-            ans.cost_usd = None
-            return ans
-
-    _patch_main(tmp_path, monkeypatch, tmp_path, generator=Unreported, gen_model=PAID_GEN_MODEL)
-    rag_eval.main()
-    cost = json.loads((_written_dir(tmp_path, PAID_GEN_MODEL) / "rag.json").read_text())["cost"]
-    worst = rag_eval.worst_case_generation_cost(rag_eval.resolve_endpoint("generator"))
-    assert cost["reported_usd"] == 0.0 and cost["unreported_paid_generations"] == len(QUERIES)
-    assert cost["counted_usd"] == pytest.approx(len(QUERIES) * worst, abs=1e-6)
+    assert rag_eval.default_throttle_s(compat, judge_ep) == 1.0
 
 
 @pytest.mark.parametrize("status", [401, 402])
@@ -1232,7 +1195,7 @@ def test_signature_tracks_everything_that_changes_a_row(monkeypatch):
         "dataset": sig(dataset="beir/scifact/train"),
         "generator model": sig(g=_endpoints("openai/gpt-oss-120b")[0]),
         "judge model": sig(j=LLMEndpoint("judge", "openrouter", judge_ep.base_url, "other:free")),
-        "provider": sig(g=LLMEndpoint("generator", "groq", "https://api.groq.com/openai/v1", "m")),
+        "provider": sig(g=LLMEndpoint("generator", "openai_compat", "https://api.groq.com/openai/v1", "m")),
     }
     with monkeypatch.context() as m:
         m.setattr(rag_eval, "SYSTEM", rag_eval.SYSTEM + " Be brief.")
@@ -1264,8 +1227,9 @@ def test_request_estimate_counts_gen_retry_and_judge():
     assert est["requests"] == 672  # 300 x (1 + 0.24 + 1)
     assert est["free_requests"] == 672 and est["free_requests_worst"] == 900
     assert est["seconds"] == 300 * (12.0 + rag_eval.EST_QUERY_LATENCY_S)
-    paid = rag_eval.request_estimate(300, _endpoints(PAID_GEN_MODEL)[0], judge_ep, 5.0, 0.24)
-    assert paid["requests"] == 672 and paid["free_requests"] == 300  # only the judge is free
+    compat = LLMEndpoint("generator", "openai_compat", "http://localhost:11434/v1", "qwen3:4b")
+    est = rag_eval.request_estimate(300, compat, judge_ep, 30.0, 0.24)
+    assert est["requests"] == 672 and est["free_requests"] == 300  # only the judge is free
 
 
 def test_estimate_is_printed_for_the_remaining_rows(tmp_path, monkeypatch, capsys):
@@ -1353,7 +1317,7 @@ def test_empty_completion_retries_the_same_query(rate_limited, source):
     rag_eval.main()
     assert sleeps.count(WAIT_S) == fails
     # A judge-side empty completion retries only the judge: the finished generation
-    # is not re-run (or re-paid for).
+    # is not re-run.
     gen_tries = [q for q, _ in gen.calls].count("Two claim holds.")
     assert gen_tries == (fails + 1 if source == "generate" else 1)
     assert fake_judge.queries.count("Two claim holds.") == (fails + 1 if source == "judge" else 1)
@@ -1394,7 +1358,7 @@ def test_empty_completion_naming_the_daily_cap_stops_the_run(rate_limited):
     assert WAIT_S not in sleeps and not out.exists()
 
 
-# --- non-default models are never canonical; per-model paid caps ----------------------------
+# --- non-default models are never canonical ----------------------------
 
 
 def _ep(role, model, provider="openrouter"):
@@ -1407,15 +1371,16 @@ DEFAULT_JUDGE_EP = _ep("judge", DEFAULT_JUDGE_MODEL)
 
 
 def test_default_endpoints_are_the_code_defaults_not_the_environment(monkeypatch):
-    monkeypatch.setenv("SSR_OPENROUTER_LLM_MODEL", LUNA)  # e.g. a leftover in the shell
-    monkeypatch.setattr(settings, "openrouter_llm_model", LUNA)
+    monkeypatch.setenv("SSR_OPENROUTER_LLM_MODEL", OTHER_GEN_MODEL)  # e.g. a leftover in the shell
+    monkeypatch.setattr(settings, "openrouter_llm_model", OTHER_GEN_MODEL)
     assert rag_eval.default_endpoints() == (
         ("openrouter", DEFAULT_GEN_MODEL), ("openrouter", DEFAULT_JUDGE_MODEL),
     )
     assert rag_eval.non_default_roles(DEFAULT_GEN_EP, DEFAULT_JUDGE_EP) == []
-    assert rag_eval.non_default_roles(_ep("generator", LUNA), DEFAULT_JUDGE_EP) == ["generator"]
+    assert rag_eval.non_default_roles(_ep("generator", OTHER_GEN_MODEL), DEFAULT_JUDGE_EP) == ["generator"]
     assert rag_eval.non_default_roles(
-        _ep("generator", "openai/gpt-oss-120b", "groq"), _ep("judge", "qwen/qwen3.8-27b", "groq")
+        _ep("generator", "openai/gpt-oss-120b", "openai_compat"),
+        _ep("judge", "qwen/qwen3.8-27b", "openai_compat"),
     ) == ["generator", "judge"]
 
 
@@ -1426,12 +1391,13 @@ def test_output_dir_non_default_models_are_never_canonical(monkeypatch, tmp_path
     assert rag_eval.output_dir(test, 0, 300, ph, DEFAULT_GEN_EP, DEFAULT_JUDGE_EP, split_size=300) == (
         tmp_path / "results", True
     )
-    luna, canonical = rag_eval.output_dir(test, 0, 300, ph, _ep("generator", LUNA), DEFAULT_JUDGE_EP,
-                                          split_size=300)
+    oss, canonical = rag_eval.output_dir(test, 0, 300, ph, _ep("generator", OTHER_GEN_MODEL),
+                                         DEFAULT_JUDGE_EP, split_size=300)
     assert not canonical
-    assert luna == tmp_path / "runs" / "rag_beir-scifact-test_300_abcdef01_openai-gpt-6-luna"
-    oss, _ = rag_eval.output_dir(test, 0, 300, ph, _ep("generator", PAID_GEN_MODEL), DEFAULT_JUDGE_EP)
-    assert oss.name == "rag_beir-scifact-test_300_abcdef01_openai-gpt-oss-120b"
+    assert oss == tmp_path / "runs" / "rag_beir-scifact-test_300_abcdef01_openai-gpt-oss-120b-free"
+    compat, _ = rag_eval.output_dir(test, 0, 300, ph, _ep("generator", "qwen3:4b", "openai_compat"),
+                                    DEFAULT_JUDGE_EP, split_size=300)
+    assert compat.name == "rag_beir-scifact-test_300_abcdef01_qwen3-4b"
     # Another judge alone is non-canonical too, and names itself.
     judged, canonical = rag_eval.output_dir(
         test, 0, 300, ph, DEFAULT_GEN_EP, _ep("judge", "qwen/qwen3.8-27b:free")
@@ -1442,7 +1408,7 @@ def test_output_dir_non_default_models_are_never_canonical(monkeypatch, tmp_path
 
 def test_non_default_generator_on_full_test_split_writes_eval_runs(tmp_path, monkeypatch, capsys):
     out = tmp_path / "results"
-    _patch_main(tmp_path, monkeypatch, out, gen_model=LUNA)
+    _patch_main(tmp_path, monkeypatch, out, gen_model=OTHER_GEN_MODEL)
     # A committed artifact with a different N: a canonical run would print REPLACES.
     out.mkdir()
     (out / "rag.json").write_text(json.dumps({"n": 50, "run": {"n_requested": 50}}))
@@ -1451,18 +1417,18 @@ def test_non_default_generator_on_full_test_split_writes_eval_runs(tmp_path, mon
     rag_eval.main()
     assert (out / "rag.json").read_text() == before and sorted(out.iterdir()) == [out / "rag.json"]
     (run_dir,) = (tmp_path / "runs").iterdir()
-    assert run_dir.name == f"rag_beir-scifact-test_5_{rag_eval.prompt_hash()[:8]}_openai-gpt-6-luna"
+    assert run_dir.name == f"rag_beir-scifact-test_5_{rag_eval.prompt_hash()[:8]}_openai-gpt-oss-120b-free"
     blob = json.loads((run_dir / "rag.json").read_text())
     run = blob["run"]
     assert run["canonical"] is False and run["default_models"] is False
     assert run["dataset"] == rag_eval.CANONICAL_DATASET and run["n_requested"] == "all"
-    assert run["generator_model"] == LUNA and run["generator_temperature"] is None
-    assert run["generator_reasoning_effort"] == "medium"
-    assert run["generator_extra_body"] == {"provider": paid_routing(LUNA)}
+    assert run["generator_model"] == OTHER_GEN_MODEL and run["generator_temperature"] == 0.1
+    assert run["generator_reasoning_effort"] is None
+    assert run["generator_extra_body"] == {"provider": FREE_ROUTING}
     printed = capsys.readouterr().out
     upfront = printed.split("[1/5]")[0]
     assert "NON-CANONICAL: generator differs from the code defaults" in upfront
-    assert f"generator: openrouter {LUNA} (code default: openrouter {DEFAULT_GEN_MODEL})" in upfront
+    assert f"generator: openrouter {OTHER_GEN_MODEL} (code default: openrouter {DEFAULT_GEN_MODEL})" in upfront
     assert "REPLACES" not in printed and "(non-canonical: never writes" in upfront
 
 
@@ -1473,36 +1439,15 @@ def test_default_models_run_records_temperature_and_stays_canonical(rag_run):
     assert not (path / "runs").exists()
 
 
-def test_estimate_and_worst_case_use_the_generators_own_caps():
-    luna, oss = _ep("generator", LUNA), _ep("generator", PAID_GEN_MODEL)
-    budget = settings.llm_max_completion_tokens
-    p = rag_eval.MAX_GEN_PROMPT_TOKENS
-
-    def worst(pin, pout):
-        return (2 * p * pin + 3 * budget * pout) / 1e6  # both attempts, the retry at 2x
-
-    # Luna's prompt is bounded at its $0.125/M cache-write rate, above the $0.10 filter cap.
-    assert rag_eval.worst_case_generation_cost(luna) == pytest.approx(worst(0.125, 0.50))
-    assert rag_eval.worst_case_generation_cost(oss) == pytest.approx(worst(0.03, 0.17))
-    typical = (rag_eval.EST_GEN_PROMPT_TOKENS * 0.125 + rag_eval.EST_GEN_COMPLETION_TOKENS * 0.50) / 1e6
-    assert rag_eval.typical_generation_cost(luna) == pytest.approx(typical)
-    line = rag_eval._estimate_line(300, luna, DEFAULT_JUDGE_EP, 5.0)
-    assert f"est. ${300 * typical:.4f}" in line
-    assert f"worst case ${300 * worst(0.125, 0.50):.4f}" in line
-    assert f"{LUNA}'s billing bound {{'prompt': 0.125, 'completion': 0.5}}" in line
-    assert "(max_price caps {'prompt': 0.1, 'completion': 0.5})" in line
-    assert "0.03" not in line and "0.17" not in line  # never gpt-oss's caps for Luna
-
-
-def test_luna_checkpoint_signature_differs_from_the_default_generator(monkeypatch):
+def test_another_generator_has_another_checkpoint_signature(monkeypatch):
     monkeypatch.setattr(rag_eval, "_index_fingerprint", lambda: None)
     monkeypatch.setattr(settings, "llm_reasoning_effort", "auto")
     ds = rag_eval.CANONICAL_DATASET
     ling = rag_eval.signature_fields(ds, 300, DEFAULT_GEN_EP, DEFAULT_JUDGE_EP)
-    luna = rag_eval.signature_fields(ds, 300, _ep("generator", LUNA), DEFAULT_JUDGE_EP)
-    assert ling["generator"]["model"] == DEFAULT_GEN_MODEL and luna["generator"]["model"] == LUNA
-    assert luna["reasoning_effort"] == "medium" and ling["reasoning_effort"] is None
-    assert rag_eval.rag_signature(ling) != rag_eval.rag_signature(luna)
+    oss = rag_eval.signature_fields(ds, 300, _ep("generator", OTHER_GEN_MODEL), DEFAULT_JUDGE_EP)
+    assert ling["generator"]["model"] == DEFAULT_GEN_MODEL and oss["generator"]["model"] == OTHER_GEN_MODEL
+    assert ling["reasoning_effort"] is None
+    assert rag_eval.rag_signature(ling) != rag_eval.rag_signature(oss)
 
 
 # --- verdict recovery on stored rows (reparse_row), resume and offline re-score -------------
@@ -1715,7 +1660,7 @@ def test_reask_lookup_takes_a_legacy_entry_only_for_the_canonical_endpoint(tmp_p
     assert rag_eval.reask_lookup(cache, "7", canon, REASK_MSGS)["raw"] == "Verdict: SUPPORTED"
     # Same model id + messages on another provider: the legacy key would collide, so the
     # migration never reads it there.
-    groq = LLMEndpoint("generator", "groq", GROQ_URL, CANON_GEN_MODEL)
+    groq = LLMEndpoint("generator", "openai_compat", GROQ_URL, CANON_GEN_MODEL)
     assert not rag_eval.is_legacy_reask_endpoint(groq)
     assert rag_eval.reask_lookup(cache, "7", groq, REASK_MSGS) is None
     assert rag_eval.reask_lookup(cache, "8", canon, REASK_MSGS) is None  # other claim
@@ -1723,11 +1668,11 @@ def test_reask_lookup_takes_a_legacy_entry_only_for_the_canonical_endpoint(tmp_p
 
 def test_reask_lookup_v2_hits_and_is_endpoint_specific(tmp_path, auto_effort):
     cache = ReplyCache(tmp_path / "c.json")
-    groq = LLMEndpoint("generator", "groq", GROQ_URL, CANON_GEN_MODEL)
+    groq = LLMEndpoint("generator", "openai_compat", GROQ_URL, CANON_GEN_MODEL)
     cache.put(rag_eval.reask_key_v2("7", groq, REASK_MSGS), {"raw": "Verdict: REFUTED"})
     assert rag_eval.reask_lookup(cache, "7", groq, REASK_MSGS)["raw"] == "Verdict: REFUTED"
     assert rag_eval.reask_lookup(cache, "7", _canon_ep(), REASK_MSGS) is None
-    other_url = LLMEndpoint("generator", "groq", "http://localhost:11434/v1", CANON_GEN_MODEL)
+    other_url = LLMEndpoint("generator", "openai_compat", "http://localhost:11434/v1", CANON_GEN_MODEL)
     assert rag_eval.reask_lookup(cache, "7", other_url, REASK_MSGS) is None
     # v2 wins over a legacy entry for the same request on the canonical endpoint.
     canon = _canon_ep()
@@ -1749,7 +1694,7 @@ def test_v2_key_covers_reasoning_effort_temperature_and_routing(monkeypatch, aut
     assert rag_eval.reask_key_v2("7", canon, REASK_MSGS) != base
     assert not rag_eval.is_legacy_reask_endpoint(canon)  # an explicit effort: no migration
     monkeypatch.setattr(settings, "llm_reasoning_effort", "auto")
-    monkeypatch.setattr(rag_eval, "generation_temperature", lambda m: None)
+    monkeypatch.setattr(rag_eval, "GENERATION_TEMPERATURE", None)
     assert rag_eval.reask_key_v2("7", canon, REASK_MSGS) != base
     assert not rag_eval.is_legacy_reask_endpoint(canon)
     monkeypatch.undo()

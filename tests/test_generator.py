@@ -12,7 +12,6 @@ from app.generate.generator import (
     LLMGenerator,
     check_evidence_quote,
     looks_like_question,
-    generation_temperature,
     map_citations,
     normalize_citations,
     parse_verdict,
@@ -256,34 +255,28 @@ def test_empty_truncated_reply_is_never_served_as_an_empty_answer():
 
 
 @pytest.mark.parametrize(
-    ("model", "setting", "expected"),
+    ("setting", "expected"),
     [
-        ("openai/gpt-oss-120b", "auto", "medium"),  # the default backend
-        ("gpt-oss:20b", "auto", "medium"),  # Ollama's tag for the same family
-        ("llama-3.3-70b-versatile", "auto", None),  # may 400 on the param: never sent
-        ("qwen3:4b", "auto", None),
-        # The default free generator reasons on its own; "auto" never adds gpt-oss's effort.
-        ("inclusionai/ling-3.0-flash-sante:free", "auto", None),
-        ("inclusionai/ling-3.0-flash-sante:free", "low", "low"),  # explicit: sent as-is
-        ("openai/gpt-oss-120b", "", None),
-        ("openai/gpt-oss-120b", "off", None),
-        ("openai/gpt-oss-120b", "High", "high"),  # explicit: sent as-is
-        ("some-reasoning-model", "medium", "medium"),
-        ("openai/gpt-6-luna", "auto", "medium"),  # reasoning model: same gating as gpt-oss
-        ("openai/gpt-6-luna", "off", None),
+        ("auto", None),  # the default: the model's own reasoning default, nothing sent
+        ("", None),
+        ("off", None),
+        ("low", "low"),  # explicit: sent as-is
+        ("High", "high"),
+        ("medium", "medium"),
     ],
 )
-def test_resolve_reasoning_effort(model, setting, expected):
-    assert resolve_reasoning_effort(model, setting) == expected
+def test_resolve_reasoning_effort(setting, expected):
+    assert resolve_reasoning_effort(setting) == expected
 
 
-def test_reasoning_effort_sent_only_when_enabled():
-    on = _generator("Yes [1].", model="openai/gpt-oss-120b", reasoning_effort="auto")
+def test_reasoning_effort_sent_only_when_set_explicitly():
+    on = _generator("Yes [1].", model="openai/gpt-oss-120b", reasoning_effort="medium")
     on.generate("q", _hits(1))
     assert on.client.chat.completions.requests[0]["extra_body"] == {"reasoning_effort": "medium"}
-    # A non-gpt-oss model (e.g. Groq llama, or Ollama qwen) must not see the key at all —
-    # not even as null — since an unknown parameter can be rejected with a 400.
-    for model, effort in [("llama-3.3-70b-versatile", "auto"), ("openai/gpt-oss-120b", "")]:
+    # Under "auto" / "" no model sees the key at all — not even as null — since an
+    # unknown parameter can be rejected with a 400.
+    for model, effort in [("llama-3.3-70b-versatile", "auto"), ("openai/gpt-oss-120b", "auto"),
+                          ("openai/gpt-oss-120b", "")]:
         off = _generator("Yes [1].", model=model, reasoning_effort=effort)
         off.generate("q", _hits(1))
         req = off.client.chat.completions.requests[0]
@@ -455,23 +448,12 @@ def test_completion_choice_on_a_real_sdk_object_with_null_choices():
 
 
 @pytest.mark.parametrize(
-    ("model", "expected"),
-    [
-        ("openai/gpt-oss-120b", 0.1),
-        ("inclusionai/ling-3.0-flash-sante:free", 0.1),
-        ("llama-3.3-70b-versatile", 0.1),
-        ("openai/gpt-6-luna", None),  # no `temperature` in its supported_parameters
-    ],
+    "model", ["openai/gpt-oss-120b", "inclusionai/ling-3.0-flash-sante:free", "llama-3.3-70b-versatile"]
 )
-def test_temperature_is_model_aware(model, expected):
-    assert generation_temperature(model) == expected
+def test_temperature_is_always_sent(model):
     gen = _generator("Yes [1].", model=model)
     gen.generate("q", _hits(1))
-    req = gen.client.chat.completions.requests[0]
-    if expected is None:
-        assert "temperature" not in req  # omitted outright, not sent as null
-    else:
-        assert req["temperature"] == expected
+    assert gen.client.chat.completions.requests[0]["temperature"] == 0.1
 
 
 # --- evidence-quote check (measured, never changes a verdict) ---------------------------
@@ -1255,3 +1237,51 @@ def test_generator_sends_the_product_system_message():
     gen = _generator("Yes [1].\nVerdict: SUPPORTED")
     gen.generate("Aspirin reduces stroke risk.", _hits(1))
     assert gen.client.chat.completions.requests[0]["messages"][0]["content"] == SYSTEM
+
+
+# --- the default request, as sent ---------------------------------------------------------
+
+
+def test_default_generator_request_is_pinned(monkeypatch):
+    # The exact chat.completions.create kwargs the default (free OpenRouter Ling) generator
+    # sends, through the real GuardedClient: a change here changes what the committed
+    # numbers were generated with, and the re-ask cache keys built on it.
+    from app.core.config import Settings, settings
+    from app.generate import generator as G
+
+    sent, made = [], []
+
+    class _Client:
+        def __init__(self, **kw):
+            made.append(kw)
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+        def with_options(self, **kw):
+            return self
+
+        def _create(self, **kw):
+            sent.append(kw)
+            msg = SimpleNamespace(content="" if len(sent) < 3 else "Verdict: REFUTED [1]")
+            finish = "length" if len(sent) < 3 else "stop"
+            return SimpleNamespace(choices=[SimpleNamespace(message=msg, finish_reason=finish)],
+                                   usage=None)
+
+    defaults = Settings.model_construct()
+    for name in ("llm_provider", "openrouter_llm_model", "llm_max_completion_tokens",
+                 "llm_reasoning_effort"):
+        monkeypatch.setattr(settings, name, getattr(defaults, name))
+    monkeypatch.setattr(settings, "openrouter_api_key", "sk-or-test")
+    monkeypatch.setattr(G, "OpenAI", _Client)
+    gen = LLMGenerator(reask=True)
+    gen.generate("Aspirin cures stroke.", _hits(1))
+    assert [m["base_url"] for m in made] == ["https://openrouter.ai/api/v1"]
+    free = {"provider": {"allow_fallbacks": False, "max_price": {"prompt": 0, "completion": 0}}}
+    model = "inclusionai/ling-3.0-flash-sante:free"
+    assert [list(kw) for kw in sent] == [["model", "messages", "max_tokens", "extra_body",
+                                          "temperature"]] * 3
+    assert [{k: v for k, v in kw.items() if k != "messages"} for kw in sent] == [
+        {"model": model, "max_tokens": 2048, "extra_body": free, "temperature": 0.1},
+        {"model": model, "max_tokens": 4096, "extra_body": free, "temperature": 0.1},
+        {"model": model, "max_tokens": 8192, "extra_body": free, "temperature": 0.1},
+    ]
+    assert sent[0]["messages"][0] == {"role": "system", "content": SYSTEM}

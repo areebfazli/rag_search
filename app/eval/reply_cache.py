@@ -24,7 +24,7 @@ Two key formats:
 Migration: a re-ask lookup tries the v2 key first and falls back to the v1 key ONLY for
 the one endpoint every v1 re-ask entry was fetched with — the canonical OpenRouter Ling
 endpoint (rag_eval.is_legacy_reask_endpoint). Any other endpoint never reads a v1 entry,
-so a Groq (or paid, or differently-routed) run with the same model id + messages is a
+so a run on another provider, base URL or routing with the same model id + messages is a
 miss, not a silent cross-provider hit. Entries are never rewritten in place.
 """
 from __future__ import annotations

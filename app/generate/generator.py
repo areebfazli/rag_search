@@ -1,8 +1,9 @@
 """LLM answer generation over the OpenAI-compatible interface.
 
 Points at the endpoint app.core.llm_endpoints resolves for the generator role
-(OpenRouter by default, under its spend policy; Groq, Ollama or another OpenAI-compatible
-backend via SSR_LLM_PROVIDER=groq + SSR_LLM_BASE_URL, with no code change). Maps the model's [n] citations back to
+(free models on OpenRouter by default, under its free-only guard; Groq, Ollama or another
+OpenAI-compatible backend via SSR_LLM_PROVIDER=openai_compat + SSR_LLM_BASE_URL, with no
+code change). Maps the model's [n] citations back to
 document ids so answers are traceable to sources, and parses the optional final
 verdict line (claims only) into Answer.verdict.
 
@@ -584,7 +585,7 @@ CLIENT_TIMEOUT_S = 30.0
 CLIENT_MAX_RETRIES = 1
 BATCH_MAX_RETRIES = 5
 # The re-ask has its own explicit policy, applied per call in reask_verdict (a copy of the
-# same client via with_options: same connection pool, endpoint and spend policy). It
+# same client via with_options: same connection pool, endpoint and free-only guard). It
 # differs from the first call's on purpose: the re-ask may spend up to REASK_MAX_TOKENS
 # (4x the default first-call budget) reasoning, and a 30 s timeout would cut off exactly
 # those long replies, then silently resend them, each a request against the free daily
@@ -797,44 +798,20 @@ class GeneratedAnswer(Answer):
     warnings: list[str] = field(default_factory=list)
 
 
-# Model families "auto" sends reasoning effort "medium" to (substring match on the id, so
-# Groq's openai/gpt-oss-120b and Ollama's gpt-oss:20b both count). gpt-6-luna is a
-# reasoning model whose OpenRouter endpoints all list `reasoning` / `reasoning_effort`.
-AUTO_MEDIUM_REASONING = ("gpt-oss", "gpt-6-luna")
-# Models that must NOT be sent `temperature`: OpenRouter's endpoints for gpt-6-luna do not
-# list it in supported_parameters (GET /api/v1/models/openai/gpt-6-luna/endpoints,
-# 2026-09-25), as with OpenAI's other reasoning models. Everything else — gpt-oss and the
-# default free Ling generator included — keeps the 0.1 it has always been sent.
-NO_TEMPERATURE_MODELS = ("gpt-6-luna",)
+# Sent with every generation and re-ask request (the value every committed number was
+# generated with).
 GENERATION_TEMPERATURE = 0.1
 
 
-def _matches(model: str, families: tuple[str, ...]) -> bool:
-    m = model.lower()
-    return any(f in m for f in families)
+def resolve_reasoning_effort(setting: str) -> str | None:
+    """The reasoning effort to send, or None to omit the parameter.
 
-
-def generation_temperature(model: str) -> float | None:
-    """The temperature to send for `model`, or None to omit the parameter entirely."""
-    return None if _matches(model, NO_TEMPERATURE_MODELS) else GENERATION_TEMPERATURE
-
-
-def resolve_reasoning_effort(model: str, setting: str) -> str | None:
-    """The reasoning_effort to send for `model`, or None to omit the parameter.
-
-    See Settings.llm_reasoning_effort: "auto" sends "medium" to gpt-oss and gpt-6-luna
-    only (AUTO_MEDIUM_REASONING), because an OpenAI-compatible backend serving a
-    non-reasoning model may reject the parameter outright; ""/"off" never sends it;
-    anything else is an explicit choice, sent as-is. Every other model — the default free
-    Ling generator included, which reasons on its own and did not shorten its reasoning
-    for effort=low — gets nothing under "auto".
+    See Settings.llm_reasoning_effort: "auto", "" and "off" never send it (the model's own
+    default applies; a non-reasoning model may reject the parameter outright); anything
+    else is an explicit choice, sent as-is.
     """
     value = setting.strip().lower()
-    if value in {"", "off"}:
-        return None
-    if value == "auto":
-        return "medium" if _matches(model, AUTO_MEDIUM_REASONING) else None
-    return value
+    return None if value in {"", "off", "auto"} else value
 
 
 def _usage_counts(resp) -> tuple[int | None, int | None]:
@@ -848,7 +825,7 @@ def _usage_counts(resp) -> tuple[int | None, int | None]:
 def reasoning_params(provider: str, effort: str | None) -> dict:
     """The request field that carries `effort`, in the provider's own form: OpenRouter's
     unified ``reasoning: {"effort": ...}`` object (docs: openrouter.ai/docs/use-cases/
-    reasoning-tokens), or the top-level ``reasoning_effort`` Groq and Ollama accept.
+    reasoning-tokens), or the top-level ``reasoning_effort`` Groq, Ollama and OpenAI accept.
     Empty when there is nothing to send."""
     if not effort:
         return {}
@@ -859,8 +836,7 @@ def reasoning_params(provider: str, effort: str | None) -> dict:
 
 def _choice_or_raise(resp, costs: list[float | None]):
     """completion_choice(resp), with any EmptyCompletionError carrying what this
-    generation's calls so far reported costing (None if any is unknown), so a spend
-    ceiling can count a failed paid attempt instead of treating it as free."""
+    generation's calls so far reported costing (None if any is unknown)."""
     try:
         return completion_choice(resp)
     except EmptyCompletionError as e:
@@ -898,14 +874,13 @@ class LLMGenerator:
                 endpoint.base_url,
                 model or endpoint.model,
                 endpoint.api_key if api_key is None else api_key,
-                endpoint.allowlist,
             )
-        endpoint.check()  # spend policy: refuse a disallowed model before any request
+        endpoint.check()  # free-only guard: refuse a disallowed model before any request
         self.endpoint = endpoint
         self.model = endpoint.model
         self.max_completion_tokens = max_completion_tokens or settings.llm_max_completion_tokens
         self.reasoning_effort = resolve_reasoning_effort(
-            self.model, settings.llm_reasoning_effort if reasoning_effort is None else reasoning_effort
+            settings.llm_reasoning_effort if reasoning_effort is None else reasoning_effort
         )
         # generate() re-asks a claim with no verdict (settings.llm_reask). rag_eval turns
         # it off here and applies the same re-ask as a cached post-step instead.
@@ -935,17 +910,14 @@ class LLMGenerator:
     def _complete(self, messages: list[dict], max_tokens: int, client=None):
         # Reasoning rides in extra_body and only when resolved, in the provider's own
         # form: it is a passthrough, and a backend that doesn't know it must never see
-        # it. OpenRouter requests also carry the endpoint's pinned provider routing, and
-        # the spend policy is checked here as well as in the client wrapper, so it holds
-        # even if self.client is swapped out.
+        # it. OpenRouter requests also carry the endpoint's free provider routing, and
+        # the free-only guard is checked here as well as in the client wrapper, so it
+        # holds even if self.client is swapped out.
         body = {**reasoning_params(self.endpoint.provider, self.reasoning_effort),
                 **self.endpoint.extra_body()}
         self.endpoint.check(model=self.model, body=body)
         extra: dict = {"extra_body": body} if body else {}
-        # Model-aware sampling: a model that doesn't support `temperature` never sees the
-        # key (not even as null); every other model gets exactly what it always did.
-        if (temperature := generation_temperature(self.model)) is not None:
-            extra["temperature"] = temperature
+        extra["temperature"] = GENERATION_TEMPERATURE
         return (client or self.client).chat.completions.create(
             model=self.model,
             messages=messages,
@@ -958,7 +930,7 @@ class LLMGenerator:
         earlier attempts reported costing plus the failed one — 0 for an HTTP error status
         (an error response is not a billed completion), unknown (None) for a timeout or
         connection error (the provider may have generated and billed). None overall if
-        any part is unknown, so a spend ceiling counts the worst case, never zero."""
+        any part is unknown."""
         try:
             return self._complete(messages, max_tokens)
         except OpenAIError as e:
@@ -969,8 +941,8 @@ class LLMGenerator:
 
     def reask_verdict(self, query: str, hits: Sequence[SearchHit]) -> ReaskReply:
         """Exactly one verdict-only call (prompts.reask_messages, REASK_MAX_TOKENS) through
-        the same _complete as generation: same endpoint, spend-policy check, provider
-        routing and model-aware params (temperature / reasoning), with the re-ask's own
+        the same _complete as generation: same endpoint, free-only check, provider
+        routing and params (temperature / reasoning), with the re-ask's own
         timeout / retry policy (REASK_TIMEOUT_S, REASK_MAX_RETRIES) whichever caller sends
         it. Raises like any call (EmptyCompletionError for a 200 with no completion); what
         happens then is the caller's (see REASK_TIMEOUT_S)."""
@@ -1062,8 +1034,7 @@ class LLMGenerator:
             reasoning_tokens=reasoning_tokens,
             attempts=attempts,
             truncated=truncated,
-            # All-or-nothing: a partly reported cost would undercount, and callers that
-            # enforce a spend ceiling treat None as "unknown, assume the worst".
+            # All-or-nothing: a partly reported cost would undercount.
             cost_usd=None if any(c is None for c in costs) else sum(costs),
             provider=provider,
             verdict_source=verdict_source,
