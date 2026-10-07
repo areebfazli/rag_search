@@ -1,8 +1,8 @@
 """Where each LLM request goes — provider -> (base URL, API key, model id) — and the
 OpenRouter spend policy that every request to openrouter.ai must pass.
 
-One resolver for both roles (the answer generator and the RAG-eval judge), so the API,
-rag_eval and judge_agreement cannot disagree about which endpoint, key or model they use.
+One resolver for both roles (the answer generator and the RAG-eval judge), so the API
+and rag_eval cannot disagree about which endpoint, key or model they use.
 
 Precedence — the PROVIDER setting decides everything else:
 
