@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import httpx
+import openai
 import pytest
 
 from app.core.interfaces import SearchHit, hit_passage
@@ -369,6 +371,56 @@ def test_generate_raises_when_the_truncation_retry_comes_back_empty():
     assert exc.value.cost_usd == pytest.approx(0.001)  # the billed first attempt is reported
 
 
+class _RaisingCompletions:
+    """Returns / raises the scripted items in order."""
+
+    def __init__(self, items):
+        self.items = list(items)
+        self.calls = 0
+
+    def create(self, **kw):
+        item = self.items[self.calls]
+        self.calls += 1
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+
+def _length_reply(cost):
+    return SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content=""), finish_reason="length")],
+        usage=SimpleNamespace(cost=cost),
+    )
+
+
+_REQ = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
+
+
+@pytest.mark.parametrize("error,want", [
+    # An HTTP error status is not a billed completion: the first attempt's cost alone.
+    (openai.RateLimitError("429", response=httpx.Response(429, request=_REQ), body=None), 0.001),
+    (openai.InternalServerError("502", response=httpx.Response(502, request=_REQ), body=None), 0.001),
+    # A timeout may have been generated and billed: unknown, so a ceiling counts the worst.
+    (openai.APITimeoutError(request=_REQ), None),
+])
+def test_a_failed_truncation_retry_still_reports_the_first_attempts_cost(error, want):
+    gen = _generator("unused")
+    gen.client = SimpleNamespace(chat=SimpleNamespace(
+        completions=_RaisingCompletions([_length_reply(0.001), error])))
+    with pytest.raises(type(error)) as exc:
+        gen.generate("claim", _hits(2))
+    assert exc.value.cost_usd == (pytest.approx(want) if want is not None else None)
+
+
+def test_a_failed_first_attempt_reports_no_billed_cost():
+    err = openai.RateLimitError("429", response=httpx.Response(429, request=_REQ), body=None)
+    gen = _generator("unused")
+    gen.client = SimpleNamespace(chat=SimpleNamespace(completions=_RaisingCompletions([err])))
+    with pytest.raises(openai.RateLimitError) as exc:
+        gen.generate("claim", _hits(2))
+    assert exc.value.cost_usd == 0.0
+
+
 def test_completion_choice_reads_the_error_from_model_extra_and_redacts_keys():
     resp = SimpleNamespace(choices=None, model_extra={"error": {
         "message": "bad key sk-or-v1-abcdef0123456789 rejected", "code": 401}})
@@ -711,6 +763,8 @@ def test_reask_prompt_is_the_frozen_one_and_shares_the_product_context_layout():
 # --- C1: only claims are re-asked or read for a stance --------------------------------------
 
 from app.generate.generator import (  # noqa: E402
+    API_REASK_MAX_RETRIES,
+    BATCH_MAX_RETRIES,
     CLIENT_MAX_RETRIES,
     CLIENT_TIMEOUT_S,
     REASK_MAX_RETRIES,
@@ -893,7 +947,7 @@ class _RawClient:
         return _RawClient(self.completions, **{**self.options, **options})
 
 
-def _guarded_generator(monkeypatch, replies):
+def _guarded_generator(monkeypatch, replies, **kw):
     import app.generate.generator as g
 
     built = []
@@ -905,19 +959,21 @@ def _guarded_generator(monkeypatch, replies):
 
     monkeypatch.setattr(g, "OpenAI", factory)
     gen = LLMGenerator(model="m", base_url="http://localhost:1", api_key="k",
-                       reasoning_effort="", reask=True)
+                       reasoning_effort="", reask=True, **kw)
     return gen, built
 
 
 def test_generation_keeps_its_client_policy_and_the_reask_gets_its_own(monkeypatch):
     gen, built = _guarded_generator(monkeypatch, [("No idea.", "stop"), ("Verdict: SUPPORTED", "stop")])
     raw = built[0]
+    # The default (the API's) is interactive: an explicit, small SDK retry count — never
+    # the SDK default — so one /answer can't hold a worker through many timed-out resends.
     assert raw.options == {"timeout": CLIENT_TIMEOUT_S, "max_retries": CLIENT_MAX_RETRIES}
-    assert (CLIENT_TIMEOUT_S, CLIENT_MAX_RETRIES) == (30.0, 5)  # unchanged first-call policy
+    assert (CLIENT_TIMEOUT_S, CLIENT_MAX_RETRIES, API_REASK_MAX_RETRIES) == (30.0, 1, 0)
     ans = gen.generate("Aspirin reduces stroke risk.", _hits(1))
     assert ans.verdict_source == "reask"
-    # Exactly one copy, made for the re-ask, with the explicit re-ask policy.
-    assert raw.copies == [{"timeout": REASK_TIMEOUT_S, "max_retries": REASK_MAX_RETRIES}]
+    # Exactly one copy, made for the re-ask, with the explicit (interactive) re-ask policy.
+    assert raw.copies == [{"timeout": REASK_TIMEOUT_S, "max_retries": API_REASK_MAX_RETRIES}]
     reqs = raw.completions.requests
     assert [r["max_tokens"] for r in reqs] == [gen.max_completion_tokens, REASK_MAX_TOKENS]
     # The policy lives on the client, never in a request field (cache keys stay put).
@@ -925,15 +981,19 @@ def test_generation_keeps_its_client_policy_and_the_reask_gets_its_own(monkeypat
     assert gen.client.calls == 1  # the first call went through the generator's own client
 
 
-def test_reask_verdict_policy_is_the_same_for_every_caller(monkeypatch):
-    # rag_eval calls reask_verdict directly (generator built with reask=False); the API
-    # reaches it through generate(). Both get the same copy.
-    gen, built = _guarded_generator(monkeypatch, [("Verdict: REFUTED", "stop")])
+def test_batch_retry_policy_is_what_rag_eval_asks_for(monkeypatch):
+    # rag_eval calls reask_verdict directly (generator built with reask=False) and asks
+    # for the batch policy: more SDK retries, one for the re-ask (unchanged from before).
+    gen, built = _guarded_generator(monkeypatch, [("Verdict: REFUTED", "stop")],
+                                    max_retries=BATCH_MAX_RETRIES, reask_max_retries=REASK_MAX_RETRIES)
     gen.reask_enabled = False
+    assert built[0].options == {"timeout": CLIENT_TIMEOUT_S, "max_retries": BATCH_MAX_RETRIES}
     reply = gen.reask_verdict("Aspirin reduces stroke risk.", _hits(1))
     assert reply.raw == "Verdict: REFUTED"
     assert built[0].copies == [{"timeout": REASK_TIMEOUT_S, "max_retries": REASK_MAX_RETRIES}]
-    assert REASK_TIMEOUT_S > CLIENT_TIMEOUT_S and REASK_MAX_RETRIES < CLIENT_MAX_RETRIES
+    assert (BATCH_MAX_RETRIES, REASK_MAX_RETRIES) == (5, 1)
+    assert REASK_TIMEOUT_S > CLIENT_TIMEOUT_S and REASK_MAX_RETRIES < BATCH_MAX_RETRIES
+    assert CLIENT_MAX_RETRIES < BATCH_MAX_RETRIES and API_REASK_MAX_RETRIES <= REASK_MAX_RETRIES
 
 
 def test_reask_through_a_fake_client_without_with_options_uses_it_as_is():
@@ -1117,3 +1177,64 @@ def test_looks_like_claim_rejects_noun_phrases(query):
 ])
 def test_looks_like_claim_accepts_short_claims_with_a_common_verb(query):
     assert looks_like_claim(query)
+
+
+# --- a truncated reply gets no first-sentence stance verdict ------------------------------
+
+
+def test_a_truncated_reply_gets_no_stance_verdict():
+    cut = "The passages support the claim [1]. However, in the second cohort the"
+    ans = _generator([(cut, "length"), (cut, "length")]).generate("Aspirin reduces stroke risk.", _hits(2))
+    assert ans.truncated and ans.verdict is None and ans.verdict_source is None
+    # The same opening in a finished reply is read as before.
+    whole = _generator("The passages support the claim [1].").generate("Aspirin reduces stroke risk.", _hits(2))
+    assert (whole.verdict, whole.verdict_source) == ("SUPPORTED", "stance")
+
+
+def test_a_truncated_reply_without_a_stance_verdict_goes_to_the_reask():
+    cut = "The passages support the claim [1]. However, in the second cohort the"
+    gen = _reasker([(cut, "length"), (cut, "length"), ("Verdict: NOT ENOUGH EVIDENCE", "stop")])
+    ans = gen.generate("Aspirin reduces stroke risk.", _hits(2))
+    assert gen.client.chat.completions.calls == 3
+    assert (ans.verdict, ans.verdict_source) == ("NOT ENOUGH EVIDENCE", "reask")
+
+
+def test_a_truncated_reply_keeps_a_complete_verdict_line():
+    cut = "Refuted [2].\nVerdict: REFUTED"
+    ans = _generator([(cut, "length"), (cut, "length")]).generate("Aspirin reduces stroke risk.", _hits(2))
+    assert ans.truncated and (ans.verdict, ans.verdict_source) == ("REFUTED", "line")
+
+
+# --- grouped citation markers, and citations on the verdict line ---------------------------
+
+
+@pytest.mark.parametrize("text,want", [
+    ("A [1, 2].", ["doc0", "doc1"]),
+    ("A [1,3].", ["doc0", "doc2"]),
+    ("A [2-3].", ["doc1", "doc2"]),
+    ("A [2–4].", ["doc1", "doc2", "doc3"]),
+    ("A [1, 3-4].", ["doc0", "doc2", "doc3"]),
+    ("A [1; 2].", ["doc0", "doc1"]),
+    ("A [4-2].", []),  # descending: names nothing
+    ("A [3-99].", ["doc2", "doc3", "doc4"]),  # clipped to the hits
+    ("A [0, 9].", []),  # out of range
+    ("A [2] and [1, 2].", ["doc0", "doc1"]),  # deduped, ordered
+    ("A [95% CI, 1.2-3.4] and [1].", ["doc0"]),  # not a citation group
+])
+def test_grouped_citations_map_every_passage_they_name(text, want):
+    assert map_citations(text, _hits(5)) == want
+
+
+def test_citations_on_the_verdict_line_are_kept():
+    ans = _generator("Refuted by the trial [2].\nVerdict: REFUTED [3]").generate("claim", _hits(3))
+    assert ans.verdict == "REFUTED" and ans.text == "Refuted by the trial [2]."
+    assert ans.citations == ["doc1", "doc2"]
+    inline = _generator("Refuted by the trial [2]. Verdict: REFUTED [1, 3]").generate("claim", _hits(3))
+    assert (inline.verdict, inline.verdict_source) == ("REFUTED", "inline")
+    assert inline.citations == ["doc0", "doc1", "doc2"]
+
+
+@pytest.mark.parametrize("line", ["Verdict: SUPPORTED [1, 2]", "Verdict: SUPPORTED [1-2].",
+                                  "**Verdict: SUPPORTED** [1][2]"])
+def test_a_verdict_line_with_grouped_citations_parses(line):
+    assert split_verdict(f"Prose [1].\n{line}") == ("Prose [1].", "SUPPORTED")

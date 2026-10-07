@@ -7,7 +7,9 @@ measured, and each comes from the most deterministic source available:
   ``Verdict: SUPPORTED | REFUTED | NOT ENOUGH EVIDENCE`` line when the input is a claim;
   the generator parses it into ``Answer.verdict``. Mapped to SUPPORT / CONTRADICT /
   NEI it is scored against the gold SciFact claim label (3-class accuracy + confusion
-  matrix). "Abstained with no verdict line" counts as NEI.
+  matrix). "Abstained with no verdict line" counts as NEI only for a complete reply (one
+  that explicitly abstains in prose); a reply cut off at the token budget, or empty, with
+  no verdict is NO_VERDICT — always wrong — however the judge read it.
 * **Abstention** (no judge where possible). ``answered`` comes from the verdict when
   one was parsed (anything but NOT ENOUGH EVIDENCE is an answer). The judge's
   ``answered`` field is consulted ONLY for replies with no parseable verdict line.
@@ -55,15 +57,22 @@ Sample, dataset and output (env, SSR_ prefix like the rest of the repo):
 * ``SSR_EVAL_LIMIT`` — smoke subset: keep only the first n sampled claims.
 
 Canonical-output rule: eval/results/rag.{md,json} (the committed artifact) is written
-ONLY by a run on the canonical test split, with no SSR_EVAL_LIMIT, whose generator AND
-judge are the code defaults (Settings field defaults for the providers and OpenRouter
-model ids — not .env). Every other run — any train-split run, any limited run, any run
-with another generator or judge (e.g. a paid openai/gpt-6-luna comparison on all 300
-test claims) — writes to ``data/eval_runs/rag_<dataset-slug>_<n>_<prompt-hash8>/``, with
-``_<generator-slug>`` (and ``_judge-<judge-slug>``) appended when the models differ
-(gitignored), says so up front, and can never touch eval/results/. A canonical run whose sample size differs from the one recorded in the
-committed rag.json (e.g. SSR_RAG_N=all replacing the 50-claim artifact) prints a loud
-notice up front and again when it writes: it is replacing the headline with a different N.
+ONLY by a run that covers the WHOLE canonical test split (SSR_RAG_N=all, or an N at
+least the split size), with no SSR_EVAL_LIMIT, whose generator AND judge are the code
+defaults (Settings field defaults for the providers and OpenRouter model ids — not .env).
+Every other run — the default SSR_RAG_N=50 sample, any other partial sample, any
+train-split run, any limited run, any run with another generator or judge (e.g. a paid
+openai/gpt-6-luna comparison on all 300 test claims) — writes to
+``data/eval_runs/rag_<dataset-slug>_<n>_<prompt-hash8>/``, with ``_<generator-slug>``
+(and ``_judge-<judge-slug>``) appended when the models differ (gitignored), says so up
+front, and can never touch eval/results/. A canonical run must also be COMPLETE: if any
+sampled claim has no row at the end (a skipped pipeline error, an unparseable judge
+reply) or a re-ask failed, it refuses to write eval/results/ (the checkpoint and re-ask
+cache are kept, so re-running the same command retries only those claims). A
+non-canonical run still writes, with the missing claims named in rag.json and rag.md. A
+canonical run whose sample size differs from the one recorded in the committed rag.json
+(only possible if the split itself changed) prints a loud notice up front and again when
+it writes: it is replacing the headline with a different N.
 
 Checkpoint + resume: every completed row is persisted at once (atomic temp file +
 os.replace) to ``data/eval_cache/rag/<signature>.json``, where the signature covers
@@ -129,7 +138,7 @@ import urllib.request
 from collections.abc import Callable, Collection, Mapping, Sequence
 from pathlib import Path
 
-from openai import APIStatusError, OpenAI, RateLimitError
+from openai import APIStatusError, OpenAI, OpenAIError, RateLimitError
 
 from app.core.config import Settings, settings
 from app.core.llm_endpoints import (
@@ -149,6 +158,8 @@ from app.core.llm_endpoints import (
 from app.core.interfaces import SearchHit, hit_passage
 from app.core.paths import RESULTS, assert_outside
 from app.generate.generator import (
+    BATCH_MAX_RETRIES,
+    REASK_MAX_RETRIES,
     REASK_MAX_TOKENS,
     REASK_NOTE,
     TRUNCATION_NOTE,
@@ -344,6 +355,10 @@ ORACLE_DEFINITIONS = {
 LABELS = ("SUPPORT", "CONTRADICT", "NEI")
 VERDICT_TO_LABEL = dict(zip(VERDICTS, LABELS, strict=True))  # SUPPORTED->SUPPORT, ...
 NO_VERDICT = "NONE"  # answered, but with no parseable verdict line: maps to no label
+# How a reply with no verdict is scored (predicted_label), recorded in run metadata so
+# rag.md describes the rule its rag.json was scored under. A rag.json without the field
+# predates it: an abstaining reply with no verdict counted as NEI even if cut off / empty.
+NO_VERDICT_SCORING = "nei_only_if_complete"
 
 # The judge's `answered` field is only used as a fallback (no verdict line parsed), but
 # its rubric still has to be unambiguous for claims: a rebuttal ("the context refutes
@@ -487,13 +502,22 @@ def resolve_answered(verdict: str | None, judge_answered: bool) -> tuple[bool, s
     return judge_answered, "judge"
 
 
-def predicted_label(verdict: str | None, answered: bool) -> str:
-    """Map a verdict onto the gold label space. No verdict + abstained is NEI (it is
-    exactly "not enough info"); no verdict + answered is NO_VERDICT, which never
-    matches a gold label, so a missing verdict can't be scored as correct."""
+def predicted_label(verdict: str | None, answered: bool, cut_off: bool = False) -> str:
+    """Map a verdict onto the gold label space. No verdict + answered is NO_VERDICT,
+    which never matches a gold label, so a missing verdict can't be scored as correct.
+    No verdict + abstained is NEI (it is exactly "not enough info") ONLY when the reply
+    is complete: a reply cut off at the token budget, or empty (``cut_off``), abstained
+    from nothing — the judge's "not answered" there describes a broken reply, not the
+    model's call — so it is NO_VERDICT too and can never be credited on an NEI claim."""
     if verdict is not None:
         return VERDICT_TO_LABEL[verdict]
-    return NO_VERDICT if answered else "NEI"
+    return NO_VERDICT if answered or cut_off else "NEI"
+
+
+def _broken_reply(truncated: bool, answer: str | None) -> bool:
+    """The reply is cut off (hit the token budget after the retry) or has no content:
+    predicted_label's ``cut_off``."""
+    return truncated or (answer or "").strip().endswith(TRUNCATION_NOTE) or _no_judgeable_reply(answer)
 
 
 def reparse_row(row: dict, query: str) -> dict:
@@ -504,39 +528,50 @@ def reparse_row(row: dict, query: str) -> dict:
     a row stored with no verdict can be parsed again with the CURRENT parser, without an
     LLM call — which is what lets a resumed run, or an offline re-score of a committed
     rag.json, reproduce what a fresh generation would now record. A row that already
-    has a verdict is left alone (its source is "line" if it predates the field).
+    has a verdict is left alone (its source is "line" if it predates the field) — except
+    a first-sentence "stance" verdict on a TRUNCATED reply, which generate() no longer
+    reads (a cut-off opening may have been about to be hedged): that row is re-parsed
+    with the stance fallback off, as a fresh generation would be.
 
-    Everything derived from the verdict is recomputed: answered (the verdict now
-    decides it, not the judge), predicted label, both abstention classes, and the cited
-    doc ids (from the new display text, as generate() does). The judge's own scores are
-    kept: they were given for the same reply.
+    Everything derived from the verdict is recomputed: answered (the verdict decides
+    it, else the judge), predicted label (a cut-off or empty reply with no verdict is
+    NO_VERDICT), both abstention classes, and the cited doc ids (from the new display
+    text, plus the citations on a recovered inline verdict, as generate() does). The
+    judge's own scores are kept: they were given for the same reply.
     """
-    if row.get("verdict") is not None:
-        return {**row, "verdict_source": row.get("verdict_source") or "line"}
     answer = row.get("answer") or ""
+    truncated = bool(row.get("truncated")) or answer.endswith(TRUNCATION_NOTE)
+    if row.get("verdict") is not None and not (truncated and row.get("verdict_source") == "stance"):
+        return {**row, "verdict_source": row.get("verdict_source") or "line"}
     note = f"\n\n{TRUNCATION_NOTE}"
     truncated_note = answer.endswith(TRUNCATION_NOTE)
     raw = answer[: -len(note)] if answer.endswith(note) else (
         "" if answer == TRUNCATION_NOTE else answer
     )
-    text, verdict, source = parse_verdict(raw, allow_stance=looks_like_claim(query))
-    if verdict is None:
-        return {**row, "verdict_source": None}
-    if truncated_note:
-        text = f"{text}\n\n{TRUNCATION_NOTE}" if text else TRUNCATION_NOTE
+    text, verdict, source = parse_verdict(raw, allow_stance=looks_like_claim(query) and not truncated)
     answered, answered_source = resolve_answered(verdict, row["judge_answered"])
-    retrieved = [SearchHit(d, 0.0, "") for d in row.get("retrieved_doc_ids") or []]
-    return {
-        **row,
+    derived = {
         "verdict": verdict,
         "verdict_source": source,
-        "predicted_label": predicted_label(verdict, answered),
+        "predicted_label": predicted_label(verdict, answered, _broken_reply(truncated, raw)),
         "answered": answered,
         "answered_source": answered_source,
         "abstention_class": _abstention_class(answered, row["evidence"]),
         "abstention_class_qrels": _abstention_class(answered, row["evidence_qrels"]),
+    }
+    if verdict is None:  # the text is the reply as stored: answer and citations stay
+        if row.get("verdict") is None:  # same reply, same judge call: only the label rule
+            return {**row, "verdict_source": None, "predicted_label": derived["predicted_label"]}
+        return {**row, **derived}  # a demoted stance verdict: the judge decides again
+    if truncated_note:
+        text = f"{text}\n\n{TRUNCATION_NOTE}" if text else TRUNCATION_NOTE
+    retrieved = [SearchHit(d, 0.0, "") for d in row.get("retrieved_doc_ids") or []]
+    cite_text = raw if source in ("line", "inline") else text
+    return {
+        **row,
+        **derived,
         "answer": text,
-        "cited_doc_ids": map_citations(text, retrieved) if retrieved else row.get("cited_doc_ids", []),
+        "cited_doc_ids": map_citations(cite_text, retrieved) if retrieved else row.get("cited_doc_ids", []),
     }
 
 
@@ -818,6 +853,7 @@ def run_metadata(
             "verdict line when parsed (answered = verdict != NOT ENOUGH EVIDENCE); the "
             "judge's `answered` field only when no verdict line was parsed"
         ),
+        "no_verdict_scoring": NO_VERDICT_SCORING,
         "reask": {
             "enabled": settings.llm_reask,
             "prompt_hash": reask_prompt_hash(),
@@ -1045,12 +1081,22 @@ def _markdown(
     parse_failures: int,
     dataset: str | None = None,
     rows: Sequence[Mapping] | None = None,
+    missing: int = 0,
+    no_verdict_scoring: str | None = NO_VERDICT_SCORING,
 ) -> str:
-    """rag.md from the aggregates (and the rows, for the notes that break counts down)."""
+    """rag.md from the aggregates (and the rows, for the notes that break counts down).
+    ``missing``: sampled claims with no row (a non-canonical run only), named up front.
+    ``no_verdict_scoring``: the rule the rows were scored under (None: the rule before
+    NO_VERDICT_SCORING, for a rag.json that predates it)."""
     # The canonical header stays verbatim; any other split names itself, so a train-split
     # table can't pass for the headline.
     source = "SciFact claims" if dataset in (None, CANONICAL_DATASET) else f"claims from {dataset}"
     notes = []
+    if missing:
+        notes.append(
+            f"**INCOMPLETE: {missing} sampled claim{'' if missing == 1 else 's'} missing — "
+            f"every number below is over {agg['n']} of {agg['n'] + missing} claims**"
+        )
     if skipped:
         notes.append(f"{skipped} quer{'y' if skipped == 1 else 'ies'} skipped (pipeline errors)")
     if parse_failures:
@@ -1068,6 +1114,17 @@ def _markdown(
         faith_scope = (
             f", n={agg.get('faithfulness_n')}; {unjudged} answered only via the re-ask excluded "
             f"— the first reply {_unjudged_cause(rows)}, so the judge saw no answer text"
+        )
+    if no_verdict_scoring == NO_VERDICT_SCORING:
+        no_verdict_rule = (
+            f"A reply with no verdict line counts as NEI if it is complete and abstained, and "
+            f"as `{NO_VERDICT}` (always wrong) if it answered or was cut off at the token "
+            f"budget / empty."
+        )
+    else:  # the rule a rag.json without the field was scored under
+        no_verdict_rule = (
+            f"A reply with no verdict line counts as NEI if it abstained and as "
+            f"`{NO_VERDICT}` (always wrong) if it answered."
         )
     k = agg["top_k"]
     cols = (*LABELS, NO_VERDICT)
@@ -1092,8 +1149,7 @@ def _markdown(
         f"| Context relevance (all) | {_fmt(agg['context_relevance'])} |\n\n"
         f"## Claim verdicts, scored against the gold label (no judge)\n\n"
         f"The final `Verdict:` line maps SUPPORTED→SUPPORT, REFUTED→CONTRADICT, NOT ENOUGH "
-        f"EVIDENCE→NEI. A reply with no verdict line counts as NEI if it abstained and as "
-        f"`{NO_VERDICT}` (always wrong) if it answered.\n\n"
+        f"EVIDENCE→NEI. {no_verdict_rule}\n\n"
         f"| Metric | Score |\n|---|---|\n"
         f"| 3-class verdict accuracy | {_fmt(agg['verdict_accuracy'])} |\n"
         f"| Verdict line parsed | {_fmt(agg['verdict_parsed_rate'])} |\n"
@@ -1128,8 +1184,10 @@ def markdown_from_json(blob: Mapping) -> str:
     stores — with the current writer: no LLM call, no retrieval, nothing recomputed."""
     run = blob.get("run") if isinstance(blob.get("run"), Mapping) else {}
     rows = blob.get("rows") if isinstance(blob.get("rows"), list) else None
+    missing = blob.get("missing_query_ids")
     return _markdown(blob, int(blob.get("skipped") or 0), int(blob.get("judge_parse_failures") or 0),
-                     run.get("dataset"), rows)
+                     run.get("dataset"), rows, missing=len(missing) if isinstance(missing, list) else 0,
+                     no_verdict_scoring=run.get("no_verdict_scoring"))
 
 
 def render_markdown(path: Path) -> Path:
@@ -1248,11 +1306,14 @@ def output_dir(
     gen: LLMEndpoint | None = None,
     judge_ep: LLMEndpoint | None = None,
     reask: bool = True,
+    split_size: int | None = None,
 ) -> tuple[Path, bool]:
     """Where this run's rag.{md,json} go, and whether it is the canonical run.
 
-    Only the canonical test split, with no SSR_EVAL_LIMIT, AND both roles on the code
-    defaults (default_endpoints) may write to eval/results/. Anything else — every
+    Only a run over the WHOLE canonical test split (``n_sample == split_size``, the
+    number of claims in the split), with no SSR_EVAL_LIMIT, AND both roles on the code
+    defaults (default_endpoints) may write to eval/results/. Anything else — a partial
+    sample such as the default SSR_RAG_N=50 (or an unknown split size), every
     train-split run, every smoke subset, every run with another generator or judge (a
     paid-model comparison, even on the full test split) — goes to
     data/eval_runs/rag_<dataset-slug>_<n>_<prompt-hash8>[_<generator-slug>]
@@ -1263,7 +1324,8 @@ def output_dir(
     and its directory ends in ``_noreask``.
     """
     changed = non_default_roles(gen, judge_ep) if gen and judge_ep else []
-    if not limit and dataset == CANONICAL_DATASET and not changed and reask:
+    whole_split = split_size is not None and n_sample == split_size
+    if not limit and dataset == CANONICAL_DATASET and whole_split and not changed and reask:
         return OUT, True
     name = f"rag_{_slug(dataset)}_{n_sample}_{phash[:8]}"
     if changed:
@@ -1315,7 +1377,7 @@ def _replace_notice(recorded: int, n_sample: int) -> str:
         f"NOTICE: this canonical run REPLACES {OUT / 'rag.md'} and {OUT / 'rag.json'}\n"
         f"        committed sample: N={recorded} claims -> this run: N={n_sample} claims.\n"
         f"        The headline numbers will then describe a different sample size; update the\n"
-        f"        README alongside, or use SSR_EVAL_LIMIT / a train-split run to experiment.\n"
+        f"        README alongside, or use SSR_RAG_N=<n> / a train-split run to experiment.\n"
         f"{bar}\n"
     )
 
@@ -1604,7 +1666,9 @@ def main(argv: Sequence[str] = ()) -> None:
     labels = load_claim_labels(dataset=dataset, query_ids=set(queries))
     phash = prompt_hash()
     reask_on = settings.llm_reask
-    out, canonical = output_dir(dataset, limit, len(qids), phash, gen_ep, judge_ep, reask=reask_on)
+    out, canonical = output_dir(
+        dataset, limit, len(qids), phash, gen_ep, judge_ep, reask=reask_on, split_size=len(queries)
+    )
     if changed := non_default_roles(gen_ep, judge_ep):
         print(_non_default_notice(changed, gen_ep, judge_ep), flush=True)
     if not reask_on:
@@ -1618,6 +1682,12 @@ def main(argv: Sequence[str] = ()) -> None:
         + ("" if canonical else f" (non-canonical: never writes {OUT})"),
         flush=True,
     )
+    if dataset == CANONICAL_DATASET and not limit and len(qids) < len(queries):
+        print(
+            f"  partial sample: {len(qids)} of {len(queries)} test claims, so this run is not "
+            f"canonical; only SSR_RAG_N=all writes {OUT}",
+            flush=True,
+        )
     replacing = None
     if canonical and (recorded := committed_sample_size()) is not None and recorded != len(qids):
         replacing = _replace_notice(recorded, len(qids))
@@ -1738,7 +1808,12 @@ def main(argv: Sequence[str] = ()) -> None:
 
     # The first pass never re-asks inside generate(): the re-ask runs as the cached
     # post-step below, so checkpointed rows stay first-pass rows.
-    generator = LLMGenerator(endpoint=gen_ep, reask=False)
+    # The batch retry policy (generator.BATCH_MAX_RETRIES / REASK_MAX_RETRIES), not the
+    # API's: no user is waiting, and quick SDK retries absorb transient 429s / 5xx first.
+    generator = LLMGenerator(
+        endpoint=gen_ep, reask=False,
+        max_retries=BATCH_MAX_RETRIES, reask_max_retries=REASK_MAX_RETRIES,
+    )
     judge_client = build_client(judge_ep, factory=OpenAI, timeout=60.0)  # Nemotron Ultra: rare 20-27 s calls
 
     # Spend accounting. `reported` is what OpenRouter billed per its usage.cost; `counted`
@@ -1827,6 +1902,13 @@ def main(argv: Sequence[str] = ()) -> None:
             except EmptyCompletionError as e:
                 account(e.cost_usd)
                 raise
+            except OpenAIError as e:
+                # generate() attaches what this generation's attempts cost when one of them
+                # fails (e.g. the truncation retry after a billed first attempt); an error
+                # without it (raised before anything was sent) counts nothing.
+                if hasattr(e, "cost_usd"):
+                    account(e.cost_usd)
+                raise
 
         try:
             # Generation and judging retry SEPARATELY: a judge 429 or empty completion
@@ -1887,7 +1969,10 @@ def main(argv: Sequence[str] = ()) -> None:
             "rationale_doc_ids": sorted(label.rationale_doc_ids),
             "qrels_doc_ids": sorted(gold[qid]),
             "verdict": ans.verdict,
-            "predicted_label": predicted_label(ans.verdict, answered),
+            "predicted_label": predicted_label(
+                ans.verdict, answered,
+                _broken_reply(bool(getattr(ans, "truncated", False)), ans.text),
+            ),
             "answered": answered,
             "answered_source": answered_source,
             "judge_answered": s["answered"],
@@ -2002,6 +2087,27 @@ def main(argv: Sequence[str] = ()) -> None:
 
     # Sample order, resumed rows included; every row says whether the re-ask fired.
     rows = [final.get(q) or {**done[q], "reask_attempted": False} for q in qids if q in done]
+    missing_ids = [q for q in qids if q not in done]
+    failed_reasks = [r["query_id"] for r in rows if r.get("reask_attempted") and r.get("reask_error")]
+    if canonical and (missing_ids or failed_reasks):
+        # A thinned canonical artifact would silently shrink the headline's denominator
+        # (or score a claim without the re-ask every other claim got): refuse. Completed
+        # rows are checkpointed and fetched re-asks cached, so a re-run redoes only these.
+        why = []
+        if missing_ids:
+            why.append(
+                f"{len(missing_ids)} of {len(qids)} sampled claims have no row ({skipped} "
+                f"skipped, {parse_failures} unparseable judge replies this session): "
+                f"{', '.join(missing_ids[:20])}{' ...' if len(missing_ids) > 20 else ''}"
+            )
+        if failed_reasks:
+            why.append(f"{len(failed_reasks)} re-asks failed: {', '.join(failed_reasks[:20])}")
+        raise SystemExit(
+            f"\nRefusing to write the canonical {OUT / 'rag.json'}: " + "; ".join(why) + ".\n"
+            f"Nothing was written; {kept()}; re-ask replies are cached in "
+            f"{reask_cache_path(dataset)}.\nRe-run the same command: only the missing claims "
+            f"(and failed re-asks) run."
+        )
     agg = aggregate(rows, gen_ep.model, judge_ep.model, gen_ep.provider, judge_ep.provider)
     out.mkdir(parents=True, exist_ok=True)
     (out / "rag.json").write_text(
@@ -2011,6 +2117,9 @@ def main(argv: Sequence[str] = ()) -> None:
                 "skipped": skipped,
                 "skip_reasons": skip_reasons,
                 "judge_parse_failures": parse_failures,
+                # Sampled claims with no row (never on a canonical run, which refuses to
+                # write then): the aggregates above are over n = sampled - missing.
+                "missing_query_ids": missing_ids,
                 "judge_calls": judge_calls,
                 "cost": {
                     "reported_usd": round(reported, 6),
@@ -2039,7 +2148,9 @@ def main(argv: Sequence[str] = ()) -> None:
             indent=2,
         )
     )
-    (out / "rag.md").write_text(_markdown(agg, skipped, parse_failures, dataset, rows))
+    (out / "rag.md").write_text(
+        _markdown(agg, skipped, parse_failures, dataset, rows, missing=len(missing_ids))
+    )
     print(
         f"\nn={agg['n']}  verdict_accuracy={agg['verdict_accuracy']}  "
         f"evidence={agg['evidence_rate']}  answered={agg['answered_rate']}  "
@@ -2055,10 +2166,13 @@ def main(argv: Sequence[str] = ()) -> None:
         f"{reask_stats['failed']} failed)  "
         f"cost=${reported:.4f} reported (${counted:.4f} counted)"
     )
-    if missing := len(qids) - len(rows):
+    if missing_ids:
+        bar = "!" * 88
         print(
-            f"{missing} of {len(qids)} claims have no row (skipped / unparseable); re-running "
-            f"the same command retries only those."
+            f"\n{bar}\nINCOMPLETE: {len(missing_ids)} of {len(qids)} sampled claims have no row "
+            f"(skipped / unparseable), so every number above is over {len(rows)} claims, not "
+            f"{len(qids)}.\n  Missing: {', '.join(missing_ids)}\n  Re-running the same command "
+            f"retries only those.\n{bar}"
         )
     if replacing:
         print(replacing)

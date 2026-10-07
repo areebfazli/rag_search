@@ -306,9 +306,12 @@ class FakeGenerator:
     REASK_REPLY = "I cannot tell from these passages."
     reask_calls: list[tuple[str, list]] = []
 
-    def __init__(self, model=None, endpoint=None, reask=True):
+    init_kwargs: list[dict] = []
+
+    def __init__(self, model=None, endpoint=None, reask=True, **kw):
         self.endpoint = endpoint
         self.reask_enabled = reask
+        type(self).init_kwargs.append(kw)  # the SDK retry policy rag_eval asks for
 
     def reask_verdict(self, query, hits):
         type(self).reask_calls.append((query, hits))
@@ -384,6 +387,7 @@ def _patch_main(
     # The code default: the re-ask cache's legacy-key migration depends on it.
     monkeypatch.setattr(settings, "llm_reasoning_effort", "auto")
     monkeypatch.setattr(FakeGenerator, "reask_calls", [])
+    monkeypatch.setattr(FakeGenerator, "init_kwargs", [])
     for var in RAG_ENV:
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr(rag_eval, "MODE", mode)
@@ -472,7 +476,8 @@ def test_rag_json_keeps_every_scored_query(rag_run):
     assert rows["3"]["abstention_class"] == "correct_abstention"
     assert rows["3"]["abstention_class_qrels"] == "false_abstention"
     assert rows["3"]["answered"] is False and rows["3"]["judge_answered"] is True
-    assert rows["4"]["answered_source"] == "judge" and rows["4"]["predicted_label"] == "NEI"
+    # q4 abstained per the judge, but its reply was cut off: no verdict is NONE, never NEI.
+    assert rows["4"]["answered_source"] == "judge" and rows["4"]["predicted_label"] == rag_eval.NO_VERDICT
     assert rows["4"]["abstention_class"] == "false_abstention"
     assert rows["5"]["predicted_label"] == rag_eval.NO_VERDICT
     assert rows["4"]["truncated"] is True and rows["4"]["finish_reason"] == "length"
@@ -513,9 +518,20 @@ def test_rag_json_aggregates_both_oracles_and_verdicts(rag_run):
     assert blob["abstention_precision"] == 0.5
     assert blob["qrels_oracle"]["evidence_rate"] == 0.8  # q3's NEI qrels doc counts here
     assert blob["qrels_oracle"]["abstention_precision"] == 0.0
-    assert blob["verdict_accuracy"] == 0.6  # q1, q2, q3 right; q4 (NEI) and q5 (NONE) wrong
+    assert blob["verdict_accuracy"] == 0.6  # q1, q2, q3 right; q4 and q5 (NONE) wrong
     assert blob["confusion"]["CONTRADICT"]["NONE"] == 1
+    assert blob["confusion"]["SUPPORT"]["NONE"] == 1 and blob["confusion"]["SUPPORT"]["NEI"] == 0
     assert blob["by_label"]["NEI"] == {"n": 1, "answered": 0}
+
+
+def test_eval_generator_uses_the_batch_retry_policy(rag_run):
+    # The API's LLMGenerator() defaults are interactive (few SDK retries); the eval is a
+    # batch and keeps quick SDK retries in front of its own 429 / empty-completion layer.
+    from app.generate.generator import BATCH_MAX_RETRIES, REASK_MAX_RETRIES
+
+    assert FakeGenerator.init_kwargs[-1] == {
+        "max_retries": BATCH_MAX_RETRIES, "reask_max_retries": REASK_MAX_RETRIES,
+    }
 
 
 def test_judge_answered_is_consulted_only_without_a_verdict(rag_run):
@@ -731,13 +747,33 @@ def test_per_minute_rate_limit_skips_the_query_once_retries_are_exhausted(rate_l
     setup, sleeps, out = rate_limited
     attempts = rag_eval.RATE_LIMIT_RETRIES + 1
     gen, _ = setup("generate", "Two claim holds.", [rate_limit_error(TPM_MESSAGE)] * (attempts + 1))
-    rag_eval.main()  # the run survives: the query is skipped, not fatal
+    # The other claims still run (the query is skipped, not fatal), but a canonical run
+    # with a claim missing refuses to write: its denominator would silently shrink.
+    with pytest.raises(SystemExit) as exc:
+        rag_eval.main()
+    assert "Refusing to write the canonical" in str(exc.value.code)
+    assert "1 of 5 sampled claims have no row (1 skipped" in str(exc.value.code)
     assert sleeps.count(WAIT_S) == rag_eval.RATE_LIMIT_RETRIES
     assert [q for q, _ in gen.calls].count("Two claim holds.") == attempts
-    blob = json.loads((out / "rag.json").read_text())
+    assert len(gen.calls) == attempts + len(QUERIES) - 1
+    assert not out.exists()
+
+
+def test_a_non_canonical_run_with_a_missing_claim_writes_with_a_loud_note(rate_limited, tmp_path,
+                                                                          monkeypatch, capsys):
+    setup, _, out = rate_limited
+    attempts = rag_eval.RATE_LIMIT_RETRIES + 1
+    setup("generate", "Two claim holds.", [rate_limit_error(TPM_MESSAGE)] * (attempts + 1))
+    monkeypatch.setenv("SSR_EVAL_LIMIT", "5")  # all 5 claims, but a limited run: non-canonical
+    rag_eval.main()
+    assert not out.exists()
+    (run_dir,) = (tmp_path / "runs").iterdir()
+    blob = json.loads((run_dir / "rag.json").read_text())
     assert blob["skipped"] == 1 and blob["skip_reasons"] == {"RateLimitError": 1}
     assert {r["query_id"] for r in blob["rows"]} == set(QUERIES) - {"2"}
-    assert blob["n"] == len(QUERIES) - 1
+    assert blob["n"] == len(QUERIES) - 1 and blob["missing_query_ids"] == ["2"]
+    assert "INCOMPLETE: 1 sampled claim missing" in (run_dir / "rag.md").read_text()
+    assert "INCOMPLETE: 1 of 5 sampled claims have no row" in capsys.readouterr().out
 
 
 # --- providers, spend ceiling, fatal errors ------------------------------------------------
@@ -817,6 +853,19 @@ def test_rag_json_records_providers_and_cost_but_never_the_key(paid_rag_run):
     for f in ("rag.json", "rag.md"):
         assert FAKE_OPENROUTER_KEY not in (path / f).read_text()
     assert "(openrouter)" in (path / "rag.md").read_text()
+
+
+def test_a_failed_generation_with_a_billed_attempt_is_counted(tmp_path, monkeypatch):
+    # generate() attaches the billed cost of an attempt that preceded a failure (e.g. the
+    # truncation retry hit a 429): the spend ceiling must count it, not lose it.
+    err = rate_limit_error(TPM_MESSAGE)
+    err.cost_usd = 0.002
+    gen = type("Gen", (FlakyGenerator,), {"calls": [], "fail_query": "Two claim holds.", "errors": [err]})
+    monkeypatch.setattr(rag_eval.time, "sleep", lambda s: None)
+    _patch_main(tmp_path, monkeypatch, tmp_path, generator=gen, gen_model=PAID_GEN_MODEL)
+    rag_eval.main()
+    blob = json.loads((_written_dir(tmp_path, PAID_GEN_MODEL) / "rag.json").read_text())
+    assert blob["cost"]["reported_usd"] == pytest.approx((len(QUERIES) - 1) * GEN_COST_USD + 0.002)
 
 
 def test_throttle_is_provider_aware(monkeypatch):
@@ -939,12 +988,47 @@ def test_output_dir_only_canonical_test_split_writes_eval_results(monkeypatch, t
     monkeypatch.setattr(rag_eval, "OUT", tmp_path / "results")
     monkeypatch.setattr(rag_eval, "RUNS", tmp_path / "runs")
     ph = "abcdef0123456789"
-    assert rag_eval.output_dir(rag_eval.CANONICAL_DATASET, 0, 300, ph) == (tmp_path / "results", True)
-    train, canonical = rag_eval.output_dir("beir/scifact/train", 0, 100, ph)
-    assert not canonical and train == tmp_path / "runs" / "rag_beir-scifact-train_100_abcdef01"
+    test = rag_eval.CANONICAL_DATASET
+    assert rag_eval.output_dir(test, 0, 300, ph, split_size=300) == (tmp_path / "results", True)
+    train, canonical = rag_eval.output_dir("beir/scifact/train", 0, 809, ph, split_size=809)
+    assert not canonical and train == tmp_path / "runs" / "rag_beir-scifact-train_809_abcdef01"
     # A limited (smoke) run on the test split is never canonical either.
-    smoke, canonical = rag_eval.output_dir(rag_eval.CANONICAL_DATASET, 5, 5, ph)
+    smoke, canonical = rag_eval.output_dir(test, 5, 5, ph, split_size=5)
     assert not canonical and smoke.parent == tmp_path / "runs"
+
+
+def test_a_partial_test_sample_is_never_canonical(monkeypatch, tmp_path):
+    # The default SSR_RAG_N=50 must never overwrite the committed 300-claim artifact.
+    monkeypatch.setattr(rag_eval, "OUT", tmp_path / "results")
+    monkeypatch.setattr(rag_eval, "RUNS", tmp_path / "runs")
+    ph = "abcdef0123456789"
+    test = rag_eval.CANONICAL_DATASET
+    part, canonical = rag_eval.output_dir(test, 0, rag_eval.N, ph, split_size=300)
+    assert not canonical and part == tmp_path / "runs" / f"rag_beir-scifact-test_{rag_eval.N}_abcdef01"
+    assert rag_eval.output_dir(test, 0, 299, ph, split_size=300)[1] is False
+    # An unknown split size is never assumed to be covered.
+    assert rag_eval.output_dir(test, 0, 300, ph)[1] is False
+
+
+def test_default_n_on_a_larger_test_split_writes_a_run_dir_not_eval_results(tmp_path, monkeypatch, capsys):
+    out = tmp_path / "results"
+    _patch_main(tmp_path, monkeypatch, out)
+    many = {str(i): f"Claim number {i} holds." for i in range(1, 61)}
+    monkeypatch.setattr(rag_eval, "load_queries_qrels", lambda dataset=None: (many, {}))
+    monkeypatch.setattr(rag_eval, "load_claim_labels",
+                        lambda dataset=None, query_ids=None: {q: ClaimLabel("NEI") for q in many})
+    gen = type("Gen", (FakeGenerator,), {
+        "generate": lambda self, q, hits: GeneratedAnswer(
+            text="Nothing.", citations=[], hits=hits, verdict="NOT ENOUGH EVIDENCE"),
+    })
+    monkeypatch.setattr(rag_eval, "LLMGenerator", gen)
+    rag_eval.main()  # SSR_RAG_N unset: the default 50 of 60
+    assert not out.exists()
+    (run_dir,) = (tmp_path / "runs").iterdir()
+    assert run_dir.name.startswith(f"rag_beir-scifact-test_{rag_eval.N}_")
+    blob = json.loads((run_dir / "rag.json").read_text())
+    assert blob["n"] == rag_eval.N and blob["run"]["canonical"] is False
+    assert f"only SSR_RAG_N=all writes {out}" in capsys.readouterr().out
 
 
 def test_train_split_run_never_touches_eval_results(tmp_path, monkeypatch, capsys):
@@ -1059,9 +1143,10 @@ def test_resumed_output_matches_an_uninterrupted_run(rate_limited, tmp_path, mon
 def test_skipped_rows_are_not_checkpointed_and_are_retried(rate_limited, tmp_path):
     setup, _, out = rate_limited
     gen, _ = setup("generate", "Two claim holds.", [RuntimeError("upstream 500")])
-    rag_eval.main()  # completes with the row skipped
-    blob = json.loads((out / "rag.json").read_text())
-    assert blob["skipped"] == 1 and "2" not in {r["query_id"] for r in blob["rows"]}
+    with pytest.raises(SystemExit) as exc:  # the row is skipped, so the canonical write refuses
+        rag_eval.main()
+    assert "have no row (1 skipped" in str(exc.value.code) and "Re-run the same command" in str(exc.value.code)
+    assert not out.exists()
     (ckpt,) = _checkpoint_files(tmp_path)
     assert "2" not in json.loads(ckpt.read_text())["rows"]
     gen2, _ = setup("generate", None, [])
@@ -1074,7 +1159,10 @@ def test_skipped_rows_are_not_checkpointed_and_are_retried(rate_limited, tmp_pat
 def test_unparseable_judge_rows_are_not_checkpointed(rate_limited, tmp_path):
     setup, _, out = rate_limited
     setup("judge", "Four claim holds.", [JudgeParseError("garbage")])
-    rag_eval.main()
+    with pytest.raises(SystemExit) as exc:
+        rag_eval.main()
+    assert "0 skipped, 1 unparseable judge replies" in str(exc.value.code)
+    assert not out.exists()
     (ckpt,) = _checkpoint_files(tmp_path)
     assert "4" not in json.loads(ckpt.read_text())["rows"]
     gen2, _ = setup("generate", None, [])
@@ -1280,15 +1368,15 @@ def test_empty_completion_skips_uncheckpointed_once_retries_are_exhausted(
     setup, sleeps, out = rate_limited
     attempts = rag_eval.RATE_LIMIT_RETRIES + 1
     gen, fake_judge = setup(source, "Two claim holds.", [_empty()] * (attempts + 1))
-    rag_eval.main()  # survives: the row is skipped
+    with pytest.raises(SystemExit) as exc:  # survives the row, then refuses the canonical write
+        rag_eval.main()
+    assert "have no row (1 skipped" in str(exc.value.code) and not out.exists()
     assert sleeps.count(WAIT_S) == rag_eval.RATE_LIMIT_RETRIES
     if source == "judge":
         assert [q for q, _ in gen.calls].count("Two claim holds.") == 1
         assert fake_judge.queries.count("Two claim holds.") == attempts
     else:
         assert [q for q, _ in gen.calls].count("Two claim holds.") == attempts
-    blob = json.loads((out / "rag.json").read_text())
-    assert blob["skipped"] == 1 and blob["skip_reasons"] == {"EmptyCompletionError": 1}
     (ckpt,) = _checkpoint_files(tmp_path)
     assert "2" not in json.loads(ckpt.read_text())["rows"]  # a re-run retries it
     gen2, _ = setup("generate", None, [])
@@ -1335,10 +1423,11 @@ def test_output_dir_non_default_models_are_never_canonical(monkeypatch, tmp_path
     monkeypatch.setattr(rag_eval, "OUT", tmp_path / "results")
     monkeypatch.setattr(rag_eval, "RUNS", tmp_path / "runs")
     ph, test = "abcdef0123456789", rag_eval.CANONICAL_DATASET
-    assert rag_eval.output_dir(test, 0, 300, ph, DEFAULT_GEN_EP, DEFAULT_JUDGE_EP) == (
+    assert rag_eval.output_dir(test, 0, 300, ph, DEFAULT_GEN_EP, DEFAULT_JUDGE_EP, split_size=300) == (
         tmp_path / "results", True
     )
-    luna, canonical = rag_eval.output_dir(test, 0, 300, ph, _ep("generator", LUNA), DEFAULT_JUDGE_EP)
+    luna, canonical = rag_eval.output_dir(test, 0, 300, ph, _ep("generator", LUNA), DEFAULT_JUDGE_EP,
+                                          split_size=300)
     assert not canonical
     assert luna == tmp_path / "runs" / "rag_beir-scifact-test_300_abcdef01_openai-gpt-6-luna"
     oss, _ = rag_eval.output_dir(test, 0, 300, ph, _ep("generator", PAID_GEN_MODEL), DEFAULT_JUDGE_EP)
@@ -1437,7 +1526,8 @@ def test_reparse_row_recovers_an_inline_verdict_and_rederives_everything():
     assert (r["verdict"], r["verdict_source"], r["predicted_label"]) == ("REFUTED", "inline", "CONTRADICT")
     assert r["answered"] is True and r["answered_source"] == "verdict"
     assert r["abstention_class"] == "answered_with_evidence"
-    assert r["answer"] == "Opposite effect [2]." and r["cited_doc_ids"] == ["b"]
+    # The [3] on the stripped inline verdict is the model's citation too: kept.
+    assert r["answer"] == "Opposite effect [2]." and r["cited_doc_ids"] == ["b", "c"]
 
 
 def test_reparse_row_stance_overrides_the_judge_and_keeps_the_text():
@@ -1461,11 +1551,45 @@ def test_reparse_row_leaves_parsed_and_unrecoverable_rows_alone():
 
 def test_reparse_row_handles_the_truncation_note():
     note = rag_eval.TRUNCATION_NOTE
-    cut = _stored(f"The context directly contradicts the claim [1]. It then\n\n{note}", truncated=True)
+    cut = _stored(f"Opposite effect [1]. Verdict: REFUTED\n\n{note}", truncated=True)
     r = rag_eval.reparse_row(cut, "Statins lower LDL cholesterol.")
-    assert r["verdict"] == "REFUTED" and r["answer"].endswith(note)
-    empty = _stored(note, truncated=True)
-    assert rag_eval.reparse_row(empty, "Statins lower LDL cholesterol.")["verdict"] is None
+    assert r["verdict"] == "REFUTED" and r["answer"] == f"Opposite effect [1].\n\n{note}"
+    empty = _stored(note, truncated=True, judge_answered=False)
+    r = rag_eval.reparse_row(empty, "Statins lower LDL cholesterol.")
+    # No verdict in a cut-off reply: NONE however the judge read it, never NEI.
+    assert r["verdict"] is None and r["predicted_label"] == rag_eval.NO_VERDICT
+
+
+def test_reparse_row_reads_no_stance_from_a_truncated_reply():
+    note = rag_eval.TRUNCATION_NOTE
+    claim = "Statins lower LDL cholesterol."
+    cut = _stored(f"The context directly contradicts the claim [1]. It then\n\n{note}",
+                  truncated=True, judge_answered=False)
+    r = rag_eval.reparse_row(cut, claim)
+    assert r["verdict"] is None and r["predicted_label"] == rag_eval.NO_VERDICT
+    assert r["answer"] == cut["answer"]
+    # A row stored with a stance verdict on a truncated reply (older code) is demoted, as
+    # a fresh generation would now record it: the judge decides `answered` again.
+    stored = {**cut, "verdict": "REFUTED", "verdict_source": "stance", "predicted_label": "CONTRADICT",
+              "answered": True, "answered_source": "verdict"}
+    r = rag_eval.reparse_row(stored, claim)
+    assert (r["verdict"], r["verdict_source"], r["predicted_label"]) == (None, None, rag_eval.NO_VERDICT)
+    assert r["answered"] is False and r["answered_source"] == "judge"
+    assert r["abstention_class"] == "false_abstention"
+    assert rag_eval.needs_reask(claim, r["verdict"])  # so the re-ask post-step picks it up
+    # A complete reply's stance verdict is untouched.
+    whole = {**stored, "truncated": False, "answer": "The context directly contradicts the claim [1]."}
+    assert rag_eval.reparse_row(whole, claim)["verdict"] == "REFUTED"
+
+
+def test_predicted_label_no_verdict_is_nei_only_for_a_complete_abstaining_reply():
+    assert predicted_label(None, False) == "NEI"
+    assert predicted_label(None, False, cut_off=True) == rag_eval.NO_VERDICT
+    assert predicted_label(None, True, cut_off=True) == rag_eval.NO_VERDICT
+    assert predicted_label("NOT ENOUGH EVIDENCE", False, cut_off=True) == "NEI"  # a verdict wins
+    assert rag_eval._broken_reply(False, "") and rag_eval._broken_reply(False, rag_eval.TRUNCATION_NOTE)
+    assert rag_eval._broken_reply(True, "Some prose.")
+    assert not rag_eval._broken_reply(False, "The passages do not say.")
 
 
 def test_resume_applies_the_current_parser_with_no_llm_call(rate_limited, tmp_path):
@@ -1539,10 +1663,11 @@ def test_reask_fires_once_per_claim_without_a_verdict_and_sets_it(tmp_path, monk
         assert r["reask"]["parsed"] == "REFUTED" and r["reask"]["finish_reason"] == "stop"
         assert r["reask"]["completion_tokens"] == 7 and r["reask"]["reasoning_tokens"] == 3
         assert r["first_pass"]["verdict"] is None and r["first_pass"]["verdict_source"] is None
-    assert r4["first_pass"]["predicted_label"] == "NEI" and r5["first_pass"]["predicted_label"] == "NONE"
+    # q4's first reply was cut off with no verdict: NONE, not NEI (the judge said abstained).
+    assert r4["first_pass"]["predicted_label"] == "NONE" and r5["first_pass"]["predicted_label"] == "NONE"
     # Prose answers are kept as served; the judge's scores stay the first reply's.
     assert r4["answer"] == "Nothing here settles it." and r4["faithfulness"] == 0.9
-    assert rag_eval.first_pass_row(r4)["predicted_label"] == "NEI"
+    assert rag_eval.first_pass_row(r4)["predicted_label"] == "NONE"
     assert blob["verdict_sources"]["reask"] == 2 and blob["reasked_answers"] == 2
     assert blob["verdict_accuracy"] == 0.8  # q5 (CONTRADICT) is fixed, q4 (SUPPORT) is not
     assert blob["run"]["reask"]["prompt_hash"] == reask_prompt_hash()
@@ -1831,10 +1956,17 @@ def test_a_failed_reask_keeps_the_first_pass_and_is_retried_next_run(rate_limite
         raise RuntimeError("upstream 500")
 
     monkeypatch.setattr(FakeGenerator, "reask_verdict", boom)
+    with pytest.raises(SystemExit) as exc:  # canonical: a failed re-ask blocks the write
+        rag_eval.main()
+    assert "2 re-asks failed: 4, 5" in str(exc.value.code) and not out.exists()
+    assert _reask_entries(tmp_path) == {}
+    monkeypatch.setenv("SSR_EVAL_LIMIT", "5")  # non-canonical: written, first pass kept
     rag_eval.main()
-    rows = {r["query_id"]: r for r in json.loads((out / "rag.json").read_text())["rows"]}
+    (run_dir,) = (tmp_path / "runs").iterdir()
+    rows = {r["query_id"]: r for r in json.loads((run_dir / "rag.json").read_text())["rows"]}
     assert rows["4"]["reask_attempted"] and rows["4"]["reask_error"] == "RuntimeError"
-    assert rows["4"]["predicted_label"] == "NEI" and _reask_entries(tmp_path) == {}
+    assert rows["4"]["predicted_label"] == "NONE" and _reask_entries(tmp_path) == {}
+    monkeypatch.delenv("SSR_EVAL_LIMIT")
     monkeypatch.undo()  # back to the working fake (and fresh patches below)
     setup("generate", None, [])
     rag_eval.main()
@@ -1913,7 +2045,9 @@ def test_render_md_rewrites_only_the_markdown_from_the_stored_json(tmp_path, cap
     rag_eval.main(["--render-md", str(src)])  # no endpoint, no retrieval, no LLM
     assert src.read_bytes() == before
     md = (tmp_path / "rag.md").read_text()
-    assert md == rag_eval._markdown(agg, 0, 0, "beir/scifact/test", rows)
+    # No `no_verdict_scoring` in this blob's run: rendered under the rule it was scored by.
+    assert md == rag_eval._markdown(agg, 0, 0, "beir/scifact/test", rows, no_verdict_scoring=None)
+    assert "counts as NEI if it abstained and as `NONE`" in md
     assert "1 answer truncated at the token budget (of those, 1 got a verdict" in md
     assert "Wrote" in capsys.readouterr().out
 

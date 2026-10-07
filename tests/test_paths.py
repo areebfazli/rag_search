@@ -107,7 +107,8 @@ def test_non_canonical_output_dirs_refuse_a_runs_dir_aliasing_the_results(links,
         judge_agreement.output_dir(3)
     # The canonical branch and an ordinary runs dir are untouched.
     monkeypatch.setattr(rag_eval, "RUNS", links / "runs")
-    assert rag_eval.output_dir("beir/scifact/test", 0, 300, "d0921f4e" * 8) == (RESULTS, True)
+    assert rag_eval.output_dir("beir/scifact/test", 0, 300, "d0921f4e" * 8, split_size=300) == (
+        RESULTS, True)
     out, canonical = rag_eval.output_dir("beir/scifact/train", 0, 5, "d0921f4e" * 8)
     assert not canonical and out.parent == links / "runs"
 

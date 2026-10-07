@@ -28,9 +28,7 @@ import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from openai import OpenAIError
-
-from openai import OpenAI
+from openai import APIStatusError, OpenAI, OpenAIError
 
 from app.core.config import settings
 from app.core.llm_endpoints import (
@@ -48,6 +46,13 @@ from app.core.interfaces import Answer, SearchHit, hit_passage
 from app.generate.prompts import SYSTEM, VERDICTS, build_user_prompt, reask_messages
 
 _CITE = re.compile(r"\[(\d+)\]")
+# Grouped markers the model also writes: "[1, 2]", "[1,3]", "[3-4]", "[2–4]", "[1, 3-5]".
+# Each part is a number or an ascending range; a range is expanded (and, like a single
+# marker, range-checked against the hits by map_citations). _CITE's [n] is the one-part case.
+_CITE_PART = r"\d+(?:\s*[-–—]\s*\d+)?"
+_CITE_GROUP_SRC = rf"\[\s*{_CITE_PART}(?:\s*[,;]\s*{_CITE_PART})*\s*\]"
+_CITE_GROUP = re.compile(rf"\[\s*({_CITE_PART}(?:\s*[,;]\s*{_CITE_PART})*)\s*\]")
+_CITE_RANGE = re.compile(r"(\d+)\s*[-–—]\s*(\d+)")
 # gpt-oss sometimes cites in its native CJK-bracket style — 【2】, occasionally with a
 # browsing-style tail like 【2†L3-L5】 — or with fullwidth square brackets ［2］. \d also
 # matches fullwidth digits, which int() reads, so ［２］ becomes [2] too.
@@ -60,7 +65,7 @@ _WIDE_CITE = re.compile(r"[【［]\s*(\d+)\s*(?:†[^】］\n]*)?[】］]")
 _MARKUP = r"[\s*_`'\"]*"
 _VERDICT_ALT = "|".join(v.replace(" ", r"\s+") for v in VERDICTS)
 _VERDICT_LINE = re.compile(
-    rf"^{_MARKUP}verdict{_MARKUP}:{_MARKUP}({_VERDICT_ALT}){_MARKUP}(?:\s*\[\d+\])*\.?{_MARKUP}$",
+    rf"^{_MARKUP}verdict{_MARKUP}:{_MARKUP}({_VERDICT_ALT}){_MARKUP}(?:\s*{_CITE_GROUP_SRC})*\.?{_MARKUP}$",
     re.IGNORECASE,
 )
 # Any line that *starts* like a verdict — used to detect a second, competing one.
@@ -72,12 +77,29 @@ def normalize_citations(text: str) -> str:
     return _WIDE_CITE.sub(lambda m: f"[{int(m.group(1))}]", text)
 
 
+def _cited_numbers(group: str, n_hits: int) -> set[int]:
+    """The passage numbers one marker's inside names ("1, 3-4" -> {1, 3, 4}), clipped to
+    1..n_hits; a descending range ("4-2") names nothing."""
+    out: set[int] = set()
+    for part in re.split(r"[,;]", group):
+        if m := _CITE_RANGE.search(part):
+            lo, hi = int(m.group(1)), int(m.group(2))
+            if lo <= hi:
+                out.update(range(max(lo, 1), min(hi, n_hits) + 1))
+        elif part.strip():
+            out.add(int(part))
+    return {n for n in out if 1 <= n <= n_hits}
+
+
 def map_citations(text: str, hits: list[SearchHit]) -> list[str]:
     """Map [n] markers in the answer to hit doc_ids — 1-based, deduped, ordered,
     ignoring out-of-range indices the model may hallucinate. Fullwidth markers are
-    normalised first, so they map (and are range-checked) exactly like [n]."""
-    cited = sorted({int(n) for n in _CITE.findall(normalize_citations(text))})
-    return [hits[n - 1].doc_id for n in cited if 1 <= n <= len(hits)]
+    normalised first, so they map (and are range-checked) exactly like [n]; grouped
+    markers ("[1, 2]", "[3-4]") map every passage they name."""
+    cited: set[int] = set()
+    for m in _CITE_GROUP.finditer(normalize_citations(text)):
+        cited |= _cited_numbers(m.group(1), len(hits))
+    return [hits[n - 1].doc_id for n in sorted(cited)]
 
 
 def split_verdict(text: str) -> tuple[str, str | None]:
@@ -131,7 +153,7 @@ _QUOTE_CHARS = "\"“”«»„"
 _INLINE_MARKUP = r"[\s*_`]*"  # no quotes: a quoted "Verdict: X" is a passage's, not ours
 _INLINE_VERDICT = re.compile(
     rf"(?<=[.!?)\]])\s+{_INLINE_MARKUP}verdict{_INLINE_MARKUP}:{_INLINE_MARKUP}"
-    rf"({_VERDICT_ALT}){_INLINE_MARKUP}(?:\s*\[\d+\])*\.?{_INLINE_MARKUP}$",
+    rf"({_VERDICT_ALT}){_INLINE_MARKUP}(?:\s*{_CITE_GROUP_SRC})*\.?{_INLINE_MARKUP}$",
     re.IGNORECASE,
 )
 _VERDICT_MENTION = re.compile(r"verdict[\s*_`'\"]*:", re.IGNORECASE)
@@ -545,31 +567,44 @@ TRUNCATION_RETRY_FACTOR = 2  # one retry, at twice the configured budget
 # allows 32,768 completion tokens. Frozen with the prompt (prompts.REASK_SYSTEM).
 REASK_MAX_TOKENS = 8192
 # Timeout / retry policy. Every generation request goes through the generator's client,
-# built in __init__ with CLIENT_TIMEOUT_S / CLIENT_MAX_RETRIES: 30 s per attempt keeps a
-# hung request from tying up an API worker for minutes, and the SDK's 5 retries back off
-# through transient free-tier 429s.
+# built in __init__ with CLIENT_TIMEOUT_S and an explicit SDK max_retries (never the SDK's
+# own default, 2 in openai 2.x). 30 s per attempt keeps a hung request from tying up an
+# API worker for minutes. The retry count depends on the caller:
+# * interactive (the API, LLMGenerator()'s default): CLIENT_MAX_RETRIES = 1. Each SDK retry
+#   re-sends a request that may already have waited its full timeout, so retries multiply
+#   the time an /answer worker is held: with 5 retries one /answer could take
+#   2 attempts x 6 x 30 s + 2 x 120 s re-ask ~ 10 min before any backoff sleeps. With 1
+#   (and API_REASK_MAX_RETRIES = 0) the worst case is 2 x 2 x 30 s + 120 s = 4 min plus
+#   the SDK's backoff sleeps; one retry still absorbs a single transient 429 / 5xx.
+# * batch (rag_eval passes max_retries=BATCH_MAX_RETRIES): 5, as before. A batch run has
+#   no user waiting, and quick SDK retries absorb transient free-tier 429s, 5xx and
+#   timeouts before rag_eval's own layer (with_rate_limit_retries: a 60 s wait on a 429
+#   or empty completion, then the same claim again) has to.
 CLIENT_TIMEOUT_S = 30.0
-CLIENT_MAX_RETRIES = 5
+CLIENT_MAX_RETRIES = 1
+BATCH_MAX_RETRIES = 5
 # The re-ask has its own explicit policy, applied per call in reask_verdict (a copy of the
-# same client via with_options: same connection pool, endpoint and spend policy), and it
-# is the SAME for both callers — the API's generate() and rag_eval's re-ask post-step
-# both send it through LLMGenerator.reask_verdict. It differs from the first call's on
-# purpose: the re-ask may spend up to REASK_MAX_TOKENS (4x the default first-call
-# budget) reasoning, and a 30 s timeout would cut off exactly those long replies, then
-# silently resend them up to 5 times, each a request against the free daily cap. A 4,096-
-# token first-call retry fits inside 30 s on Ling, so 8,192 tokens needs ~60 s: 120 s is
-# 2x that; and one SDK retry absorbs a transient 429/5xx while bounding a timed-out
-# resend to one extra request (worst case ~4 min). (rag_secondlook, which fetched the
-# committed re-ask replies, sends with no SDK retry and a 300 s timeout, counting every
-# request itself.) None of these values is a request field: no cache key or prompt hash
-# depends on them.
-# What differs between the two callers is only the layer ABOVE this call, deliberately:
-# the API is interactive, so a re-ask that still fails is dropped and the first answer is
-# served (reask_error recorded, a warning returned); rag_eval is a batch that must give
-# every claim the same treatment, so it additionally waits out 429s and empty
-# completions (rag_eval.with_rate_limit_retries) and stops resumably on the daily cap.
+# same client via with_options: same connection pool, endpoint and spend policy). It
+# differs from the first call's on purpose: the re-ask may spend up to REASK_MAX_TOKENS
+# (4x the default first-call budget) reasoning, and a 30 s timeout would cut off exactly
+# those long replies, then silently resend them, each a request against the free daily
+# cap. A 4,096-token first-call retry fits inside 30 s on Ling, so 8,192 tokens needs
+# ~60 s: 120 s is 2x that. Its SDK retries also depend on the caller: rag_eval (batch)
+# uses REASK_MAX_RETRIES = 1, which absorbs a transient 429/5xx while bounding a timed-out
+# resend to one extra request (~4 min worst case); the API (interactive) uses
+# API_REASK_MAX_RETRIES = 0, since a failed re-ask never fails /answer — the first answer
+# is served with a warning — so a retry would only hold the worker longer. (rag_secondlook,
+# which fetched the committed re-ask replies, sends with no SDK retry and a 300 s timeout,
+# counting every request itself.) None of these values is a request field: no cache key
+# or prompt hash depends on them.
+# Above this call, the two callers differ deliberately too: the API is interactive, so a
+# re-ask that still fails is dropped and the first answer is served (reask_error
+# recorded, a warning returned); rag_eval is a batch that must give every claim the same
+# treatment, so it additionally waits out 429s and empty completions
+# (rag_eval.with_rate_limit_retries) and stops resumably on the daily cap.
 REASK_TIMEOUT_S = 120.0
 REASK_MAX_RETRIES = 1
+API_REASK_MAX_RETRIES = 0
 # Shown instead of the bare truncation note when the first reply had no prose at all and
 # the re-ask supplied the verdict: the reader gets a verdict with no explanation, and is
 # told why rather than shown "answer truncated" next to a confident verdict badge. The
@@ -840,6 +875,8 @@ class LLMGenerator:
         reasoning_effort: str | None = None,
         endpoint: LLMEndpoint | None = None,
         reask: bool | None = None,
+        max_retries: int = CLIENT_MAX_RETRIES,
+        reask_max_retries: int = API_REASK_MAX_RETRIES,
     ):
         # Where requests go. An explicit endpoint wins; an explicit base_url builds one
         # whose provider (and default key) follows that URL; otherwise the settings
@@ -870,15 +907,18 @@ class LLMGenerator:
         # generate() re-asks a claim with no verdict (settings.llm_reask). rag_eval turns
         # it off here and applies the same re-ask as a cached post-step instead.
         self.reask_enabled = settings.llm_reask if reask is None else reask
+        # SDK retry counts (see CLIENT_MAX_RETRIES): the defaults are the API's; rag_eval
+        # passes the batch policy (BATCH_MAX_RETRIES, REASK_MAX_RETRIES).
+        self.reask_max_retries = reask_max_retries
         self.client = build_client(
             endpoint,
             factory=OpenAI,
-            max_retries=CLIENT_MAX_RETRIES,  # backoff through transient free-tier 429s
+            max_retries=max_retries,
             timeout=CLIENT_TIMEOUT_S,  # don't let a hung request tie up a worker for minutes
         )
 
     def _reask_client(self):
-        """self.client with the re-ask policy (REASK_TIMEOUT_S / REASK_MAX_RETRIES): a
+        """self.client with the re-ask policy (REASK_TIMEOUT_S / self.reask_max_retries): a
         GuardedClient over the SDK client's with_options copy. A client without that
         shape (a test fake, or one a caller swapped in) is used as it is."""
         raw = getattr(self.client, "_client", None)
@@ -886,7 +926,7 @@ class LLMGenerator:
         if not isinstance(self.client, GuardedClient) or not callable(with_options):
             return self.client
         return GuardedClient(
-            with_options(timeout=REASK_TIMEOUT_S, max_retries=REASK_MAX_RETRIES), self.endpoint
+            with_options(timeout=REASK_TIMEOUT_S, max_retries=self.reask_max_retries), self.endpoint
         )
 
     def _complete(self, messages: list[dict], max_tokens: int, client=None):
@@ -909,6 +949,20 @@ class LLMGenerator:
             max_tokens=max_tokens,
             **extra,
         )
+
+    def _complete_counted(self, messages: list[dict], max_tokens: int, costs: list[float | None]):
+        """_complete, with an OpenAIError carrying ``cost_usd``: what this generation's
+        earlier attempts reported costing plus the failed one — 0 for an HTTP error status
+        (an error response is not a billed completion), unknown (None) for a timeout or
+        connection error (the provider may have generated and billed). None overall if
+        any part is unknown, so a spend ceiling counts the worst case, never zero."""
+        try:
+            return self._complete(messages, max_tokens)
+        except OpenAIError as e:
+            failed = 0.0 if isinstance(e, APIStatusError) else None
+            parts = [*costs, failed]
+            e.cost_usd = None if any(c is None for c in parts) else sum(parts)
+            raise
 
     def reask_verdict(self, query: str, hits: Sequence[SearchHit]) -> ReaskReply:
         """Exactly one verdict-only call (prompts.reask_messages, REASK_MAX_TOKENS) through
@@ -942,20 +996,28 @@ class LLMGenerator:
         # recovers the common case at the cost of one extra call, only when needed;
         # retrying further would just burn quota on a reply that is pathologically long.
         budget = self.max_completion_tokens
-        resp = self._complete(messages, budget)
+        costs: list[float | None] = []
+        resp = self._complete_counted(messages, budget, costs)
         attempts = 1
-        costs = [response_cost(resp)]
+        costs.append(response_cost(resp))
         choice = _choice_or_raise(resp, costs)
         if choice.finish_reason == "length":
-            resp = self._complete(messages, budget * TRUNCATION_RETRY_FACTOR)
+            # A failure here must not lose what the first attempt was billed: the
+            # exception carries it (cost_usd), as an empty completion's already does.
+            resp = self._complete_counted(messages, budget * TRUNCATION_RETRY_FACTOR, costs)
             attempts = 2
             costs.append(response_cost(resp))
             choice = _choice_or_raise(resp, costs)
         truncated = choice.finish_reason == "length"
         raw = normalize_citations((choice.message.content or "").strip())
         # A cut-off reply can't have been cut inside a valid verdict line (the whole line
-        # must match a full verdict value), so the parse is safe on a truncated reply.
-        text, verdict, verdict_source = parse_verdict(raw, allow_stance=looks_like_claim(query))
+        # must match a full verdict value), so the line / inline parse is safe on a
+        # truncated reply. The first-sentence stance fallback is not: a cut-off reply's
+        # opening may be about to be hedged or turned around, so a truncated reply gets no
+        # stance verdict (a claim then goes to the verdict-only re-ask instead).
+        text, verdict, verdict_source = parse_verdict(
+            raw, allow_stance=looks_like_claim(query) and not truncated
+        )
         if truncated:
             text = f"{text}\n\n{TRUNCATION_NOTE}" if text else TRUNCATION_NOTE
         completion_tokens, reasoning_tokens = _usage_counts(resp)
@@ -981,10 +1043,13 @@ class LLMGenerator:
                     verdict, verdict_source = reask_verdict, "reask"
                     text = reask_display_text(text)
         # Citations come from the displayed text, so every listed source is one the
-        # reader can see referenced (a valid verdict line carries no citations anyway).
+        # reader can see referenced — plus any [n] on the verdict line the parser took off
+        # it ("Verdict: REFUTED [3]": the model's own citation for its verdict). For a
+        # "line" / "inline" verdict the reply is exactly the display text + that line.
+        cite_text = raw if verdict_source in ("line", "inline") else text
         return GeneratedAnswer(
             text=text,
-            citations=map_citations(text, hits),
+            citations=map_citations(cite_text, hits),
             hits=hits,
             verdict=verdict,
             finish_reason=choice.finish_reason,

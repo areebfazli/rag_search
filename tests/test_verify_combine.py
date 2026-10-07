@@ -64,7 +64,9 @@ def test_train_tuning_rows_are_the_first_pass_reparsed(tmp_path, monkeypatch):
     rows, run, _ = verify_combine._ling_train_rows()
     by = {r["query_id"]: r for r in rows}
     # The re-ask's SUPPORT is gone: the first pass had no verdict, and none is parseable.
-    assert by["1"]["predicted_label"] == "NEI" and by["1"]["verdict"] is None
+    # Its reply was cut off at the token budget, so it is NONE (never NEI), whatever the
+    # judge's `answered` said (rag_eval.predicted_label).
+    assert by["1"]["predicted_label"] == rag_eval.NO_VERDICT and by["1"]["verdict"] is None
     assert not any(k in r for r in rows for k in ("first_pass", "reask", "reask_attempted"))
     assert "reask" not in run and by["2"]["predicted_label"] == "SUPPORT"
 
