@@ -35,10 +35,14 @@
       cursor: pointer; color: #0b0e14;
     }
     #go { background: var(--accent); }
-    #ask { background: var(--accent-2); }
     button:disabled { opacity: .55; cursor: default; }
     .hint { color: var(--muted); font-size: 13px; margin: 10px 2px 0; }
-    .hint code { color: var(--accent-2); }
+    details.modes { color: var(--muted); font-size: 13px; margin: 10px 2px 0; }
+    details.modes summary { cursor: pointer; color: var(--accent); }
+    details.modes ul { margin: 8px 0 0; padding-left: 20px; }
+    details.modes li { margin: 4px 0; }
+    details.modes b { color: var(--text); font-weight: 600; }
+    details.modes .note { margin: 8px 0 0; }
     #status { margin: 22px 2px 6px; color: var(--muted); min-height: 20px; }
     .card {
       background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
@@ -53,8 +57,13 @@
     .verdict-pill.supported { color: var(--accent-2); background: rgba(126, 226, 184, .15); border: 1px solid rgba(126, 226, 184, .4); }
     .verdict-pill.refuted { color: var(--danger); background: rgba(242, 139, 130, .15); border: 1px solid rgba(242, 139, 130, .4); }
     .verdict-pill.nei { color: var(--muted); background: rgba(154, 163, 178, .15); border: 1px solid rgba(154, 163, 178, .35); }
+    .answer .model { color: var(--muted); font-size: 12px; margin: -2px 0 8px; }
     .answer .body { font-size: 15.5px; }
     .answer .sources { color: var(--muted); font-size: 13px; margin-top: 10px; }
+    .answer .sources ol { margin: 4px 0 0; padding-left: 22px; }
+    .answer.pending { border-color: var(--border); background: var(--panel); }
+    .answer.pending .body, .answer.failed .body { color: var(--muted); }
+    .answer.failed { border-color: var(--border); background: var(--panel); }
     .cite { color: var(--accent-2); font-weight: 600; }
     .card .top { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
     .card .title { font-weight: 600; }
@@ -77,24 +86,33 @@
     <form id="f">
       <input id="q" type="text" placeholder="e.g. Does vitamin D supplementation reduce mortality?" autocomplete="off" />
       <div class="row2">
-        <select id="mode" title="retrieval mode">
-          <option value="hybrid" selected>hybrid (RRF)</option>
-          <option value="dense">dense</option>
-          <option value="bm25">bm25</option>
+        <select id="mode" title="Search mode" aria-label="Search mode">
+          <option value="hybrid" selected>Hybrid: keywords + meaning (recommended)</option>
+          <option value="bm25">Keywords only (BM25)</option>
+          <option value="dense">Meaning only (embeddings)</option>
         </select>
         <input id="k" type="number" min="1" max="20" value="8" title="results" />
         <span class="spacer"></span>
-        <button id="go" type="submit">Search</button>
-        <button id="ask" type="button">Ask (RAG)</button>
+        <button id="go" type="submit">Check claim</button>
       </div>
     </form>
-    <div class="hint">Default config on SciFact gold qrels: <code>hybrid</code> — nDCG@10 0.724, Recall@100 0.965 (cross-encoder reranking measured, no significant gain). <b>Ask (RAG)</b> generates a cited answer with free models via OpenRouter.</div>
+    <div class="hint">Finds the most relevant papers, then a free Mistral model reads the top 5 and gives a verdict that cites them.</div>
+
+    <details class="modes">
+      <summary>How do the search modes differ?</summary>
+      <ul>
+        <li><b>Keywords only (BM25)</b>, right paper in the top 10 for 0.819 of claims: matches exact words, great for drug and gene names, misses synonyms.</li>
+        <li><b>Meaning only (embeddings, bge-small)</b>, 0.836: matches meaning and handles synonyms, but can blur precise terms.</li>
+        <li><b>Hybrid</b>, 0.855 (default): runs both and merges the rankings (Reciprocal Rank Fusion), so each catches what the other misses.</li>
+      </ul>
+      <p class="note">Measured on 300 SciFact test claims. Answers always use hybrid, the measured setting.</p>
+    </details>
 
     <div id="status"></div>
     <div id="answer"></div>
     <div id="results"></div>
 
-    <footer>FastAPI · Qdrant · bm25s · sentence-transformers · ranx · OpenRouter</footer>
+    <footer>FastAPI · Qdrant · bm25s · sentence-transformers · ranx · Mistral</footer>
   </div>
 
   <script>
@@ -102,11 +120,17 @@
     const statusEl = document.getElementById('status');
     const resultsEl = document.getElementById('results');
     const answerEl = document.getElementById('answer');
+    const MODE_NAMES = { hybrid: 'Hybrid search', bm25: 'Keywords-only search (BM25)', dense: 'Meaning-only search (embeddings)' };
     const go = document.getElementById('go');
-    const ask = document.getElementById('ask');
+    let reqId = 0;
 
     function esc(s) { const d = document.createElement('div'); d.textContent = s ?? ''; return d.innerHTML; }
-    function citeMarkup(s) { return esc(s).replace(/\[(\d+)\]/g, '<span class="cite">[$1]</span>'); }
+    // Escaped first, so only these fixed tags are ever added: [n] citations and **bold**.
+    function citeMarkup(s) {
+      return esc(s)
+        .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
+        .replace(/\[(\d+)\]/g, '<span class="cite">[$1]</span>');
+    }
 
     // Whitelist of known verdict values -> {label, cls}. Anything else (including
     // null/undefined/unrecognized strings) renders no pill. The raw verdict string
@@ -175,51 +199,99 @@
       return { q, mode, k };
     }
 
-    async function runSearch(e) {
+    function answerCard(cls, labelText, bodyText) {
+      const card = document.createElement('div');
+      card.className = `card answer ${cls}`;
+      const label = document.createElement('div');
+      label.className = 'label';
+      label.textContent = labelText;
+      const body = document.createElement('div');
+      body.className = 'body';
+      body.textContent = bodyText;
+      card.append(label, body);
+      return card;
+    }
+
+    // Citation numbers [n] refer to /answer's own ranked sources, so they are listed here.
+    function renderAnswer(data) {
+      const card = answerCard('', 'Verdict', '');
+      card.querySelector('.body').innerHTML = citeMarkup(data.answer);
+      const pill = buildVerdictPill(data.verdict);
+      if (pill) card.querySelector('.label').appendChild(pill);
+      if (typeof data.model_used === 'string' && data.model_used) {
+        const m = document.createElement('div');
+        m.className = 'model';
+        m.textContent = `answered by ${data.model_used}`;
+        card.querySelector('.label').after(m);
+      }
+      const src = document.createElement('div');
+      src.className = 'sources';
+      const cited = Array.isArray(data.citations) ? data.citations.map(String) : [];
+      src.appendChild(document.createTextNode(
+        `Cited sources: ${cited.length ? cited.map(c => 'doc ' + c).join(', ') : '—'}. Numbers refer to the sources the model read:`));
+      const ol = document.createElement('ol');
+      (data.hits || []).forEach(h => {
+        const li = document.createElement('li');
+        li.textContent = `${h.title || '(untitled)'} (doc ${h.doc_id})`;
+        ol.appendChild(li);
+      });
+      src.appendChild(ol);
+      card.appendChild(src);
+      if (Array.isArray(data.warnings) && data.warnings.length) {
+        const w = document.createElement('div');
+        w.className = 'warn';
+        w.textContent = data.warnings.join(' ');
+        card.appendChild(w);
+      }
+      answerEl.replaceChildren(card);
+    }
+
+    async function fetchJSON(url) {
+      const r = await fetch(url);
+      if (!r.ok) {
+        let detail = '';
+        try { const j = await r.json(); if (typeof j.detail === 'string') detail = j.detail; } catch (_) {}
+        const e = new Error(r.status === 429 ? 'rate limit reached, try again shortly'
+          : detail ? `${detail} (HTTP ${r.status})` : `HTTP ${r.status}`);
+        throw e;
+      }
+      return r.json();
+    }
+
+    async function runCheck(e) {
       if (e) e.preventDefault();
       const { q, mode, k } = params();
-      if (!q) return;
-      go.disabled = ask.disabled = true; answerEl.innerHTML = ''; resultsEl.innerHTML = '';
-      statusEl.textContent = `Searching (${mode})…`;
+      if (!q || go.disabled) return;
+      const id = ++reqId;
+      go.disabled = true; resultsEl.replaceChildren();
+      answerEl.replaceChildren(answerCard('pending', 'Verdict', 'Checking the evidence…'));
+      statusEl.textContent = `Searching (${MODE_NAMES[mode] || mode})…`;
       const t0 = performance.now();
-      try {
-        const r = await fetch(`/search?q=${encodeURIComponent(q)}&mode=${encodeURIComponent(mode)}&top_k=${encodeURIComponent(k)}`);
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        const data = await r.json();
-        statusEl.textContent = `${data.hits.length} results · mode=${data.mode} · ${Math.round(performance.now() - t0)} ms`;
+      const enc = encodeURIComponent;
+      const searchP = fetchJSON(`/search?q=${enc(q)}&mode=${enc(mode)}&top_k=${enc(k)}`);
+      const answerP = fetchJSON(`/answer?q=${enc(q)}&mode=hybrid&top_k=5`);
+      const searchDone = searchP.then(data => {
+        if (id !== reqId) return;
+        const n = data.hits.length;
+        statusEl.textContent = `${MODE_NAMES[data.mode] || data.mode} · ${n} paper${n === 1 ? '' : 's'} · ${Math.round(performance.now() - t0)} ms`;
         showWarnings(data);
         renderHits(data.hits);
-      } catch (err) { statusEl.textContent = `Error: ${err.message}`; }
-      finally { go.disabled = ask.disabled = false; }
+      }, err => {
+        if (id !== reqId) return;
+        statusEl.textContent = `Search error: ${err.message}`;
+      });
+      const answerDone = answerP.then(data => {
+        if (id !== reqId) return;
+        renderAnswer(data);
+      }, err => {
+        if (id !== reqId) return;
+        answerEl.replaceChildren(answerCard('failed', 'Verdict', `Answer unavailable: ${err.message}`));
+      });
+      await Promise.all([searchDone, answerDone]);
+      if (id === reqId) go.disabled = false;
     }
 
-    async function runAnswer() {
-      const { q, mode, k } = params();
-      if (!q) return;
-      go.disabled = ask.disabled = true; answerEl.innerHTML = ''; resultsEl.innerHTML = '';
-      statusEl.textContent = 'Generating grounded answer…';
-      const t0 = performance.now();
-      try {
-        const r = await fetch(`/answer?q=${encodeURIComponent(q)}&mode=${encodeURIComponent(mode)}&top_k=${encodeURIComponent(k)}`);
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        const data = await r.json();
-        statusEl.textContent = `answer · ${data.hits.length} sources · ${Math.round(performance.now() - t0)} ms`;
-        answerEl.innerHTML = `
-          <div class="card answer">
-            <div class="label">Answer (RAG)</div>
-            <div class="body">${citeMarkup(data.answer)}</div>
-            <div class="sources">Cited sources: ${data.citations.length ? data.citations.map(esc).map(c => 'doc ' + c).join(', ') : '—'}</div>
-          </div>`;
-        const pill = buildVerdictPill(data.verdict);
-        if (pill) answerEl.querySelector('.label').appendChild(pill);
-        showWarnings(data);
-        renderHits(data.hits);
-      } catch (err) { statusEl.textContent = `Error: ${err.message}`; }
-      finally { go.disabled = ask.disabled = false; }
-    }
-
-    f.addEventListener('submit', runSearch);
-    ask.addEventListener('click', runAnswer);
+    f.addEventListener('submit', runCheck);
   </script>
 </body>
 </html>
