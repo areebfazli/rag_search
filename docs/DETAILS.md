@@ -141,21 +141,29 @@ structure). Answers cite sources as `[n]`, mapped back to document ids, and the 
 **abstain when the context lacks the evidence** rather than guess. For a claim it ends with
 `Verdict: SUPPORTED | REFUTED | NOT ENOUGH EVIDENCE`.
 
-- **Generator:** Ling 3.0 Flash Sante (`inclusionai/ling-3.0-flash-sante:free`) on OpenRouter, a
-  free health/medicine-tuned model. It was picked on a 2026-09-24 bench of 10 free models (22/22
-  calls served, fastest p50 1.1 s, no expiry date, a different family from the judge). It reasons
-  by default with no parameter sent (108–1,847 hidden reasoning tokens per claim on a smoke
-  test), so the completion budget is 2,048 tokens with **one retry at 2×** (4,096) on
-  `finish_reason=length`: at 1,024 it needed the retry on 36 of 50 eval claims and still
-  truncated 7; at 2,048, 12 of 50 retried and 1 truncated.
-- **Verdict parser.** The final `Verdict:` line is parsed first; if it is missing, the parser
-  recovers a verdict restated in prose (`inline`) or, for a complete reply, from the first
-  sentence's stance (`stance`). A truncated reply never gets a stance verdict, since it was cut
-  off mid-reply.
-- **Verdict re-ask** (`SSR_LLM_REASK`, default on). When a claim's reply still has no parseable
-  verdict (truncated, or prose without a verdict line), the generator makes one verdict-only call
-  (8,192-token budget) and takes its verdict. The response's `verdict_source` says where the
-  verdict came from (`line`, `inline`, `stance`, `reask`). A failed re-ask never fails `/answer`;
+- **Generator:** Mistral's `ministral-14b-latest` on Mistral's free tier (provider `mistral`,
+  key `SSR_MISTRAL_API_KEY`, 30 requests/min), a different family from the Nvidia judge. If a
+  call fails with an availability error (429 after retries, 5xx, 403/404, timeout, empty reply),
+  the same request is tried once on `ministral-8b-latest`; the answer records which model replied
+  (`model_used`, also returned by `/answer`). It is not a reasoning model. The completion budget
+  is 2,048 tokens with **one retry at 2×** (4,096) on `finish_reason=length`; in the canonical
+  run no answer needed the retry.
+- **Earlier generator (history).** Until October 2026 the generator was Ling 3.0 Flash Sante
+  (`inclusionai/ling-3.0-flash-sante:free`) on OpenRouter, a free health/medicine-tuned
+  reasoning model picked on a 2026-09-24 bench of 10 free models. It was withdrawn upstream
+  (requests return 404), so its canonical run (0.797, git `348c919`) can no longer be
+  regenerated; see [the generator change](#the-generator-change-ling-to-mistral). The 2,048-token
+  budget and its retry were sized for Ling's hidden reasoning: at 1,024 it needed the retry on 36
+  of 50 eval claims and still truncated 7; at 2,048, 12 of 50 retried and 1 truncated.
+- **Verdict parser** (built on the Ling run). The final `Verdict:` line is parsed first; if it
+  is missing, the parser recovers a verdict restated in prose (`inline`) or, for a complete
+  reply, from the first sentence's stance (`stance`). A truncated reply never gets a stance
+  verdict, since it was cut off mid-reply.
+- **Verdict re-ask** (`SSR_LLM_REASK`, default on; adopted on the Ling run). When a claim's
+  reply still has no parseable verdict (truncated, or prose without a verdict line), the
+  generator makes one verdict-only call (8,192-token budget) and takes its verdict. The
+  response's `verdict_source` says where the verdict came from (`line`, `inline`, `stance`,
+  `reask`). The re-ask goes to the model that answered. A failed re-ask never fails `/answer`;
   it becomes a `warnings` entry.
 - **Claim gate.** Only inputs that read as a claim get the re-ask or a stance verdict
   (`looks_like_claim`): a question, a keyword search ("BRCA1 breast cancer risk") or an
@@ -166,7 +174,7 @@ structure). Answers cite sources as `[n]`, mapped back to document ids, and the 
   none (120 s), so a stuck provider holds a worker for minutes at most; the eval harness, with no
   user waiting, allows 5 retries (re-ask 1). A failed retry keeps the earlier attempt's cost.
 
-Example, `/answer?q=Can aspirin reduce the risk of colorectal cancer?`:
+Example (from the earlier Ling generator), `/answer?q=Can aspirin reduce the risk of colorectal cancer?`:
 > "Aspirin has been shown to reduce the risk of colorectal cancer [1][2][3] … a pooled analysis of four randomized trials showed a 34% reduction in 20-year colorectal cancer mortality [3]."
 
 ### Scoring
@@ -181,7 +189,7 @@ SciFact's labels** (no judge), and uses an LLM judge only for faithfulness and c
 - **Abstention** is scored against a **rationale oracle**: the context "has evidence" when a
   document the annotators cited *with rationale sentences* is in the top 5. NEI claims have no
   rationale document, so abstaining on them is correct. `answered` comes from the verdict; the
-  judge decides it only when no verdict was parsed (1 of 300).
+  judge decides it only when no verdict was parsed (0 of 300 in the Mistral run, 1 on Ling).
 - **Judge:** Nemotron 3 Ultra (`nvidia/nemotron-3-ultra-550b-a55b:free`), a different model family
   from the generator so it never grades its own output. On the same 10-model bench it was the only
   one with 22/22 calls served and 100% parseable verdicts; the previous judge's free variant
@@ -191,60 +199,89 @@ SciFact's labels** (no judge), and uses an LLM judge only for faithfulness and c
 ### Results
 
 All 300 SciFact test claims (seed 13, so the first 50 are the earlier 50-claim sample), 0
-skipped, top-5 context, free generator and judge: **a full run costs $0**. Full tables in
+skipped, top-5 context, `ministral-14b-latest` generator (all 300 answers from the primary
+model, none from the fallback) and the free Nemotron judge: **a full run costs $0** (about 360
+Mistral requests and 305 free OpenRouter requests). Full tables in
 [`rag.md`](../eval/results/rag.md); the confidence interval is from
-[`rag_label_audit.md`](../eval/results/rag_label_audit.md). The first-pass answers span two days
-(OpenRouter's 1,000 requests/day free cap was hit mid-run and the run resumed from its
-checkpoint).
+[`rag_label_audit.md`](../eval/results/rag_label_audit.md).
 
-**Verdict accuracy is 0.7967 (239 of 300, shown as 0.80), 95% Wilson CI 0.748–0.838.**
+**Verdict accuracy is 0.7500 (225 of 300), 95% Wilson CI 0.698–0.796.**
 
 | Gold label | n | Verdict accuracy | Answered (not abstained) |
 |---|---|---|---|
-| SUPPORT | 124 | 0.815 (101) | 107 |
-| CONTRADICT | 64 | 0.891 (57) | 58 |
-| NEI | 112 | 0.723 (81) | 31 |
+| SUPPORT | 124 | 0.718 (89) | 94 |
+| CONTRADICT | 64 | 0.813 (52) | 55 |
+| NEI | 112 | 0.750 (84) | 28 |
 
 | Metric | Score |
 |---|---|
-| Faithfulness (over answered, LLM judge; n = 193, 3 re-ask-only answers excluded) | 0.98 (0.979) |
-| Context relevance (all, LLM judge) | 0.72 |
-| **3-class verdict accuracy** (vs gold label, no judge) | **0.80** (239/300) |
-| Verdict parsed (incl. recovered and re-asked) | 299 of 300 |
-| Truncated answers (hit the token budget after 1 retry) | 11 of 300 |
-| Answers that needed the length retry | 63 of 300 |
-| Replies citing at least one passage | 282 of 300 |
+| Faithfulness (over answered, LLM judge; n = 177) | 0.99 (0.986) |
+| Context relevance (all, LLM judge) | 0.69 |
+| **3-class verdict accuracy** (vs gold label, no judge) | **0.75** (225/300) |
+| Verdict parsed (incl. recovered and re-asked) | 300 of 300 |
+| Truncated answers (hit the token budget after 1 retry) | 0 of 300 |
+| Answers that needed the length retry | 0 of 300 |
+| Replies citing at least one passage | 281 of 300 |
 | Evidence retrieved (rationale doc in top 5) | 0.58 |
-| Answered (model attempted an answer) | 0.65 |
-| **Abstention precision** (abstained & no evidence) | **0.83** (0.8269) |
-| Abstention recall (no evidence & abstained) | 0.69 |
-| False abstention (had evidence, abstained anyway) | 0.10 |
-| Answered without evidence, as a share of answers given (hallucination risk) | 0.20 |
+| Answered (model attempted an answer) | 0.59 |
+| **Abstention precision** (abstained & no evidence) | **0.76** (0.7561) |
+| Abstention recall (no evidence & abstained) | 0.74 |
+| False abstention (had evidence, abstained anyway) | 0.17 |
+| Answered without evidence, as a share of answers given (hallucination risk) | 0.18 |
 
 |  | evidence retrieved (175) | no evidence (125) |
 |---|---|---|
-| **answered** (196) | 157 answered with evidence | 39 answered with nothing to go on |
-| **abstained** (104) | 18 declined despite having the evidence | 86 correct |
+| **answered** (177) | 145 answered with evidence | 32 answered with nothing to go on |
+| **abstained** (123) | 30 declined despite having the evidence | 93 correct |
 
 Verdicts against the gold label (`NONE` = no verdict on a reply that answered, was cut off at the
 token budget or was empty; always wrong):
 
 | Gold \ predicted | SUPPORT | CONTRADICT | NEI | NONE |
 |---|---|---|---|---|
-| **SUPPORT** (124) | 101 | 6 | 16 | 1 |
-| **CONTRADICT** (64) | 1 | 57 | 6 | 0 |
-| **NEI** (112) | 18 | 13 | 81 | 0 |
+| **SUPPORT** (124) | 89 | 5 | 30 | 0 |
+| **CONTRADICT** (64) | 3 | 52 | 9 | 0 |
+| **NEI** (112) | 14 | 14 | 84 | 0 |
+
+Verdict sources: `line` 175, `inline` 5, `stance` 59, `reask` 61. **The re-ask fired on 61 of
+300 claims** (Ling: 16), every one returned a verdict, and 42 of the 61 are correct. None was a
+truncation: ministral-14b often answers in prose and leaves out the final `Verdict:` line, which
+the stance rule recovers for 59 claims and the re-ask for the rest. That costs one extra request
+per affected claim and leans on the two recovery steps; getting the line on the first reply is
+listed under [What I'd do next](#what-id-do-next), not fixed.
 
 **The oracle decides whether abstention looks broken.** Scored the legacy way, against BEIR qrels
 (which mark a cited abstract relevant for NEI claims too), the *same answers* give abstention
-precision 0.41 and 61 "false" abstentions (rate 0.26); under the rationale oracle only 18 are
-false and precision is 0.83. `rag.md` reports both.
+precision 0.41 and 73 "false" abstentions (rate 0.31); under the rationale oracle only 30 are
+false and precision is 0.76. `rag.md` reports both.
 
-### How the score got here
+### The generator change: Ling to Mistral
 
-Two post-processing steps on the same Ling answers, scored on the 300 test claims with paired
-exact McNemar via `make rag-compare` (b = earlier run right and this one wrong, c = the reverse).
-Neither was developed on train alone; see [Test-set reuse](#test-set-reuse).
+The free Ling 3.0 Flash Sante generator was withdrawn from OpenRouter in October 2026, so the
+default generator moved to Mistral's free `ministral-14b-latest` (with `ministral-8b-latest` as
+a fallback) and the canonical run was repeated with the pipeline otherwise unchanged: same
+retrieval, prompt, parser, re-ask, judge and claims. The Ling run stays in git at `348c919`
+(`eval/results/rag.json` there); it can no longer be regenerated. Paired exact McNemar on the
+same 300 claims (`make rag-compare`; b = Ling right and Mistral wrong, c = the reverse):
+
+| On the 300 claims | Ling (348c919) | Mistral ministral-14b | b | c | p |
+|---|---|---|---|---|---|
+| Verdict correct | 0.7967 | 0.7500 | 31 | 17 | 0.0595 |
+| Abstention correct (rationale oracle) | 0.8100 | 0.7933 | | | 0.58 |
+| Cites at least one passage | 0.9400 | 0.9367 | | | 1.0 |
+
+The 4.7-point drop is not significant at 0.05. Where it moves: Mistral declines more claims
+that have a stance (SUPPORT → NEI 30 against Ling's 16) and answers fewer NEI claims (28 against
+31). Faithfulness (0.99 vs 0.98) and context relevance (0.69 vs 0.72) come from the same judge
+and prompt, but over different answers. Mistral's run-to-run noise has not been measured.
+
+### How the parser and re-ask were adopted (Ling run)
+
+Everything in this subsection was measured on the earlier Ling generator. Two post-processing
+steps on the same Ling answers, scored on the 300 test claims with paired exact McNemar via
+`make rag-compare` (b = earlier run right and this one wrong, c = the reverse). Neither was
+developed on train alone; see [Test-set reuse](#test-set-reuse). Both were carried over to
+Mistral unchanged.
 
 | Step | Verdict accuracy | b | c | p |
 |---|---|---|---|---|
@@ -264,28 +301,31 @@ the answers without the re-ask score 0.76 (228/300), and the re-ask fixes 11 and
 count as correct abstentions, so the scoring change, not the re-ask, accounts for the difference,
 and **7 fixed / 0 broken (p = 0.016) is the figure the re-ask was adopted on**.
 
-The re-ask now fires on 16 of 300 claims (11 truncated, 5 prose replies without a verdict line)
-and produces a verdict for 15 (12 correct). Abstention (+0.007, p = 0.63) and citation rate (0.94,
-unchanged) don't move significantly. Faithfulness stays 0.98: the re-ask is not re-judged, and the
-3 claims answered only through the re-ask, after a first reply that hit the token budget before
-writing any answer text, are left out because the judge saw no answer text. Claim 514 is counted:
-its truncated first reply had text, which the judge scored 0.0. Verdict sources over the 300 rows:
-`line` 257, `inline` 10, `stance` 17, `reask` 15, none 1 (claim 343: `NONE` for the verdict, an
-abstention in the tables above).
+On the Ling run the re-ask fired on 16 of 300 claims (11 truncated, 5 prose replies without a
+verdict line) and produced a verdict for 15 (12 correct). Abstention (+0.007, p = 0.63) and
+citation rate (0.94, unchanged) didn't move significantly. Faithfulness stayed 0.98: the re-ask is
+not re-judged, and the 3 claims answered only through the re-ask, after a first reply that hit the
+token budget before writing any answer text, are left out because the judge saw no answer text.
+Claim 514 is counted: its truncated first reply had text, which the judge scored 0.0. Verdict
+sources over the 300 rows: `line` 257, `inline` 10, `stance` 17, `reask` 15, none 1 (claim 343:
+`NONE` for the verdict, an abstention in that run's tables).
 
 ### Remaining failure modes
 
-61 of 300 verdicts are wrong, and almost all are an evidence *judgement* error, not a format one:
+75 of 300 verdicts are wrong in the Mistral run, and all are an evidence *judgement* error, not a
+format one (every claim got a verdict):
 
-- **NEI claims answered anyway: 31 of 112** (18 SUPPORTED, 13 REFUTED), the largest group. They
-  account for most of the 39 answers given without evidence.
-- **SUPPORT/CONTRADICT claims abstained on: 22** (16 SUPPORT, 6 CONTRADICT). For 13 of the 16
-  SUPPORT claims the rationale doc is in the context: the model reads the passage too literally.
-- Smaller: 6 SUPPORT claims answered REFUTED, 1 CONTRADICT answered SUPPORTED, and 1 SUPPORT claim
-  (343) truncated with no verdict even after the re-ask.
+- **SUPPORT/CONTRADICT claims abstained on: 39** (30 SUPPORT, 9 CONTRADICT), the largest group.
+  For 26 of the 30 SUPPORT claims (and 4 of the 9 CONTRADICT) the rationale doc is in the
+  context, so the model had the passage and judged it not enough.
+- **NEI claims answered anyway: 28 of 112** (14 SUPPORTED, 14 REFUTED). They account for most of
+  the 32 answers given without evidence.
+- Smaller: 5 SUPPORT claims answered REFUTED and 3 CONTRADICT answered SUPPORTED.
 
-How many of these are really model errors is the subject of the
-[diagnosis](#diagnosis-where-the-remaining-errors-come-from).
+On the Ling run the two big groups were the other way round (31 NEI claims answered, 22
+SUPPORT/CONTRADICT claims abstained on, out of 61 errors). The
+[diagnosis](#diagnosis-where-the-remaining-errors-come-from) of whether these are really model
+errors was done on Ling's 61.
 
 ## Evaluation methodology
 
@@ -305,10 +345,10 @@ Qdrant) and replays RRF at other settings; `make latency` times every config.
 samples nest: the first 50 of the 300-claim run are exactly the 50-claim sample.
 `SSR_RAG_DATASET=beir/scifact/train` (809 claims, disjoint from test) is for prompt development.
 
-- **Only one kind of run writes the committed artifact.** `eval/results/rag.{md,json}` is written
-  only by a run over the whole test split (`SSR_RAG_N=all`), with no `SSR_EVAL_LIMIT`, both roles
-  on the code-default models and the re-ask on. Every other run (the default 50 claims, any train
-  or limited run, another model, re-ask off) writes to
+- **Only one kind of run writes the committed artifact.** `eval/results/rag.{md,json}` is
+  written only by a run over the whole test split (`SSR_RAG_N=all`), with no `SSR_EVAL_LIMIT`,
+  both roles on the code-default models, the re-ask on and no fallback answers. Every other run
+  (the default 50 claims, any train or limited run, another model, re-ask off) writes to
   `data/eval_runs/rag_<dataset>_<n>_<prompt-hash8>[_<model-slug>][_noreask]/`. A canonical run
   that ends with a claim missing or a failed re-ask refuses to write (finished rows stay
   checkpointed, so a re-run redoes only those); non-canonical runs write and name the missing
@@ -318,12 +358,18 @@ samples nest: the first 50 of the 300-claim run are exactly the 50-claim sample.
   prompt hashes, top-k, mode, token budget, reasoning and retrieval settings). A daily-cap stop is
   resumed by re-running the same command; skipped rows are retried.
 - **Re-ask reply cache.** Re-ask replies are cached in `data/eval_cache/secondlook/`
-  (`app/eval/reply_cache.py`). The legacy v1 keys must stay: the 15 re-ask replies behind the
-  committed `rag.json` are stored under them, and they are what lets the canonical run reproduce
-  with zero new LLM calls. New replies use v2 keys that also fingerprint the endpoint.
-- **Free-tier budget.** A 300-claim run is about 670 free requests (~2.24 per claim) at a 12 s
-  per-claim throttle on OpenRouter (`SSR_RAG_THROTTLE_S` overrides); the run prints the request
-  count up front, and `SSR_RAG_CHECK_QUOTA=1` (or `--check-quota`) reads the key's remaining free
+  (`app/eval/reply_cache.py`), keyed by the exact request including provider, base URL and model,
+  so a reply is never reused across endpoints. The older v1 keys, which only served the
+  withdrawn Ling endpoint, are no longer read.
+- **Fallback answers.** Each row records `model_used`. A row answered by the fallback model is
+  never checkpointed, and a canonical run refuses to write while any remain, so the committed
+  artifact is all primary-model answers.
+- **Free-tier budget.** With the default providers a 300-claim run is about 360 Mistral requests
+  (300 answers plus the re-asks; free tier 30/min) and about 305 free OpenRouter judge requests,
+  at a 5 s per-claim throttle (`SSR_RAG_THROTTLE_S` overrides). The judge is the binding limit:
+  OpenRouter's free tier allows 20 requests/min and 1,000/day only on accounts that have ever
+  bought $10 of credits (50/day otherwise). The run prints its request counts up front, and
+  `SSR_RAG_CHECK_QUOTA=1` (or `--check-quota`) reads the OpenRouter key's remaining free
   requests (not an LLM call) and aborts if they are short.
 - **Provenance.** `rag.json` keeps every row (gold label, rationale docs, verdict and its source,
   answer text, citations, finish reason, token usage, cost) and the run's prompt hashes, git SHA,
@@ -346,19 +392,26 @@ test (on train it fixed 0 and broke 1). In all, 8 variants have been scored on t
 second look, the re-ask, and second look + re-ask), so raw p-values are optimistic. The parser's
 gain (14 fixed, 0 broken, p = 1.2e-4) survives any correction. The re-ask's (7 fixed, 0 broken,
 raw p = 0.016) becomes borderline: Holm-adjusted p = 0.047 over the 3 fixes tried together, 0.063
-over the 4 or 5 post-parser candidates, and 0.078 over all 8.
+over the 4 or 5 post-parser candidates, and 0.078 over all 8. All of this was on the Ling
+generator.
 
-The generator is also not deterministic: same-model Ling-vs-Ling repeats change 9 of 50 predicted
-labels, flipping correctness on 7 (3 one way, 4 the other; p = 1.00). That is the noise floor for
-50 claims, and the Wilson interval on one run does not capture it. A fresh held-out set would be
-needed to confirm 0.80.
+The Mistral run is a single run of that existing pipeline: the parser, re-ask and prompt were
+carried over unchanged, and nothing was tuned on its answers. The test set was still used to
+build the pipeline it runs, so 0.750 is not a clean held-out number either.
+
+The generator is also not deterministic: same-model Ling-vs-Ling repeats changed 9 of 50
+predicted labels, flipping correctness on 7 (3 one way, 4 the other; p = 1.00). That was the
+noise floor for 50 claims on Ling; Mistral's has not been measured, and the Wilson interval on
+one run does not capture it. A fresh held-out set would be needed to confirm either score.
 
 ## Diagnosis: where the remaining errors come from
 
-Four checks ask whether the 61 test errors are the model's, the retrieval's, or the benchmark's.
-All are **secondary**: **the headline stays 0.7967 on the original SciFact labels.** The two blind
-re-labellings and the cited-abstract diagnostic used tooling that has since been removed from
-`main` (archived in [`experiments-archive`][archive]); their labels and runs are local
+Four checks ask whether the test errors are the model's, the retrieval's, or the benchmark's.
+**Checks 2–4 and the conclusion were measured on the earlier Ling run's 61 errors** (git
+`348c919`) and were not repeated for Mistral; check 1 is re-scored on the current run. All are
+**secondary**: **the headline stays 0.750 (225/300) on the original SciFact labels.** The two
+blind re-labellings and the cited-abstract diagnostic used tooling that has since been removed
+from `main` (archived in [`experiments-archive`][archive]); their labels and runs are local
 (`data/` is gitignored), not committed.
 
 ### 1. Published label audit
@@ -368,30 +421,31 @@ LLM-Assisted Annotation Audit* ([BioNLP 2026](https://aclanthology.org/2026.bion
 [Kefez/scifact-audit-bionlp2026](https://github.com/Kefez/scifact-audit-bionlp2026) at pinned
 commit `5711f3f`, CC BY 4.0) corrected 11 of our 300 claims' labels and marked 8 more debatable.
 Re-scoring the same stored answers offline (`make rag-audit`,
-[`rag_label_audit.md`](../eval/results/rag_label_audit.md)):
+[`rag_label_audit.md`](../eval/results/rag_label_audit.md) for the Mistral run; the Ling column
+is the same re-score of the Ling run as committed at `348c919`):
 
-| Labels | n | Verdict accuracy |
-|---|---|---|
-| Original SciFact labels (headline) | 300 | 0.7967 |
-| Corrected (the 11 confirmed errors) | 300 | 0.8300 |
-| Corrected, 8 debatable claims excluded | 292 | 0.8356 |
+| Labels | n | Mistral (current) | Ling (348c919) |
+|---|---|---|---|
+| Original SciFact labels (headline) | 300 | 0.7500 | 0.7967 |
+| Corrected (the 11 confirmed errors) | 300 | 0.7667 | 0.8300 |
+| Corrected, 8 debatable claims excluded | 292 | 0.7740 | 0.8356 |
 
-Read 0.830 as a **one-sided sensitivity check**, not an upper bound or a second headline. Only the
-188 evidence-bearing claims were audited, never the 112 NEI ones, so label errors there, which
-could move the score either way, were never looked for; of the 11 corrected claims, 10 go
-wrong → right and none right → wrong. The eleventh, claim 343 (SUPPORT → NEI), stays wrong: its
-answer was truncated with no verdict, which scores `NONE` under either label (it was credited
-through the judge's "not answered" call before commit 3e360cc). The corrections come from a single
-annotator, and 8 of the 11 were first flagged by an LLM, so an LLM generator agreeing with them is
-partly expected. The predictions are identical across rows, so this measures the labels, not the
-pipeline.
+Read the corrected rows as a **one-sided sensitivity check**, not an upper bound or a second
+headline. Only the 188 evidence-bearing claims were audited, never the 112 NEI ones, so label
+errors there, which could move the score either way, were never looked for. On the Mistral run,
+of the 11 corrected claims 6 go wrong → right, 1 right → wrong (claim 770, SUPPORT → NEI, which
+Mistral called SUPPORTED) and 4 stay wrong; on Ling it was 10 wrong → right and none right →
+wrong. The corrections come from a single annotator, and 8 of the 11 were first flagged by an
+LLM, so an LLM generator agreeing with them is partly expected. The predictions are identical
+across rows, so this measures the labels, not the pipeline.
 
-### 2. Blind re-labelling of the NEI disagreements (LLM annotators)
+### 2. Blind re-labelling of the NEI disagreements (LLM annotators, Ling run)
 
-The audit never looked at NEI claims, which is where most remaining errors are: 31 NEI-gold claims
-got SUPPORT (18) or CONTRADICT (13). SciFact's NEI means the one *cited* abstract has no rationale,
-while the system searches all 5,183 abstracts, so another passage may decide the claim. To test
-that, the 31 disagreements were labelled blind against exactly the passages the generator saw.
+The audit never looked at NEI claims, which is where most of Ling's errors were: 31 NEI-gold
+claims got SUPPORT (18) or CONTRADICT (13). SciFact's NEI means the one *cited* abstract has no
+rationale, while the system searches all 5,183 abstracts, so another passage may decide the claim.
+To test that, the 31 disagreements were labelled blind against exactly the passages the generator
+saw.
 
 - **Packet.** 81 items from `eval/results/rag.json` (git_sha `aa98231`): the 31 disagreements plus
   50 controls the model got right (30 NEI, 10 SUPPORT, 10 CONTRADICT), shuffled with a fixed seed.
@@ -407,7 +461,7 @@ that, the 31 disagreements were labelled blind against exactly the passages the 
 
 | Labels | n | Verdict accuracy (95% Wilson CI) |
 |---|---|---|
-| Original SciFact labels (headline) | 300 | 0.7967 (239/300) |
+| Original SciFact labels (Ling run) | 300 | 0.7967 (239/300) |
 | Annotator labels on the 31 disagreements only (one-sided, can only rise) | 300 | 0.8800 (264/300; 0.838–0.912) |
 | Annotator labels on every sampled item | 300 | 0.8767 (263/300; 0.835–0.909) |
 
@@ -419,7 +473,7 @@ corpus), the mismatch SciFact-Open (Wadden et al. 2022) documents. It does not s
 are correct, and it is not a corrected score. How much is the open-corpus mismatch was tested next
 and is smaller than this check alone suggests.
 
-### 3. Cited-abstract diagnostic (train)
+### 3. Cited-abstract diagnostic (train, Ling)
 
 An eval-only context mode gave the generator only SciFact's cited abstract(s) instead of the
 retrieved top 5. Same seeded 100 `beir/scifact/train` claims, free Ling, judge skipped.
@@ -438,7 +492,7 @@ called SUPPORT from other papers) and the cited abstract fixed all 3; of the 16 
 top 5, 4 were fixed and 12 stayed wrong. Seven NEI-gold claims are called CONTRADICT even when
 shown only the cited abstract.
 
-### 4. Second blind re-labelling (test, errors on a stance claim)
+### 4. Second blind re-labelling (test, errors on a stance claim, Ling run)
 
 A second packet (`a08a3152bfcba3d5`) of 70 items: the 30 SUPPORT/CONTRADICT-gold errors plus 40
 controls (20 NEI-gold predicted NEI, 10 SUPPORT and 10 CONTRADICT correct), excluding the first
@@ -461,21 +515,27 @@ NEI-gold controls CONTRADICT, so they lean toward finding a stance and the 18 ma
 Secondary accuracy: 0.8567 (257/300) relabelling these errors only, 0.8433 (253/300) over all
 sampled items.
 
-### Conclusion
+### Conclusion (Ling run)
 
-The remaining errors are mostly not retrieval (a ceiling of about +3 points on train; the cited
-doc in the top 5 for 88%), not code or parsing, and not mainly the open-corpus mismatch: that is
-smaller than the earlier unblinded estimate (about 25 of 61) suggested. On train only 3 errors came
-from it, and in the first blind check the cited abstract was shown in 14 of the 25 cases sided with
-the model. The main source is **where the line is drawn between NEI and a stance**. The model, and
-the LLM annotators, read the same abstract more liberally than SciFact's
+On the Ling run, the remaining errors were mostly not retrieval (a ceiling of about +3 points on
+train; the cited doc in the top 5 for 88%), not code or parsing, and not mainly the open-corpus
+mismatch: that is smaller than the earlier unblinded estimate (about 25 of 61) suggested. On train
+only 3 errors came from it, and in the first blind check the cited abstract was shown in 14 of the
+25 cases sided with the model. The main source is **where the line is drawn between NEI and a
+stance**. The model, and the LLM annotators, read the same abstract more liberally than SciFact's
 explicit-rationale-sentence convention on NEI claims (over-reading, mostly toward CONTRADICT), and
-more cautiously on some implied SUPPORT (about 11 genuine too-cautious errors). Combined over the
-61 test errors: about 43 where blind LLM annotators side with the model (25 + 18), about 17 model
-judgement errors (6 + 11), and 1 with no verdict.
+more cautiously on some implied SUPPORT (about 11 genuine too-cautious errors). Combined over
+Ling's 61 test errors: about 43 where blind LLM annotators side with the model (25 + 18), about 17
+model judgement errors (6 + 11), and 1 with no verdict.
 
 Caveats: this is an estimate from LLM annotators, not a human; the diagnostic is on train and the
 re-labellings on test, which are not the same claims; and the train deltas are within noise.
+
+**The Mistral run, as an observation only.** Its 75 errors sit on the same NEI line: 67 are a
+claim with a stance called NEI (39) or an NEI claim given a stance (28), and only 8 swap SUPPORT
+and CONTRADICT. The biggest error cell is SUPPORT → NEI (30), so Mistral errs more on the
+cautious side than Ling did. No re-labelling or diagnostic was run on these errors, so how many
+are the model's and how many the benchmark's is not known.
 
 **Implication.** Further gains on SciFact mean calibrating to its annotation convention (for
 example few-shot examples of its NEI threshold). That is benchmark calibration, not a smarter
@@ -485,10 +545,12 @@ system. A few-shot prompt was prepared but never run (see below).
 
 Everything here was measured and then removed from `main` (or, for reranking, kept only as a
 non-default mode). **Code: tag [`experiments-archive`][archive]**, which also holds the removed
-`make` targets and result files. Unless noted, results are on the 300 test claims with paired
-exact McNemar. These were scored before commit 3e360cc's scoring rules and not re-run: "0.80"
-there is the canonical run as committed at dc1816b (240/300), which differs from the current one
-only on claims 343 and 514, and "0.7767" is the same answers before the re-ask under the old rules.
+`make` targets and result files. All generator experiments here were run with the earlier free
+Ling generator, not Mistral. Unless noted, results are on the 300 test claims with paired exact
+McNemar. These were scored before commit 3e360cc's scoring rules and not re-run: "0.80" there is
+the Ling canonical run as committed at dc1816b (240/300), which differs from the final Ling run
+(348c919) only on claims 343 and 514, and "0.7767" is the same answers before the re-ask under the
+old rules.
 
 | Experiment | Verdict accuracy | Result |
 |---|---|---|
@@ -507,7 +569,7 @@ only on claims 343 and 514, and "0.7767" is the same answers before the re-ask u
 ### Paid gpt-oss-120b, paired on 50 claims
 
 Both runs predate the verdict-recovery parser, so they use the old strict parser and are not
-comparable to the 0.797 headline. Accuracy is indistinguishable; citations are the one
+comparable to the Ling run's 0.797. Accuracy is indistinguishable; citations are the one
 significant difference:
 
 | On the 50 shared claims | gpt-oss-120b (paid) | Ling | b | c | p |
@@ -602,12 +664,14 @@ consistency, not correctness.
 
 - `GET /search?q=...&mode=hybrid&top_k=8`: modes `bm25`, `dense`, `hybrid`, `hybrid_rerank`.
 - `GET /answer?q=...&top_k=5`: the grounded answer, its verdict, `verdict_source`, citations,
-  hits and `warnings`. Without a key it returns a clear 503 naming the missing variable (never
-  its value); a provider failure is a 502, not a 500.
+  hits, `model_used` (the model that answered: the primary or its fallback) and `warnings`.
+  Without a key (`SSR_MISTRAL_API_KEY` by default) it returns a clear 503 naming the missing
+  variable (never its value); a provider failure is a 502, not a 500.
 - `GET /health`, and the UI at `/`.
 
 First run downloads the SciFact corpus (~9 MB via `ir_datasets`) and the embedding model (~130 MB
-from Hugging Face); indexing takes a few minutes. Search and `make eval` need no API key.
+from Hugging Face); indexing takes a few minutes. Search and `make eval` need no API key; `/answer` needs
+`SSR_MISTRAL_API_KEY`, and `make eval-rag` also needs `SSR_OPENROUTER_API_KEY` for the judge.
 
 ### Guards and deliberate limits
 
@@ -631,11 +695,15 @@ from Hugging Face); indexing takes a few minutes. Search and `make eval` need no
   The LLM call runs outside the lock. Qdrant in server mode is the fix if that ever matters.
 - **Embedded Qdrant locks to a single process.** Don't run the API and `make eval`/`make index` at
   the same time; the second fails to acquire the storage lock.
-- **OpenRouter is free-only.** Every request to openrouter.ai passes a guard before it is sent:
-  only `:free` model ids, `allow_fallbacks: false` and a $0 `max_price`, and no `models`, `route`
-  or `plugins` fields (`app/core/llm_endpoints.py`). The provider setting decides URL, key and
-  model, and `openai_compat` refuses an openrouter.ai URL, so each key only travels to its own
-  provider. API keys are `SecretStr` settings, masked in reprs and logs.
+- **OpenRouter is free-only.** OpenRouter serves the judge by default (and the generator only if
+  `SSR_LLM_PROVIDER=openrouter`). Every request to openrouter.ai passes a guard before it is
+  sent: only `:free` model ids, `allow_fallbacks: false` and a $0 `max_price`, and no `models`,
+  `route` or `plugins` fields (`app/core/llm_endpoints.py`).
+- **Each key goes only to its own provider.** The provider setting decides URL, key and model:
+  `mistral` always uses `https://api.mistral.ai/v1` with `SSR_MISTRAL_API_KEY`, `openrouter`
+  always uses openrouter.ai with `SSR_OPENROUTER_API_KEY`, and `openai_compat` refuses an
+  openrouter.ai or api.mistral.ai URL. API keys are `SecretStr` settings, masked in reprs and
+  logs.
 - **bm25s `load()` deserializes on-disk arrays**: only point it at an index this repo built.
 
 ### Settings
@@ -646,8 +714,10 @@ ones.
 
 | Setting | Default | Purpose |
 |---|---|---|
-| `SSR_OPENROUTER_API_KEY` | empty | Key for the default provider (answers and the RAG eval) |
-| `SSR_LLM_PROVIDER` / `SSR_JUDGE_PROVIDER` | `openrouter` | `openrouter` or `openai_compat`, per role |
+| `SSR_MISTRAL_API_KEY` | empty | Key for the default generator (answers and the RAG eval) |
+| `SSR_MISTRAL_LLM_MODEL` / `SSR_MISTRAL_LLM_FALLBACK_MODEL` | `ministral-14b-latest` / `ministral-8b-latest` | Generator and its one-shot fallback (`""` turns the fallback off) |
+| `SSR_OPENROUTER_API_KEY` | empty | Key for the default judge (RAG eval only), or the generator with `SSR_LLM_PROVIDER=openrouter` |
+| `SSR_LLM_PROVIDER` / `SSR_JUDGE_PROVIDER` | `mistral` / `openrouter` | Generator: `mistral`, `openrouter` or `openai_compat`; judge: `openrouter` or `openai_compat` |
 | `SSR_LLM_BASE_URL` / `SSR_LLM_API_KEY` / `SSR_LLM_MODEL` / `SSR_JUDGE_MODEL` | Groq URL, empty, model ids | Used only by `openai_compat` |
 | `SSR_LLM_MAX_COMPLETION_TOKENS` | 2048 | Generation budget (one retry at 2×) |
 | `SSR_LLM_REASONING_EFFORT` | `auto` | `auto` sends nothing; any other value is passed through |
@@ -658,14 +728,17 @@ ones.
 | `SSR_EVAL_REFRESH`, `SSR_EVAL_LIMIT` | unset | Eval: ignore caches / smoke subset |
 | `SSR_RAG_N`, `SSR_RAG_DATASET`, `SSR_RAG_CHECK_QUOTA`, `SSR_RAG_THROTTLE_S` | 50, test split, off, provider-aware | Answer eval sample, split, quota check, pacing |
 
-The OpenRouter model ids (`openrouter_llm_model`, `openrouter_judge_model`) are code defaults; a
-run that overrides either is never canonical.
+The model ids (`mistral_llm_model`, `openrouter_judge_model`) are code defaults; a run that
+overrides either is never canonical. `openrouter_llm_model` still holds the withdrawn Ling id as
+the record of the earlier run; set `SSR_OPENROUTER_LLM_MODEL` to a live `:free` model to use
+OpenRouter as the generator.
 
 ### Docker
 
 The `Dockerfile` packages the API only (no docker-compose: Qdrant runs embedded). Mount the
 built index at runtime (`-v "$PWD/data:/app/data"`) or build it inside the container, and pass
-`SSR_OPENROUTER_API_KEY` with `-e` at run time; never bake it into the image. The base image is
+`SSR_MISTRAL_API_KEY` with `-e` at run time (plus `SSR_OPENROUTER_API_KEY` only for the eval's
+judge); never bake a key into the image. The base image is
 digest-pinned and the install uses the exact `uv.lock`.
 
 ## Limitations
@@ -678,29 +751,40 @@ digest-pinned and the install uses the exact `uv.lock`.
 - **NEI labelling.** For the 112 NEI claims, BEIR's qrels mark the cited abstract relevant even
   though annotators found no rationale in it, and the whole hybrid-vs-dense recall gain (itself
   only suggestive: sign test p = 0.065) sits on that stratum.
-- **300 claims still leave a ~5-point interval on RAG accuracy** (0.797 ± 0.045), so a gap of a
-  few points between two runs means nothing on its own; compare runs claim by claim with
-  `make rag-compare`. The re-ask gain (+7 claims, raw p = 0.016) rests on 15 re-asked claims (16
-  under the current rules) and is borderline once the other variants are counted (Holm
-  0.047–0.078). The interval also ignores generator nondeterminism.
-- **The test set has been reused** ([details](#test-set-reuse)), so 0.80 is no longer a clean
-  held-out number.
+- **300 claims still leave a ~5-point interval on RAG accuracy** (0.750, 95% CI 0.698–0.796),
+  so a gap of a few points between two runs means nothing on its own; compare runs claim by claim
+  with `make rag-compare`. The Ling → Mistral drop of 4.7 points is exactly that case (p = 0.06).
+  The re-ask gain on Ling (+7 claims, raw p = 0.016) rests on 15 re-asked claims (16 under the
+  current rules) and is borderline once the other variants are counted (Holm 0.047–0.078). The
+  interval also ignores generator nondeterminism.
+- **The test set has been reused** ([details](#test-set-reuse)): the parser and re-ask were
+  chosen on these claims (on Ling), so 0.750 is not a clean held-out number.
+- **Mistral leans on the re-ask.** ministral-14b leaves out the `Verdict:` line often enough that
+  the re-ask fires on 61 of 300 claims (Ling: 16). It recovers every one, but that is an extra
+  request per claim and a dependence on the recovery steps, not a fix.
 - **The label checks are secondary.** The audit is one annotator, mostly LLM-flagged, with no NEI
-  claims audited; the re-labellings use LLM annotators, not humans. Neither replaces the headline.
+  claims audited; the re-labellings use LLM annotators, not humans, and were run on Ling's
+  errors, not Mistral's. Neither replaces the headline.
 - **One judge model.** Faithfulness and context relevance come from a single judge with no human
   labels to check it against; its repeat consistency was measured, not its correctness.
   Faithfulness from the oldest Qwen-judged run is not comparable with the Nemotron-judged runs.
-- **Free models can disappear.** Both defaults are OpenRouter `:free` variants; the previous
-  judge's free variant became unavailable (0 of 4 calls). If Ling or Nemotron goes the same way,
-  the model must change and the eval be re-run (any `openai_compat` endpoint can stand in).
+- **Free models can disappear.** It has already happened twice: the previous judge's free variant
+  became unavailable (0 of 4 calls), and the Ling generator was withdrawn in October 2026, which
+  forced the move to Mistral and a new canonical run. The judge is still an OpenRouter `:free`
+  model and the generator depends on Mistral's free tier; if either goes, the model must change
+  and the eval be re-run (any `openai_compat` endpoint can stand in).
 
 ## What I'd do next
 
 - **Calibrate to the benchmark, and say so.** Most remaining errors sit on SciFact's NEI line; a
   few-shot prompt showing its threshold, screened on unused train claims first, is the obvious
   next step. It would be benchmark calibration, not a smarter system.
-- **Confirm 0.80 on fresh claims** never used for development, and repeat the run a few times to
-  measure generator noise.
+- **Get the verdict line on the first reply.** ministral-14b needs the re-ask on 61 of 300
+  claims; a prompt or format change that fixes that should be screened on train claims first.
+- **Confirm the score on fresh claims** never used for development, and repeat the run a few
+  times to measure Mistral's run-to-run noise.
+- **Re-run the error diagnosis on Mistral's errors**; the blind re-labellings were done on
+  Ling's.
 - **Human spot-checks**: of the LLM re-labels, and of faithfulness on rows where judge repeats
   disagreed.
 - **Stratified reporting by default**: report every retrieval comparison by claim label, not
@@ -709,12 +793,12 @@ digest-pinned and the install uses the exact `uv.lock`.
 ## Code layout
 
 ```
-app/core       config (pydantic-settings, SSR_ prefix) · interfaces (Retriever/Reranker/Generator Protocols) · llm_endpoints (provider -> URL/key/model + OpenRouter free-only guard) · paths
+app/core       config (pydantic-settings, SSR_ prefix) · interfaces (Retriever/Reranker/Generator Protocols) · llm_endpoints (provider mistral/openrouter/openai_compat -> URL/key/model + OpenRouter free-only guard) · paths
 app/ingest     corpus (BEIR/SciFact via ir_datasets, + claim labels from the source zip) · build_index
 app/index      embedder (bge-small) · vector_store (Qdrant embedded) · lexical (bm25s)
 app/retrieve   dense · fusion (RRF) · service (SearchService, the single retrieval entry point)
 app/rerank     cross_encoder (MS-MARCO MiniLM default; bge-reranker-base evaluated)
-app/generate   generator (OpenAI-compatible client, verdict parser, re-ask) · prompts (grounded prompt + injection sanitizer)
+app/generate   generator (OpenAI-compatible client, ministral-8b fallback, verdict parser, re-ask) · prompts (grounded prompt + injection sanitizer)
 app/eval       retrieval_eval · analysis · latency · rag_eval · reply_cache · rag_compare · rag_rescore · label_audit
 app/schemas    api (Pydantic request/response models)
 app/api        main (FastAPI: /search, /answer, rate-limited)

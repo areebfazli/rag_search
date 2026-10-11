@@ -10,23 +10,29 @@ papers it used. Retrieval is hand-rolled (keyword search + embeddings, fused), t
 from free models, so running it costs $0, and every headline number is measured against the
 benchmark's expert labels.
 
-![The search UI after a hybrid search for "Vitamin D deficiency increases the risk of multiple sclerosis", showing ranked SciFact abstracts with scores](docs/ui.png)
+In the UI you type a claim and press **Check claim**: one click returns a verdict card (the
+verdict, the model that answered, a cited explanation and the five papers it read) above the
+ranked list of matching papers.
+
+![The UI after checking "Vitamin D deficiency increases the risk of multiple sclerosis": the claim box and the single Check claim button, a Verdict card marked SUPPORTED and answered by ministral-14b-latest with numbered citations, and the start of the ranked SciFact abstracts](docs/ui.png)
 
 ## Results
 
 All numbers are on the 300 SciFact test claims with default settings, and each one comes from a
-committed file in [`eval/results/`](eval/results/).
+committed file in [`eval/results/`](eval/results/). Answers come from Mistral's free
+`ministral-14b-latest` (every one of the 300 in the canonical run; `ministral-8b-latest` is the
+fallback if a call fails), and a free Nemotron 3 Ultra model on OpenRouter is the judge.
 
 | What is measured | Result | Source |
 |---|---|---|
 | Right paper in the top 10 results (Recall@10) | 0.855 | [`retrieval.md`](eval/results/retrieval.md) |
 | Right paper in the top 100 results (Recall@100) | 0.965 | [`retrieval.md`](eval/results/retrieval.md) |
 | Ranking quality (nDCG@10) | 0.724 | [`retrieval.md`](eval/results/retrieval.md) |
-| Correct verdict (support / contradict / not enough evidence) | **0.797** (239 of 300; 95% CI 0.748–0.838) | [`rag.md`](eval/results/rag.md), [`rag_label_audit.md`](eval/results/rag_label_audit.md) |
-| Correct verdict under a published label audit (one-sided check, not the headline) | 0.830 | [`rag_label_audit.md`](eval/results/rag_label_audit.md) |
-| When it abstains, the papers really lacked evidence (abstention precision) | 0.83 | [`rag.md`](eval/results/rag.md) |
-| Answers citing at least one paper | 282 of 300 | [`rag.json`](eval/results/rag.json) |
-| Answers that stick to the papers (faithfulness, LLM judge, 193 answers) | 0.98 | [`rag.md`](eval/results/rag.md) |
+| Correct verdict (support / contradict / not enough evidence) | **0.750** (225 of 300; 95% CI 0.698–0.796) | [`rag.md`](eval/results/rag.md), [`rag_label_audit.md`](eval/results/rag_label_audit.md) |
+| Correct verdict under a published label audit (one-sided check, not the headline) | 0.767 | [`rag_label_audit.md`](eval/results/rag_label_audit.md) |
+| When it abstains, the papers really lacked evidence (abstention precision) | 0.76 | [`rag.md`](eval/results/rag.md) |
+| Answers citing at least one paper | 281 of 300 | [`rag.json`](eval/results/rag.json) |
+| Answers that stick to the papers (faithfulness, LLM judge, 177 answers) | 0.99 | [`rag.md`](eval/results/rag.md) |
 | Search time per query (laptop CPU) | 0.124 s | [`latency.md`](eval/results/latency.md) |
 | Cost of the full 300-claim answer evaluation | $0 | [`rag.json`](eval/results/rag.json) (`cost`) |
 
@@ -39,49 +45,68 @@ committed file in [`eval/results/`](eval/results/).
   claims differ (9 better, 2 worse; sign test p = 0.065, suggestive, not significant), and all of
   them are claims the dataset says have no evidence, so fusion does not find more evidence.
   [Details](docs/DETAILS.md#retrieval).
-- **Verdicts are right 79.7% of the time, and most remaining errors are about where SciFact draws
-  the "not enough evidence" (NEI) line.** Of the 61 wrong verdicts, 31 are NEI claims the model
-  answered anyway and 22 are supported/contradicted claims it declined to call. Secondary checks
-  point away from retrieval and code: on 100 train claims, the paper SciFact cites was already in
-  the top 5 for 88, and giving the model only that paper moved accuracy 0.81 → 0.84 (within
-  noise, p = 0.55). Two blind re-labellings by three LLM annotators (not a human) sided with the
-  model on about 43 of the 61 test errors and with the benchmark on about 17. Further gains on
-  SciFact would mostly be calibrating to its labelling convention, not a smarter system.
+- **Verdicts are right 75.0% of the time (225 of 300).** Of the 75 wrong verdicts, 39 are
+  supported/contradicted claims the model declined to call (30 of them supported claims, the
+  largest error cell) and 28 are "not enough evidence" (NEI) claims it answered anyway.
+- **The answer model changed, and the score difference is not significant.** The project was
+  built on the free Ling 3.0 Flash Sante model on OpenRouter, which scored 0.797 (239 of 300,
+  git `348c919`) and was withdrawn upstream in October 2026. It now uses Mistral's free
+  `ministral-14b-latest`. On the same 300 claims, Ling was right on 31 claims Mistral got wrong
+  and Mistral on 17 that Ling got wrong: McNemar p = 0.06, not significant. Abstention
+  (p = 0.58) and citation rate (p = 1.0) don't move either.
+  [Details](docs/DETAILS.md#the-generator-change-ling-to-mistral).
+- **On the Ling run, most errors were about where SciFact draws the NEI line.** Secondary checks
+  on that run pointed away from retrieval and code: on 100 train claims, the paper SciFact cites
+  was already in the top 5 for 88, and giving the model only that paper moved accuracy
+  0.81 → 0.84 (within noise, p = 0.55). Two blind re-labellings by three LLM annotators (not a
+  human) sided with the model on about 43 of Ling's 61 test errors and with the benchmark on
+  about 17. These checks were not repeated on Mistral, whose errors sit in the same place (the
+  biggest cell is supported claims called NEI). Further gains on SciFact would mostly be
+  calibrating to its labelling convention, not a smarter system.
   [Diagnosis](docs/DETAILS.md#diagnosis-where-the-remaining-errors-come-from).
 - **The headline stays on the original labels.** A published 2026 audit corrects 11 of the 300
-  test labels; scored against it, accuracy is 0.830, but the audit skipped NEI claims and 10 of its
-  11 changes favour the model, so that is a one-sided sensitivity check. The LLM re-labellings are
-  weaker evidence still: the annotators may share the generator's reading of the papers.
-- **The test set has been reused.** The verdict parser and the re-ask step behind 0.797 were
-  chosen with these same 300 claims in view, and several variants were scored on them, so they
-  are no longer a clean held-out set; the re-ask's gain (7 fixed, 0 broken, raw p = 0.016) is
-  borderline after correction. [Details](docs/DETAILS.md#test-set-reuse).
+  test labels; scored against it, accuracy is 0.767 (6 of the changed claims go wrong → right,
+  1 right → wrong), but the audit skipped NEI claims, so that is a one-sided sensitivity check.
+  The LLM re-labellings are weaker evidence still: the annotators may share the generator's
+  reading of the papers.
+- **The test set has been reused.** The verdict parser and the re-ask step were chosen on the
+  Ling run with these same 300 claims in view, and several variants were scored on them, so they
+  are no longer a clean held-out set; the re-ask's gain on Ling (7 fixed, 0 broken, raw
+  p = 0.016) is borderline after correction. The Mistral run is a single run of that existing
+  pipeline, with nothing tuned on it. [Details](docs/DETAILS.md#test-set-reuse).
+- **Mistral often skips the `Verdict:` line.** The re-ask step (one verdict-only follow-up call)
+  fired on 61 of 300 claims, against 16 on Ling, because ministral-14b often answers in prose
+  without the final verdict line; every re-ask returned a verdict (42 of 61 correct). Getting the
+  line on the first reply is an open next step, not something fixed here.
 
 ## Tried, measured, not shipped
 
-Each was measured on the same harness and left out of the product. The code is preserved in the
+Each was measured on the same harness, on the earlier Ling run, and left out of the product.
+The code is preserved in the
 git tag [`experiments-archive`](https://github.com/areebfazli/rag_search/tree/experiments-archive);
 full results are in [DETAILS](docs/DETAILS.md#tried-and-not-shipped).
 
 | Idea | Result |
 |---|---|
 | Cross-encoder reranking | `bge-reranker-base` ties plain hybrid (nDCG@10 +0.0001, p = 0.996) at 23.4 s/query vs 0.124 s; MS-MARCO MiniLM scores lower (−0.027, p = 0.056). Still callable as `mode=hybrid_rerank` in the API and eval, off by default |
-| Paid generators | GPT-6 Luna: 0.71 vs 0.7767 for free Ling (both without the re-ask; p = 0.012). gpt-oss-120b: indistinguishable on 50 claims (0.78 vs 0.76, p = 1.00) but cited a paper far less often (0.42 vs 0.94, p < 0.0001) |
+| Paid generators | GPT-6 Luna: 0.71 vs 0.7767 for the free Ling generator then in use (both without the re-ask; p = 0.012). gpt-oss-120b: indistinguishable on 50 claims (0.78 vs 0.76, p = 1.00) but cited a paper far less often (0.42 vs 0.94, p < 0.0001) |
 | Web search (Semantic Scholar + PubMed) | Right paper in top 5 / top 100: 0.228 / 0.384, vs 0.766 / 0.965 for local search |
 | Verifier models | Off-the-shelf DeBERTa NLI: 0.64. Fine-tuned PubMedBERT combined with the generator: 0.787 vs 0.777 (p = 0.65) |
 | Second look, voting, prompt variants | Second look adds nothing on top of the re-ask (p = 0.75); 3-sample voting 0.82 vs 0.81 on train (p = 1.00, 3x calls); evidence-first and "finding" prompts 0.847 vs 0.837 (p = 1.0) and 0.83 vs 0.81 (p = 0.73) on train |
 
 ## Quick start
 
-You need `git`, `make`, [uv](https://docs.astral.sh/uv/) (it installs Python 3.12 if missing),
-about 2 GB of disk, and, for answers only, a free [OpenRouter](https://openrouter.ai/) API key.
-Search works without a key.
+You need `git`, `make`, [uv](https://docs.astral.sh/uv/) (it installs Python 3.12 if missing)
+and about 2 GB of disk. Search needs no key. Verdicts need a free
+[Mistral](https://console.mistral.ai/) API key (`SSR_MISTRAL_API_KEY`); the answer evaluation
+also needs a free [OpenRouter](https://openrouter.ai/) key (`SSR_OPENROUTER_API_KEY`) for the
+judge.
 
 ```bash
 git clone https://github.com/areebfazli/rag_search.git
 cd rag_search
 make install          # Python 3.12 env + dependencies (uv sync)
-cp .env.example .env  # then set SSR_OPENROUTER_API_KEY=sk-or-...
+cp .env.example .env  # then set SSR_MISTRAL_API_KEY (and SSR_OPENROUTER_API_KEY for make eval-rag)
 make index            # one-time: download SciFact + the embedding model, build the indices (~5 min)
 make api              # open http://localhost:8000
 ```
@@ -97,15 +122,17 @@ as `make eval` or `make index`.
 | `make eval` | Retrieval metrics on the 300 test claims → `eval/results/retrieval.md` (no key needed) |
 | `make analysis` | Re-score the cached retrieval runs by claim label → `eval/results/analysis.md` |
 | `make latency` | Per-query search time for every configuration → `eval/results/latency.md` |
-| `make eval-rag` | Answer-quality eval: 50 claims by default → `data/eval_runs/`. `SSR_RAG_N=all make eval-rag` runs all 300 (about 670 free requests, ~1.5 h) and is the only run that writes `eval/results/rag.md`; add `SSR_RAG_CHECK_QUOTA=1` to stop up front if today's free quota is short |
+| `make eval-rag` | Answer-quality eval (needs both keys): 50 claims by default → `data/eval_runs/`. `SSR_RAG_N=all make eval-rag` runs all 300 (the canonical run made about 360 Mistral requests and 305 free OpenRouter judge requests) and is the only run that writes `eval/results/rag.md`; add `SSR_RAG_CHECK_QUOTA=1` to stop up front if today's free OpenRouter quota is short |
 | `make rag-compare A=a/rag.json B=b/rag.json` | Claim-by-claim significance test (exact McNemar) between two answer runs |
 | `make rag-audit` | Re-score the answers under the published label audit (offline) → `eval/results/rag_label_audit.md` |
 | `make test` / `make lint` / `make ci` | Unit tests / ruff / both, as CI runs them |
 
-OpenRouter's free tier allows 1,000 requests a day only on accounts that have bought at least $10
-of credits at some point. A run that hits the limit stops, and re-running the same command
-resumes it. Any OpenAI-compatible endpoint (Groq, Ollama, OpenAI) can replace the defaults; see
-[`.env.example`](.env.example).
+The judge's limit is the one to watch in the evaluation: OpenRouter's free tier allows 1,000
+requests a day only on accounts that have bought at least $10 of credits at some point (50
+otherwise), and a 300-claim run needs about 305 judge requests. Mistral's free tier allows 30
+requests a minute, which the run's throttle stays under. A run that hits a limit stops, and
+re-running the same command resumes it. Any OpenAI-compatible endpoint (Groq, Ollama, OpenAI)
+can replace either role; see [`.env.example`](.env.example).
 
 ## Architecture
 
@@ -113,7 +140,7 @@ resumes it. Any OpenAI-compatible endpoint (Groq, Ollama, OpenAI) can replace th
 claim ─┬─► BM25 (bm25s)            top-100 ─┐
        └─► bge-small + Qdrant      top-100 ─┴─► RRF fusion ─► top-5 ─► grounded prompt
                                                                          │
-           free Ling 3.0 Flash Sante (OpenRouter) ◄──────────────────────┘
+     free Mistral ministral-14b (8b fallback) ◄──────────────────────────┘
                  │
                  └─► answer with [n] citations + Verdict: SUPPORTED | REFUTED | NOT ENOUGH EVIDENCE
                      (verdict parser; one verdict-only re-ask if a claim gets no verdict)
@@ -122,11 +149,14 @@ claim ─┬─► BM25 (bm25s)            top-100 ─┐
 - `app/retrieve`: BM25, dense and hand-written RRF fusion behind one `SearchService`, shared by
   the API and the eval harness so both run identical code.
 - `app/generate`: OpenAI-compatible client, grounded prompt with an injection sanitizer, verdict
-  parser and re-ask. OpenRouter requests pass a free-only guard (`app/core/llm_endpoints.py`).
+  parser, re-ask and a one-shot fallback to `ministral-8b-latest`. Each key only goes to its own
+  provider, and OpenRouter requests pass a free-only guard (`app/core/llm_endpoints.py`).
 - `app/eval`: retrieval eval (ranx, paired significance tests), answer eval (verdicts scored
-  against SciFact labels; a free Nemotron 3 Ultra judge, from a different model family, for
-  faithfulness), McNemar comparisons, label audit, latency.
-- `app/api` + `frontend/`: FastAPI (`/search`, `/answer`, per-IP rate limits) and a vanilla JS UI.
+  against SciFact labels; a free Nemotron 3 Ultra judge on OpenRouter, from a different model
+  family (Nvidia) than the Mistral generator, for faithfulness), McNemar comparisons, label
+  audit, latency.
+- `app/api` + `frontend/`: FastAPI (`/search`, `/answer`, per-IP rate limits) and a vanilla JS UI
+  where one **Check claim** button runs both.
 
 ## More detail
 
