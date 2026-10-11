@@ -1,13 +1,23 @@
 """LLM answer generation over the OpenAI-compatible interface.
 
 Points at the endpoint app.core.llm_endpoints resolves for the generator role
-(free models on OpenRouter by default, under its free-only guard; Groq, Ollama or another
+(Mistral's free-tier ministral-14b by default; free models on OpenRouter under its
+free-only guard via SSR_LLM_PROVIDER=openrouter; Groq, Ollama or another
 OpenAI-compatible backend via SSR_LLM_PROVIDER=openai_compat + SSR_LLM_BASE_URL, with no
 code change). Maps the model's [n] citations back to
 document ids so answers are traceable to sources, and parses the optional final
 verdict line (claims only) into Answer.verdict.
 
-On a reasoning model (gpt-oss; the default free Ling generator also reasons by default)
+Fallback model: when the primary model's generation fails with an availability error
+(should_fall_back: 429 after the SDK retries, 5xx, 403 / 404, a timeout or connection
+error, an HTTP 200 with no completion), generate() retries the whole generation ONCE with
+the endpoint's fallback model (llm_endpoints.fallback_model_id: ministral-8b on the
+default Mistral provider; none elsewhere), same endpoint and key. The answer records the
+model that replied (GeneratedAnswer.model_used) and the error that caused the fallback.
+If the fallback fails too, the PRIMARY's error is raised, as without a fallback. The
+verdict-only re-ask goes to the model that answered.
+
+On a reasoning model (gpt-oss; the earlier free Ling generator also reasoned by default)
 the hidden reasoning is billed against the same completion budget as the answer, so a
 too-small budget truncates the reply — possibly to nothing. generate() reads finish_reason, retries a truncated reply once with a
 larger budget, and flags one that is still cut off instead of passing it off as whole.
@@ -29,7 +39,7 @@ import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from openai import APIStatusError, OpenAI, OpenAIError
+from openai import APIConnectionError, APIStatusError, OpenAI, OpenAIError
 
 from app.core.config import settings
 from app.core.llm_endpoints import (
@@ -39,6 +49,7 @@ from app.core.llm_endpoints import (
     build_client,
     completion_choice,
     endpoint_for_url,
+    fallback_model_id,
     resolve_endpoint,
     response_cost,
     response_provider,
@@ -563,9 +574,9 @@ TRUNCATION_RETRY_FACTOR = 2  # one retry, at twice the configured budget
 
 # --- the verdict-only re-ask --------------------------------------------------------------
 #
-# One call, no truncation retry (the budget is the retry): Ling reasons by default and the
-# replies that needed a re-ask had spent all 4,096 retry tokens reasoning; Ling's endpoint
-# allows 32,768 completion tokens. Frozen with the prompt (prompts.REASK_SYSTEM).
+# One call, no truncation retry (the budget is the retry): the earlier Ling generator
+# reasoned by default and the replies that needed a re-ask had spent all 4,096 retry tokens
+# reasoning. Frozen with the prompt (prompts.REASK_SYSTEM).
 REASK_MAX_TOKENS = 8192
 # Timeout / retry policy. Every generation request goes through the generator's client,
 # built in __init__ with CLIENT_TIMEOUT_S and an explicit SDK max_retries (never the SDK's
@@ -793,6 +804,27 @@ class GeneratedAnswer(Answer):
     reask_attempted: bool = False
     reask: ReaskReply | None = None
     reask_error: str | None = None
+    # The model that produced this answer (the endpoint's primary, or its fallback), and —
+    # when the fallback answered — the error CLASS name that made the primary fail.
+    model_used: str | None = None
+    fallback_error: str | None = None
+
+
+# HTTP statuses that say "this model is unavailable right now (or on this tier)", not "the
+# request is wrong" (400 / 422) or "the key is wrong" (401: the fallback shares the key).
+FALLBACK_STATUSES = frozenset({403, 404, 408, 409, 429})
+
+
+def should_fall_back(e: BaseException) -> bool:
+    """True for an availability error the fallback model may not share: a 429 that
+    outlasted the SDK's retries, any 5xx, 403 (e.g. a tier that does not include the
+    model), 404 (model withdrawn), 408 / 409, a timeout or connection error, or an HTTP
+    200 with no completion (EmptyCompletionError)."""
+    if isinstance(e, EmptyCompletionError | APIConnectionError):  # APITimeoutError included
+        return True
+    if isinstance(e, APIStatusError):
+        return e.status_code in FALLBACK_STATUSES or e.status_code >= 500
+    return False
 
 
 # Sent with every generation and re-ask request (the value every committed number was
@@ -853,10 +885,15 @@ class LLMGenerator:
         reask: bool | None = None,
         max_retries: int = CLIENT_MAX_RETRIES,
         reask_max_retries: int = API_REASK_MAX_RETRIES,
+        fallback_model: str | None | object = ...,
     ):
         # Where requests go. An explicit endpoint wins; an explicit base_url builds one
         # whose provider (and default key) follows that URL; otherwise the settings
         # decide (llm_endpoints.resolve_endpoint). `model` overrides the model id only.
+        # The fallback model (one retry of a failed generation) comes from the settings
+        # only when they also chose the endpoint; otherwise only when passed explicitly
+        # (None disables it).
+        from_settings = endpoint is None and base_url is None and model is None
         if endpoint is None:
             if base_url is not None:
                 endpoint = endpoint_for_url(
@@ -875,6 +912,11 @@ class LLMGenerator:
         endpoint.check()  # free-only guard: refuse a disallowed model before any request
         self.endpoint = endpoint
         self.model = endpoint.model
+        if fallback_model is ...:
+            fallback_model = fallback_model_id("generator", provider=endpoint.provider) if from_settings else None
+        self.fallback_model = fallback_model if fallback_model and fallback_model != self.model else None
+        if self.fallback_model:
+            endpoint.check(model=self.fallback_model)  # the same guard for the fallback id
         self.max_completion_tokens = max_completion_tokens or settings.llm_max_completion_tokens
         self.reasoning_effort = resolve_reasoning_effort(
             settings.llm_reasoning_effort if reasoning_effort is None else reasoning_effort
@@ -904,46 +946,54 @@ class LLMGenerator:
             with_options(timeout=REASK_TIMEOUT_S, max_retries=self.reask_max_retries), self.endpoint
         )
 
-    def _complete(self, messages: list[dict], max_tokens: int, client=None):
+    def _complete(self, messages: list[dict], max_tokens: int, client=None, model: str | None = None):
         # Reasoning rides in extra_body and only when resolved, in the provider's own
         # form: it is a passthrough, and a backend that doesn't know it must never see
         # it. OpenRouter requests also carry the endpoint's free provider routing, and
         # the free-only guard is checked here as well as in the client wrapper, so it
         # holds even if self.client is swapped out.
+        model = model or self.model
         body = {**reasoning_params(self.endpoint.provider, self.reasoning_effort),
                 **self.endpoint.extra_body()}
-        self.endpoint.check(model=self.model, body=body)
+        self.endpoint.check(model=model, body=body)
         extra: dict = {"extra_body": body} if body else {}
         extra["temperature"] = GENERATION_TEMPERATURE
         return (client or self.client).chat.completions.create(
-            model=self.model,
+            model=model,
             messages=messages,
             max_tokens=max_tokens,
             **extra,
         )
 
-    def _complete_counted(self, messages: list[dict], max_tokens: int, costs: list[float | None]):
+    def _complete_counted(
+        self, messages: list[dict], max_tokens: int, costs: list[float | None], model: str | None = None
+    ):
         """_complete, with an OpenAIError carrying ``cost_usd``: what this generation's
         earlier attempts reported costing plus the failed one — 0 for an HTTP error status
         (an error response is not a billed completion), unknown (None) for a timeout or
         connection error (the provider may have generated and billed). None overall if
         any part is unknown."""
         try:
-            return self._complete(messages, max_tokens)
+            return self._complete(messages, max_tokens, model=model)
         except OpenAIError as e:
             failed = 0.0 if isinstance(e, APIStatusError) else None
             parts = [*costs, failed]
             e.cost_usd = None if any(c is None for c in parts) else sum(parts)
             raise
 
-    def reask_verdict(self, query: str, hits: Sequence[SearchHit]) -> ReaskReply:
+    def reask_verdict(
+        self, query: str, hits: Sequence[SearchHit], model: str | None = None
+    ) -> ReaskReply:
         """Exactly one verdict-only call (prompts.reask_messages, REASK_MAX_TOKENS) through
         the same _complete as generation: same endpoint, free-only check, provider
         routing and params (temperature / reasoning), with the re-ask's own
         timeout / retry policy (REASK_TIMEOUT_S, REASK_MAX_RETRIES) whichever caller sends
         it. Raises like any call (EmptyCompletionError for a 200 with no completion); what
-        happens then is the caller's (see REASK_TIMEOUT_S)."""
-        resp = self._complete(reask_messages(query, hits), REASK_MAX_TOKENS, self._reask_client())
+        happens then is the caller's (see REASK_TIMEOUT_S). `model`: the model that gave the
+        first answer (default: the primary); the re-ask never falls back."""
+        resp = self._complete(
+            reask_messages(query, hits), REASK_MAX_TOKENS, self._reask_client(), model=model
+        )
         cost = response_cost(resp)
         choice = _choice_or_raise(resp, [cost])
         completion_tokens, reasoning_tokens = _usage_counts(resp)
@@ -965,23 +1015,25 @@ class LLMGenerator:
             {"role": "system", "content": SYSTEM},
             {"role": "user", "content": build_user_prompt(query, hits)},
         ]
-        # finish_reason "length" means the budget ran out mid-reply (on a reasoning model
-        # it can run out before the first answer token). One retry at a larger budget
-        # recovers the common case at the cost of one extra call, only when needed;
-        # retrying further would just burn quota on a reply that is pathologically long.
-        budget = self.max_completion_tokens
         costs: list[float | None] = []
-        resp = self._complete_counted(messages, budget, costs)
-        attempts = 1
-        costs.append(response_cost(resp))
-        choice = _choice_or_raise(resp, costs)
-        if choice.finish_reason == "length":
-            # A failure here must not lose what the first attempt was billed: the
-            # exception carries it (cost_usd), as an empty completion's already does.
-            resp = self._complete_counted(messages, budget * TRUNCATION_RETRY_FACTOR, costs)
-            attempts = 2
-            costs.append(response_cost(resp))
-            choice = _choice_or_raise(resp, costs)
+        model_used, fallback_error = self.model, None
+        try:
+            resp, choice, attempts = self._reply(messages, costs, self.model)
+        except (OpenAIError, EmptyCompletionError) as e:
+            if not self.fallback_model or not should_fall_back(e):
+                raise
+            # The whole generation once more on the fallback model. What the primary's
+            # attempts cost (e.cost_usd, None if unknown) is carried over; if the fallback
+            # fails too, the PRIMARY's error is what the caller sees, carrying both costs.
+            costs = [getattr(e, "cost_usd", None)]
+            try:
+                resp, choice, attempts = self._reply(messages, costs, self.fallback_model)
+            except (OpenAIError, EmptyCompletionError) as fb:
+                # fb.cost_usd already sums `costs` (the primary's) and the fallback's own.
+                e.cost_usd = fb.cost_usd if hasattr(fb, "cost_usd") else costs[0]
+                e.fallback_error = type(fb).__name__
+                raise e from None
+            model_used, fallback_error = self.fallback_model, type(e).__name__
         truncated = choice.finish_reason == "length"
         raw = normalize_citations((choice.message.content or "").strip())
         # A cut-off reply can't have been cut inside a valid verdict line (the whole line
@@ -1003,7 +1055,7 @@ class LLMGenerator:
         if self.reask_enabled and needs_reask(query, verdict):
             reask_attempted = True
             try:
-                reask = self.reask_verdict(query, hits)
+                reask = self.reask_verdict(query, hits, model=model_used)
             except EmptyCompletionError as e:
                 costs.append(e.cost_usd)  # the re-ask's own reported cost (None if unknown)
                 reask_error = type(e).__name__
@@ -1039,4 +1091,29 @@ class LLMGenerator:
             reask_attempted=reask_attempted,
             reask=reask,
             reask_error=reask_error,
+            model_used=model_used,
+            fallback_error=fallback_error,
         )
+
+    def _reply(self, messages: list[dict], costs: list[float | None], model: str):
+        """(response, choice, attempts) of one model's reply: a first call, plus one retry
+        at TRUNCATION_RETRY_FACTOR x the budget when it was cut off. `costs` collects each
+        attempt's reported cost; an error raised here carries the running total
+        (cost_usd)."""
+        # finish_reason "length" means the budget ran out mid-reply (on a reasoning model
+        # it can run out before the first answer token). One retry at a larger budget
+        # recovers the common case at the cost of one extra call, only when needed;
+        # retrying further would just burn quota on a reply that is pathologically long.
+        budget = self.max_completion_tokens
+        resp = self._complete_counted(messages, budget, costs, model)
+        attempts = 1
+        costs.append(response_cost(resp))
+        choice = _choice_or_raise(resp, costs)
+        if choice.finish_reason == "length":
+            # A failure here must not lose what the first attempt was billed: the
+            # exception carries it (cost_usd), as an empty completion's already does.
+            resp = self._complete_counted(messages, budget * TRUNCATION_RETRY_FACTOR, costs, model)
+            attempts = 2
+            costs.append(response_cost(resp))
+            choice = _choice_or_raise(resp, costs)
+        return resp, choice, attempts

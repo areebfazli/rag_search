@@ -156,7 +156,9 @@ def test_answer_serves_the_reask_verdict_through_the_real_generator(monkeypatch)
     body = r.json()
     assert (body["verdict"], body["verdict_source"]) == ("REFUTED", "reask")
     assert body["answer"] == REASK_NOTE and body["citations"] == []
-    assert set(body) == {"query", "answer", "citations", "hits", "verdict", "verdict_source", "warnings"}
+    assert set(body) == {"query", "answer", "citations", "hits", "verdict", "verdict_source",
+                         "model_used", "warnings"}
+    assert body["model_used"] == "m"  # the model that wrote the answer
 
 
 # --- answer warnings: re-ask failures -------------------------------------------------

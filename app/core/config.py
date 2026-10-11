@@ -1,7 +1,7 @@
 """Central configuration. All settings are overridable via SSR_-prefixed env vars
-(or a .env file), so the same code runs against OpenRouter's free tier or any
-OpenAI-compatible endpoint (Groq, a local Ollama, OpenAI) with no edits — just a
-different provider / base URL.
+(or a .env file), so the same code runs against Mistral's free tier (the default
+generator), OpenRouter's free tier (the default judge) or any OpenAI-compatible endpoint
+(Groq, a local Ollama, OpenAI) with no edits — just a different provider / base URL.
 """
 from __future__ import annotations
 
@@ -76,6 +76,11 @@ class Settings(BaseSettings):
     # --- LLM providers (generator and RAG-eval judge) ---
     # Each role picks a provider; the PROVIDER decides the base URL, the API key and
     # which model setting applies (app/core/llm_endpoints.py is the single resolver):
+    #   "mistral"       -> generator only (the default). Base URL is hard-coded to
+    #                      https://api.mistral.ai/v1, key = SSR_MISTRAL_API_KEY, model =
+    #                      mistral_llm_model, with mistral_llm_fallback_model tried once
+    #                      when the primary call fails with an availability error
+    #                      (generator.LLMGenerator.generate).
     #   "openrouter"    -> base URL is hard-coded to https://openrouter.ai/api/v1 (a
     #                      leftover SSR_LLM_BASE_URL is ignored), key =
     #                      SSR_OPENROUTER_API_KEY, model = openrouter_llm_model /
@@ -84,32 +89,42 @@ class Settings(BaseSettings):
     #                      max_price, no fallbacks).
     #   "openai_compat" -> any OpenAI-compatible endpoint (Groq by default; Ollama and
     #                      OpenAI work too): SSR_LLM_BASE_URL, key = SSR_LLM_API_KEY,
-    #                      model = llm_model / judge_model. Refuses an openrouter.ai base
-    #                      URL, so SSR_LLM_API_KEY can never be sent to OpenRouter.
+    #                      model = llm_model / judge_model. Refuses an openrouter.ai or
+    #                      api.mistral.ai base URL, so SSR_LLM_API_KEY can never be sent
+    #                      to either.
     # So each key only ever travels to its own provider, and a model name pinned in .env
-    # (SSR_LLM_MODEL) cannot leak into an OpenRouter run: the harnesses print which
+    # (SSR_LLM_MODEL) cannot leak into another provider's run: the harnesses print which
     # settings were set but ignored for the provider in use (names only, never values).
-    # Both API keys are SecretStr, so repr(settings), tracebacks and logs show '**********';
+    # The API keys are SecretStr, so repr(settings), tracebacks and logs show '**********';
     # only llm_endpoints unwraps them (secret_value) when it builds an LLMEndpoint.
-    llm_provider: Literal["openai_compat", "openrouter"] = "openrouter"
+    # A run with a non-default generator or judge is never canonical (rag_eval.output_dir).
+    llm_provider: Literal["mistral", "openai_compat", "openrouter"] = "mistral"
     judge_provider: Literal["openai_compat", "openrouter"] = "openrouter"
+    # Generator: Mistral's free tier ("Experiment" plan). ministral-14b-latest: 30 req/min
+    # and 937.5k tokens/min on that tier, accepts temperature + max_tokens, and is not a
+    # reasoning model (no hidden reasoning tokens, no reasoning field sent). A different
+    # family from the Nemotron judge. mistral-small/medium/large are not available on the
+    # free tier (429 "limit 0" / 403 tier_not_allowed). Chosen 2026-10 after the free
+    # OpenRouter Ling generator was withdrawn upstream.
+    mistral_api_key: SecretStr = SecretStr("")
+    mistral_llm_model: str = "ministral-14b-latest"
+    # Tried once, only when the primary call fails with an availability error (429 after
+    # the SDK retries, 5xx, 403/404, timeout); "" disables it. The answer records which
+    # model replied (model_used); a canonical rag_eval run refuses any fallback answer.
+    mistral_llm_fallback_model: str = "ministral-8b-latest"
     openrouter_api_key: SecretStr = SecretStr("")
-    # Generator: a free model (`:free` is appended if missing), sent with
-    # llm_endpoints.FREE_ROUTING ($0 max_price, no fallbacks). Ling 3.0 Flash Sante: on the
-    # 2026-09-24 bench of 10 free models it served 22/22 calls with the fastest p50 (1.1 s);
-    # it is health/medicine-tuned (SciFact is biomedical), has no expiration date, and is a
-    # different family from the Nemotron judge. It reasons by default with no parameter
-    # sent (108-1,847 hidden reasoning tokens per claim on a 2026-09-24 smoke test), so
-    # llm_reasoning_effort="auto" sends it nothing; the 2048-token budget + one 2x retry
-    # below absorbs the long tail (see llm_max_completion_tokens). A run with a non-default
-    # generator or judge is never canonical (rag_eval.output_dir).
+    # Generator on the openrouter provider (an alternative; not the default): a free model
+    # (`:free` is appended if missing), sent with llm_endpoints.FREE_ROUTING ($0 max_price,
+    # no fallbacks). NOTE: this Ling 3.0 Flash Sante id was the default generator until it
+    # was withdrawn from OpenRouter (2026-10; requests return 404); it is kept as the
+    # recorded id of the earlier canonical run. Set SSR_OPENROUTER_LLM_MODEL to a live
+    # `:free` model to use this provider.
     openrouter_llm_model: str = "inclusionai/ling-3.0-flash-sante:free"
     # Judge: a free model too (`:free` appended if missing). Free tier: 20 req/min and,
     # with >= $10 credits ever bought, 1,000 req/day account-wide. Nemotron 3 Ultra: on a
     # 2026-09-24 bench of 10 free models it was the only one with 22/22 calls served (no
     # 429s), 100% parseable verdicts, and exact agreement with the previous qwen3.8-27b
     # judge on answered rows; qwen3.8-27b:free was 0/4 (upstream 429s).
-    # Backup: inclusionai/ling-3.0-flash-sante:free (also 22/22, different family).
     openrouter_judge_model: str = "nvidia/nemotron-3-ultra-550b-a55b:free"
 
     # --- LLM generation, "openai_compat" provider (any OpenAI-compatible endpoint) ---
@@ -124,14 +139,15 @@ class Settings(BaseSettings):
     # reasoning tokens are spent from this same budget before any answer text, so it must
     # cover reasoning + a 2-4 sentence cited answer + the verdict line. A reply that still
     # hits the cap is retried once at 2x (see generator.LLMGenerator.generate). 2048
-    # (retry 4096) since the free Ling generator: at 1024 it needed the retry on 36 of 50
-    # eval claims and still truncated 7.
+    # (retry 4096) since the earlier free Ling generator, a reasoning model: at 1024 it
+    # needed the retry on 36 of 50 eval claims and still truncated 7. The default
+    # ministral generator does not reason, so it rarely comes near the budget.
     llm_max_completion_tokens: int = Field(default=2048, ge=16)
     # Reasoning effort, sent only when it resolves to a value — as `reasoning_effort` on
-    # the openai_compat provider, and as OpenRouter's unified `reasoning: {"effort": ...}`
+    # the openai_compat and mistral providers, and as OpenRouter's unified `reasoning: {"effort": ...}`
     # object on openrouter (docs: openrouter.ai/docs/use-cases/reasoning-tokens):
     #   "auto" / "" / "off" -> never sent: the model's own default applies (the default
-    #                          free Ling generator reasons on its own). A non-reasoning
+    #                          ministral generator does not reason). A non-reasoning
     #                          model can reject the unknown parameter with a 400, so
     #                          swapping the model stays safe.
     #   any other           -> sent as-is to whatever model is configured (provider
@@ -141,9 +157,9 @@ class Settings(BaseSettings):
     # after the retry, or prose without a verdict line), make exactly one extra
     # verdict-only call (prompts.reask_messages, generator.REASK_MAX_TOKENS) and take its
     # verdict. Never for a question. Measured on the 300 test claims (post-hoc re-ask
-    # experiment, frozen on train): verdict accuracy 0.7767 -> 0.8000, 7 fixed /
-    # 0 broken, p=0.016; it fired on 15 of 300. A rag_eval run with it off is never
-    # canonical.
+    # experiment, frozen on train, on the earlier Ling generator): verdict accuracy
+    # 0.7767 -> 0.8000, 7 fixed / 0 broken, p=0.016; it fired on 15 of 300. A rag_eval run
+    # with it off is never canonical.
     llm_reask: bool = True
     # RAG-eval judge on the "openai_compat" provider. Deliberately a different model FAMILY from the generator,
     # not just a smaller size: same-family judging compounds shared preferences.

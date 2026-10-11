@@ -1243,7 +1243,7 @@ def test_generator_sends_the_product_system_message():
 
 
 def test_default_generator_request_is_pinned(monkeypatch):
-    # The exact chat.completions.create kwargs the default (free OpenRouter Ling) generator
+    # The exact chat.completions.create kwargs the default (Mistral ministral-14b) generator
     # sends, through the real GuardedClient: a change here changes what the committed
     # numbers were generated with, and the re-ask cache keys built on it.
     from app.core.config import Settings, settings
@@ -1267,21 +1267,21 @@ def test_default_generator_request_is_pinned(monkeypatch):
                                    usage=None)
 
     defaults = Settings.model_construct()
-    for name in ("llm_provider", "openrouter_llm_model", "llm_max_completion_tokens",
-                 "llm_reasoning_effort"):
+    for name in ("llm_provider", "mistral_llm_model", "mistral_llm_fallback_model",
+                 "llm_max_completion_tokens", "llm_reasoning_effort"):
         monkeypatch.setattr(settings, name, getattr(defaults, name))
-    monkeypatch.setattr(settings, "openrouter_api_key", "sk-or-test")
+    monkeypatch.setattr(settings, "mistral_api_key", "mistral-test")
     monkeypatch.setattr(G, "OpenAI", _Client)
     gen = LLMGenerator(reask=True)
     gen.generate("Aspirin cures stroke.", _hits(1))
-    assert [m["base_url"] for m in made] == ["https://openrouter.ai/api/v1"]
-    free = {"provider": {"allow_fallbacks": False, "max_price": {"prompt": 0, "completion": 0}}}
-    model = "inclusionai/ling-3.0-flash-sante:free"
-    assert [list(kw) for kw in sent] == [["model", "messages", "max_tokens", "extra_body",
-                                          "temperature"]] * 3
+    assert [m["base_url"] for m in made] == ["https://api.mistral.ai/v1"]
+    assert gen.fallback_model == "ministral-8b-latest"  # used only if a call fails
+    model = "ministral-14b-latest"
+    # No extra_body at all: no OpenRouter routing, no reasoning field.
+    assert [list(kw) for kw in sent] == [["model", "messages", "max_tokens", "temperature"]] * 3
     assert [{k: v for k, v in kw.items() if k != "messages"} for kw in sent] == [
-        {"model": model, "max_tokens": 2048, "extra_body": free, "temperature": 0.1},
-        {"model": model, "max_tokens": 4096, "extra_body": free, "temperature": 0.1},
-        {"model": model, "max_tokens": 8192, "extra_body": free, "temperature": 0.1},
+        {"model": model, "max_tokens": 2048, "temperature": 0.1},
+        {"model": model, "max_tokens": 4096, "temperature": 0.1},
+        {"model": model, "max_tokens": 8192, "temperature": 0.1},
     ]
     assert sent[0]["messages"][0] == {"role": "system", "content": SYSTEM}

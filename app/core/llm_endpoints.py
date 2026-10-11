@@ -6,14 +6,19 @@ and rag_eval cannot disagree about which endpoint, key or model they use.
 
 Precedence — the PROVIDER setting decides everything else:
 
+* ``mistral`` (generator only; the default): base URL is the constant
+  ``MISTRAL_BASE_URL``, key is ``mistral_api_key``, model is ``mistral_llm_model``; the
+  generator's one-shot fallback model is ``mistral_llm_fallback_model``
+  (``fallback_model_id``). No request fields beyond the standard ones are added.
 * ``openrouter``: base URL is the constant ``OPENROUTER_BASE_URL`` (SSR_LLM_BASE_URL is
   never consulted), key is ``openrouter_api_key``, model is ``openrouter_llm_model``
   (generator) / ``openrouter_judge_model`` (judge), each with ``:free`` appended if
   missing — only free models are ever sent to OpenRouter.
 * ``openai_compat`` (any OpenAI-compatible endpoint: Groq, Ollama, OpenAI, ...):
   ``llm_base_url`` / ``llm_api_key`` / ``llm_model`` or ``judge_model``. An openrouter.ai
-  base URL is refused here, so the SSR_LLM_API_KEY is never sent to OpenRouter, and the
-  OpenRouter key is only ever paired with the constant OpenRouter URL.
+  or api.mistral.ai base URL is refused here, so the SSR_LLM_API_KEY is never sent to
+  either, and the OpenRouter / Mistral keys are only ever paired with their own constant
+  URLs.
 
 Free-only guard (``enforce_spend_policy``), checked BEFORE any network call on every
 request to an openrouter.ai URL — at resolution, at client construction, on every
@@ -43,10 +48,11 @@ from typing import Literal
 
 from app.core.config import Settings, secret_value, settings
 
-Provider = Literal["openai_compat", "openrouter"]
+Provider = Literal["mistral", "openai_compat", "openrouter"]
 Role = Literal["generator", "judge"]
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+MISTRAL_BASE_URL = "https://api.mistral.ai/v1"
 FREE_SUFFIX = ":free"
 
 # --- OpenRouter routing (docs: /docs/features/provider-routing) ------------------------
@@ -66,10 +72,15 @@ FORBIDDEN_OPENROUTER_FIELDS = frozenset({"models", "route", "plugins", "web_sear
 # it.
 OPENROUTER_JUDGE_REASONING = {"effort": "none"}
 
-KEY_ENV: dict[str, str] = {"openai_compat": "SSR_LLM_API_KEY", "openrouter": "SSR_OPENROUTER_API_KEY"}
+KEY_ENV: dict[str, str] = {
+    "mistral": "SSR_MISTRAL_API_KEY",
+    "openai_compat": "SSR_LLM_API_KEY",
+    "openrouter": "SSR_OPENROUTER_API_KEY",
+}
 PROVIDER_ENV: dict[str, str] = {"generator": "SSR_LLM_PROVIDER", "judge": "SSR_JUDGE_PROVIDER"}
 # Settings that only apply to one provider, per role: set-but-ignored ones are reported.
 _PROVIDER_ONLY: dict[tuple[str, str], tuple[str, ...]] = {
+    ("generator", "mistral"): ("mistral_llm_model", "mistral_llm_fallback_model"),
     ("generator", "openai_compat"): ("llm_base_url", "llm_model"),
     ("generator", "openrouter"): ("openrouter_llm_model",),
     ("judge", "openai_compat"): ("judge_model",),
@@ -97,6 +108,11 @@ def is_openrouter(url: str) -> bool:
     """Conservative: any URL mentioning openrouter.ai counts (a false positive can only
     cause a refusal, never a spend)."""
     return "openrouter.ai" in (url or "").lower()
+
+
+def is_mistral(url: str) -> bool:
+    """Any URL on api.mistral.ai (conservative, like is_openrouter)."""
+    return "api.mistral.ai" in (url or "").lower()
 
 
 def free_id(model: str) -> str:
@@ -163,7 +179,26 @@ def model_id(role: Role, s: Settings | None = None, provider: Provider | None = 
     provider = provider or provider_of(role, s)
     if provider == "openrouter":
         return free_id(s.openrouter_llm_model if role == "generator" else s.openrouter_judge_model)
+    if provider == "mistral":
+        if role != "generator":
+            raise EndpointConfigError("the mistral provider serves the generator only")
+        return s.mistral_llm_model
     return s.llm_model if role == "generator" else base_model(s.judge_model)
+
+
+def fallback_model_id(
+    role: Role, s: Settings | None = None, provider: Provider | None = None
+) -> str | None:
+    """The model the generator retries ONCE with when its primary model's call fails with
+    an availability error (generator.LLMGenerator.generate), on the same endpoint and
+    key; None when there is none (every provider but mistral, the judge, an empty
+    setting, or a fallback equal to the primary)."""
+    s = settings if s is None else s
+    provider = provider or provider_of(role, s)
+    if role != "generator" or provider != "mistral":
+        return None
+    fb = (s.mistral_llm_fallback_model or "").strip()
+    return fb if fb and fb != model_id(role, s, provider) else None
 
 
 @dataclass(frozen=True)
@@ -217,14 +252,18 @@ def resolve_endpoint(
     provider = provider or provider_of(role, s)
     if provider == "openrouter":
         url, key = OPENROUTER_BASE_URL, secret_value(s.openrouter_api_key)
+    elif provider == "mistral":
+        url, key = MISTRAL_BASE_URL, secret_value(s.mistral_api_key)
     elif provider == "openai_compat":
         url, key = s.llm_base_url, secret_value(s.llm_api_key)
-        if is_openrouter(url):
-            raise EndpointConfigError(
-                f"SSR_LLM_BASE_URL points at openrouter.ai but the {role} provider is "
-                f"'openai_compat'; set {PROVIDER_ENV[role]}=openrouter instead (refusing to "
-                f"send SSR_LLM_API_KEY to OpenRouter)"
-            )
+        for hosted, name, check in (("openrouter", "openrouter.ai", is_openrouter),
+                                    ("mistral", "api.mistral.ai", is_mistral)):
+            if check(url):
+                raise EndpointConfigError(
+                    f"SSR_LLM_BASE_URL points at {name} but the {role} provider is "
+                    f"'openai_compat'; set {PROVIDER_ENV[role]}={hosted} instead (refusing "
+                    f"to send SSR_LLM_API_KEY to {name})"
+                )
     else:
         raise EndpointConfigError(f"unknown {role} provider {provider!r}")
     ep = LLMEndpoint(
@@ -249,9 +288,13 @@ def endpoint_for_url(
     so the default key — follows the URL, so an explicit URL can't pick up the other
     provider's key."""
     s = settings if s is None else s
-    provider: Provider = "openrouter" if is_openrouter(base_url) else "openai_compat"
+    provider: Provider = (
+        "openrouter" if is_openrouter(base_url)
+        else "mistral" if is_mistral(base_url)
+        else "openai_compat"
+    )
     key = api_key if api_key is not None else secret_value(
-        s.openrouter_api_key if provider == "openrouter" else s.llm_api_key
+        {"openrouter": s.openrouter_api_key, "mistral": s.mistral_api_key}.get(provider, s.llm_api_key)
     )
     ep = LLMEndpoint(role, provider, base_url, model, key)
     ep.check()
@@ -263,8 +306,13 @@ def ignored_settings(role: Role, s: Settings | None = None, provider: Provider |
     SSR_LLM_MODEL left in .env under llm_provider=openrouter. Names only."""
     s = settings if s is None else s
     provider = provider or provider_of(role, s)
-    other = "openai_compat" if provider == "openrouter" else "openrouter"
-    return [f"SSR_{f.upper()}" for f in _PROVIDER_ONLY[(role, other)] if f in s.model_fields_set]
+    return [
+        f"SSR_{f.upper()}"
+        for (r, p), fields in _PROVIDER_ONLY.items()
+        if r == role and p != provider
+        for f in fields
+        if f in s.model_fields_set
+    ]
 
 
 def describe_with_ignored(ep: LLMEndpoint, s: Settings | None = None) -> str:

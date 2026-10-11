@@ -33,9 +33,9 @@ evidence was actually retrieved, and scored under two definitions of evidence:
   so earlier published numbers stay traceable and the two can be compared per run.
 
 Generator and judge use different model families, each on the provider its setting names
-(app.core.llm_endpoints; default: free Ling 3.0 Flash Sante generator and free Nemotron 3
-Ultra judge on OpenRouter, under the free-only guard — a $0 run), with a provider-aware
-throttle so the run stays under the free-tier limits.
+(app.core.llm_endpoints; default: ministral-14b generator on Mistral's free tier and the
+free Nemotron 3 Ultra judge on OpenRouter, under its free-only guard — a $0 run), with a
+provider-aware throttle so the run stays under both free tiers' limits.
 
 Alongside the aggregates, rag.json keeps every scored query (gold label, rationale
 docs, verdict, both evidence flags, answer text, citations, and how generation ended:
@@ -58,16 +58,18 @@ Sample, dataset and output (env, SSR_ prefix like the rest of the repo):
 Canonical-output rule: eval/results/rag.{md,json} (the committed artifact) is written
 ONLY by a run that covers the WHOLE canonical test split (SSR_RAG_N=all, or an N at
 least the split size), with no SSR_EVAL_LIMIT, whose generator AND judge are the code
-defaults (Settings field defaults for the providers and OpenRouter model ids — not .env).
+defaults (Settings field defaults for the providers and model ids — not .env).
 Every other run — the default SSR_RAG_N=50 sample, any other partial sample, any
 train-split run, any limited run, any run with another generator or judge (e.g. another
 model on an openai_compat endpoint, even on all 300 test claims) — writes to
 ``data/eval_runs/rag_<dataset-slug>_<n>_<prompt-hash8>/``, with ``_<generator-slug>``
 (and ``_judge-<judge-slug>``) appended when the models differ (gitignored), says so up
-front, and can never touch eval/results/. A canonical run must also be COMPLETE: if any
-sampled claim has no row at the end (a skipped pipeline error, an unparseable judge
-reply) or a re-ask failed, it refuses to write eval/results/ (the checkpoint and re-ask
-cache are kept, so re-running the same command retries only those claims). A
+front, and can never touch eval/results/. A canonical run must also be COMPLETE and come
+from the primary generator only: if any sampled claim has no row at the end (a skipped
+pipeline error, an unparseable judge reply), a re-ask failed, or a row was answered by the
+generator's FALLBACK model (row ``model_used``), it refuses to write eval/results/ (the
+checkpoint and re-ask cache are kept, so re-running the same command retries only those
+claims: fallback rows are never checkpointed). A
 non-canonical run still writes, with the missing claims named in rag.json and rag.md. A
 canonical run whose sample size differs from the one recorded in the committed rag.json
 (only possible if the split itself changed) prints a loud notice up front and again when
@@ -80,8 +82,9 @@ hashes, top_k, mode, token budget, reasoning setting, retrieval settings) and no
 git-specific. A re-run of the same command skips completed rows, so a provider's daily
 cap (e.g. Groq's tokens/day, OpenRouter's free requests/day) just pauses the run: it stops with
 the checkpoint saved and the output dir untouched, and resumes after the quota resets.
-Skipped rows (pipeline errors, unparseable judge replies) are never checkpointed, so a
-re-run retries them. ``SSR_EVAL_REFRESH=1`` ignores the checkpoint; a corrupt or
+Skipped rows (pipeline errors, unparseable judge replies) and rows the fallback model
+answered are never checkpointed (the signature describes the primary model), so a re-run
+retries them. ``SSR_EVAL_REFRESH=1`` ignores the checkpoint; a corrupt or
 wrong-shaped one degrades to recompute. The verdict parser is NOT in the signature: every
 row, resumed or fresh, goes through reparse_row, which re-reads a stored reply that has no
 verdict with the current generator.parse_verdict (no LLM call), so a resumed run records
@@ -97,21 +100,22 @@ app.eval.rag_secondlook, is archived in the experiments-archive tag). The eval a
 finished first-pass rows, never inside the checkpointed generation: the checkpoint keeps
 first-pass rows and its signature does not include the re-ask, so an existing checkpoint
 resumes as-is. Each reply is cached in ``data/eval_cache/secondlook/<dataset>.json``
-(app.eval.reply_cache; the path is the one the archived experiment wrote, which holds the
-committed run's replies), and a re-run re-asks from the cache with no LLM call. Keys are versioned: new
-replies go under the v2 key (reask_key_v2: claim, budget, exact messages AND the endpoint
-fingerprint — provider, base URL, model, resolved reasoning effort, temperature policy,
-routing), so a run on another endpoint never reuses a reply this one gave. Migration: a
-lookup (reask_lookup) tries v2, then the legacy v1 key (model + budget + messages) but only
-for the canonical OpenRouter Ling endpoint every v1 entry was fetched with — which is how
-the committed rag.json's 15 re-ask replies stay cache hits with zero LLM calls (whether a reply came from the cache is counted in ``run.reask_replies``, not in
-the rows, so a resumed run's rows equal a fresh one's). SSR_EVAL_REFRESH ignores the row
-checkpoint only, never this cache: its entries include the replies behind the measured
-result. A run with SSR_LLM_REASK=false is never canonical (``..._noreask``).
+(app.eval.reply_cache; the path is the one the archived experiment wrote), and a re-run
+re-asks from the cache with no LLM call. Replies are keyed by the v2 key (reask_key_v2:
+claim, budget, exact messages AND the endpoint fingerprint — provider, base URL, the model
+that gave the first answer, resolved reasoning effort, temperature policy, routing), so a
+run on another endpoint or model never reuses a reply this one gave. (The legacy v1 keys of
+the earlier OpenRouter Ling run are no longer read: that model was withdrawn, so its run
+can't be repeated; its rag.json stays in git history.) Whether a reply came from the cache
+is counted in ``run.reask_replies``, not in the rows, so a resumed run's rows equal a fresh
+one's. SSR_EVAL_REFRESH ignores the row checkpoint only, never this cache: its entries
+include the replies behind the measured result. A run with SSR_LLM_REASK=false is never
+canonical (``..._noreask``).
 
 Before any LLM call the run prints the requests still needed (remaining rows x (1
 generation + the expected truncation-retry rate + the expected re-ask rate + 1 judge),
-plus the re-asks resumed rows still miss in the cache) and the wall-clock estimate.
+plus the re-asks resumed rows still miss in the cache), split by provider (Mistral vs
+OpenRouter's free caps), and the wall-clock estimate.
 ``--check-quota`` (or ``SSR_RAG_CHECK_QUOTA=1``) also reads the OpenRouter key's remaining
 free requests for today (GET /api/v1/key, which is not an LLM call and is not counted
 against the quota) and aborts before any LLM call if they are fewer than needed.
@@ -125,6 +129,7 @@ Run:
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import hashlib
 import json
 import math
@@ -149,6 +154,8 @@ from app.core.llm_endpoints import (
     build_client,
     completion_choice,
     describe_with_ignored,
+    fallback_model_id,
+    is_openrouter,
     model_id,
     resolve_endpoint,
 )
@@ -200,7 +207,7 @@ JUDGE_MODEL = model_id("judge")
 TOP_K = 5
 MODE = "hybrid"  # the API's default mode — the eval scores what users actually get
 # Seconds slept after each query. SSR_RAG_THROTTLE_S overrides; otherwise it depends on
-# the providers (default_throttle_s):
+# the providers (default_throttle_s), and is the largest of what each provider in use needs:
 # * An openai_compat endpoint in either role: 30 s, sized for Groq's free tier, which caps
 #   each model at 8,000 tokens/minute (x-ratelimit-limit-tokens). A generation is ~2-3k
 #   tokens (prompt + reasoning + answer) and a judge call ~2k, so one query per 15 s
@@ -211,13 +218,20 @@ MODE = "hybrid"  # the API's default mode — the eval scores what users actuall
 #   requests (generation, its truncation retry, the judge). The sleep is 4 s per possible
 #   free request (12 s/query), and it comes on top of the calls' own latency, so any 60 s
 #   window holds at most 5 query starts: <= 15 requests even if every generation retries
-#   (~10 typical), vs the cap of 20.
+#   (~10 typical), vs the cap of 20. With only the judge on OpenRouter (the default) that is
+#   4 s, raised to the 5 s floor: <= 12 free requests/min.
+# * Mistral's free tier allows 30 requests/min on ministral-14b (0.5 req/s). A query makes 1
+#   generation request, 2 with the truncation retry: MISTRAL_S_PER_REQUEST (2 s) per
+#   possible request, so 4 s and <= 30/min even in the worst case (the fallback model has
+#   its own limit). The default mix (Mistral generator + free OpenRouter judge) sleeps 5 s.
 _THROTTLE_ENV = os.environ.get("SSR_RAG_THROTTLE_S")
 THROTTLE_S: float | None = float(_THROTTLE_ENV) if _THROTTLE_ENV else None
 OPENAI_COMPAT_THROTTLE_S = 30.0
 OPENROUTER_S_PER_FREE_REQUEST = 4.0
 OPENROUTER_MIN_THROTTLE_S = 5.0
 OPENROUTER_FREE_REQUESTS_PER_MIN = 20  # account-wide, all `:free` models
+MISTRAL_REQUESTS_PER_MIN = 30  # free tier, ministral-14b-latest (per model)
+MISTRAL_S_PER_REQUEST = 60.0 / MISTRAL_REQUESTS_PER_MIN
 # A 429 that outlasts the SDK's own retries waits out a full rate-limit window and
 # retries the SAME query, rather than skipping it: a skipped query changes the sample,
 # and the sample is fixed (seed) so runs stay comparable.
@@ -246,8 +260,16 @@ def _is_daily_cap(e: Exception) -> bool:
     if "per day" in msg or "(tpd)" in msg or "per-day" in msg:
         return True
     # OpenRouter may put the window only in its rate-limit headers: the per-minute free
-    # limit is 20, so an exhausted limit above that is the daily one.
-    headers = getattr(getattr(e, "response", None), "headers", None) or {}
+    # limit is 20, so an exhausted limit above that is the daily one. Only an OpenRouter
+    # response is read that way: another provider's per-minute limit may well be above 20.
+    response = getattr(e, "response", None)
+    try:
+        url = str(response.request.url) if response is not None else ""
+    except RuntimeError:  # an httpx.Response built without a request
+        url = ""
+    if url and not is_openrouter(url):
+        return False
+    headers = getattr(response, "headers", None) or {}
     try:
         limit = int(headers.get("x-ratelimit-limit", 0))
         remaining = int(headers.get("x-ratelimit-remaining", 1))
@@ -264,13 +286,18 @@ def _is_fatal(e: Exception) -> bool:
     return isinstance(e, APIStatusError) and e.status_code in (401, 402)
 
 
+def requests_per_query(provider: str, gen: LLMEndpoint, judge: LLMEndpoint) -> tuple[int, int]:
+    """(typical, worst) requests one query sends to `provider`: the judge's one call if
+    the judge is there, plus 1 for a generator there — 2 in the worst case (the
+    truncation retry)."""
+    judge_n = int(judge.provider == provider)
+    gen_n = int(gen.provider == provider)
+    return judge_n + gen_n, judge_n + 2 * gen_n
+
+
 def free_requests_per_query(gen: LLMEndpoint, judge: LLMEndpoint) -> tuple[int, int]:
-    """(typical, worst) requests one query makes against OpenRouter's free-tier caps:
-    the judge's one call if it is a free OpenRouter model, plus 1 for a free OpenRouter
-    generator — 2 in the worst case (the truncation retry)."""
-    judge_free = int(judge.provider == "openrouter")
-    gen_free = int(gen.provider == "openrouter")
-    return judge_free + gen_free, judge_free + 2 * gen_free
+    """(typical, worst) requests one query makes against OpenRouter's free-tier caps."""
+    return requests_per_query("openrouter", gen, judge)
 
 
 def default_throttle_s(gen: LLMEndpoint | None = None, judge: LLMEndpoint | None = None) -> float:
@@ -281,8 +308,13 @@ def default_throttle_s(gen: LLMEndpoint | None = None, judge: LLMEndpoint | None
     judge = judge or resolve_endpoint("judge", require_key=False)
     if "openai_compat" in (gen.provider, judge.provider):
         return OPENAI_COMPAT_THROTTLE_S
-    _, worst = free_requests_per_query(gen, judge)
-    return max(OPENROUTER_MIN_THROTTLE_S, worst * OPENROUTER_S_PER_FREE_REQUEST)
+    _, free_worst = free_requests_per_query(gen, judge)
+    _, mistral_worst = requests_per_query("mistral", gen, judge)
+    return max(
+        OPENROUTER_MIN_THROTTLE_S,
+        free_worst * OPENROUTER_S_PER_FREE_REQUEST,
+        mistral_worst * MISTRAL_S_PER_REQUEST,
+    )
 
 
 OUT = RESULTS  # canonical run only — the committed artifact (repo-anchored, not cwd)
@@ -298,7 +330,8 @@ REASK_CACHE = Path("data/eval_cache/secondlook")
 EXPECTED_REASK_RATE = 0.05
 
 # Expected share of generations that need the truncation retry, for the up-front request
-# estimate only: 12 of 50 on the committed free-Ling run (retried_answers in rag.json).
+# estimate only: 12 of 50 on the earlier free-Ling run (a reasoning model; the default
+# ministral generator retries far less, so this over-estimates until rows are observed).
 # Once a checkpoint holds at least MIN_ROWS_FOR_OBSERVED_RETRY rows, their own rate wins.
 EXPECTED_RETRY_RATE = 0.24
 MIN_ROWS_FOR_OBSERVED_RETRY = 10
@@ -575,12 +608,6 @@ def reask_hits(doc_ids: Sequence[str], docs: Mapping[str, Mapping]) -> list[Sear
     return [SearchHit(d, 0.0, docs[d]["text"], {"title": docs[d]["title"]}) for d in doc_ids]
 
 
-def reask_key(qid: str, model: str, messages: Sequence[Mapping]) -> str:
-    """The LEGACY (v1) re-ask key: model id + budget + messages, nothing about who served
-    it. Read only as a migration fallback (reask_lookup); never written any more."""
-    return ReplyCache.key("reask", qid, model, REASK_MAX_TOKENS, messages)
-
-
 def reask_request_fingerprint(gen: LLMEndpoint) -> dict:
     """Everything about the endpoint that can change a re-ask reply besides the messages
     and budget: provider, base URL, model id, the reasoning effort LLMGenerator resolves
@@ -603,42 +630,19 @@ def reask_key_v2(qid: str, gen: LLMEndpoint, messages: Sequence[Mapping]) -> str
     return ReplyCache.key_v2("reask", qid, reask_request_fingerprint(gen), REASK_MAX_TOKENS, messages)
 
 
-# The one endpoint every legacy (v1) re-ask entry was fetched with — frozen here as
-# literals, not read from the live code defaults, so a later change to the default
-# temperature or free routing stops matching the old entries instead of silently
-# inheriting them. The model id is the code-default generator (default_endpoints()).
-LEGACY_REASK_TEMPERATURE = 0.1
-LEGACY_REASK_EXTRA_BODY = {
-    "provider": {"allow_fallbacks": False, "max_price": {"prompt": 0, "completion": 0}},
-}
-
-
-def is_legacy_reask_endpoint(gen: LLMEndpoint) -> bool:
-    """True only for the canonical OpenRouter Ling endpoint the v1 re-ask entries came
-    from: provider openrouter at OPENROUTER_BASE_URL, the code-default generator id, no
-    reasoning field sent, temperature 0.1, the free routing."""
-    fp = reask_request_fingerprint(gen)
-    return (
-        fp["provider"] == "openrouter"
-        and fp["base_url"] == OPENROUTER_BASE_URL
-        and (fp["provider"], fp["model"]) == default_endpoints()[0]
-        and fp["reasoning_effort"] is None
-        and fp["temperature"] == LEGACY_REASK_TEMPERATURE
-        and fp["extra_body"] == LEGACY_REASK_EXTRA_BODY
-    )
+def answering_endpoint(gen: LLMEndpoint, row: Mapping) -> LLMEndpoint:
+    """`gen` with the model that gave this row's first answer (row `model_used`: the
+    primary, or the fallback); the re-ask goes to that model and is keyed by it."""
+    used = row.get("model_used")
+    return gen if not used or used == gen.model else dataclasses.replace(gen, model=used)
 
 
 def reask_lookup(
     cache: ReplyCache, qid: str, gen: LLMEndpoint, messages: Sequence[Mapping]
 ) -> dict | None:
-    """The cached re-ask reply for this request, or None. The v2 key first; then — key
-    migration — the legacy v1 key, but ONLY when ``gen`` is exactly the canonical endpoint
-    the v1 entries were fetched with (is_legacy_reask_endpoint). Any other endpoint (a
-    run on another endpoint with the same model id and messages) never reads a v1 entry."""
-    rec = cache.get(reask_key_v2(qid, gen, messages))
-    if rec is None and is_legacy_reask_endpoint(gen):
-        rec = cache.get(reask_key(qid, gen.model, messages))
-    return rec
+    """The cached re-ask reply for this request (its v2 key), or None. `gen` is the
+    endpoint with the model that gave the first answer (rag_eval.answering_endpoint)."""
+    return cache.get(reask_key_v2(qid, gen, messages))
 
 
 def _no_judgeable_reply(answer: str | None) -> bool:
@@ -791,11 +795,14 @@ def run_metadata(
         "generator_provider": gen.provider,
         "generator_base_url": gen.base_url,
         "generator_extra_body": gen.extra_body(),
+        # Tried once when the primary model's call fails (generator.should_fall_back); a
+        # canonical run refuses any row it answered (row `model_used`).
+        "generator_fallback_model": fallback_model_id("generator", provider=gen.provider),
         # The generator's budget and reasoning effort decide whether answers truncate
         # (a truncated reply carries no verdict), so they are part of what a number means.
         "generator_max_completion_tokens": settings.llm_max_completion_tokens,
         "generator_reasoning_effort": effort,
-        # None when no reasoning field is sent at all (e.g. the default free Ling model).
+        # None when no reasoning field is sent at all (the default: "auto").
         "generator_reasoning_param": (
             None if effort is None
             else "reasoning.effort" if gen.provider == "openrouter" else "reasoning_effort"
@@ -953,6 +960,9 @@ def aggregate(
         # The verdict-only re-ask: claims it fired on, and how many it gave a verdict.
         "reasked_answers": sum(bool(r.get("reask_attempted")) for r in rows),
         "reask_verdicts": sum(r.get("verdict_source") == "reask" for r in rows),
+        # Rows the generator's fallback model answered (the primary failed): never in a
+        # canonical run, which refuses to write them.
+        "fallback_answers": sum(_is_fallback_row(r, gen_model or GEN_MODEL) for r in rows),
         "evidence_quotes": _quote_stats(rows),
         "judge_verdict_agreement": _rate(
             sum(r["judge_answered"] == r["answered"] for r in judge_rows), len(judge_rows)
@@ -982,6 +992,13 @@ def aggregate(
         "top_k": TOP_K,
         "sample_seed": SEED,
     }
+
+
+def _is_fallback_row(row: Mapping, primary: str) -> bool:
+    """The row was answered by a model other than the primary (row `model_used`; a row
+    without it — an older run, or a Generator that doesn't say — counts as primary)."""
+    used = row.get("model_used")
+    return used is not None and used != primary
 
 
 def _fmt(v: float | None) -> str:
@@ -1084,6 +1101,11 @@ def _markdown(
         )
     if truncated := agg.get("truncated_answers", 0):
         notes.append(_truncation_note(truncated, rows))
+    if fallback := agg.get("fallback_answers", 0):
+        notes.append(
+            f"{fallback} answer{'' if fallback == 1 else 's'} from the generator's fallback "
+            f"model (the primary call failed; see `model_used` per row)"
+        )
     note_line = f"\n{'; '.join(notes)}.\n" if notes else ""
     # Re-ask-only answers whose first reply had no text (cut off at the token budget, or
     # empty) were judged on a placeholder: excluded from the faithfulness mean, and the
@@ -1189,7 +1211,14 @@ def _estimate_line(n: int, gen: LLMEndpoint, judge_ep: LLMEndpoint, throttle: fl
         ("generator", gen, EST_GEN_TOKENS_PER_QUERY),
         ("judge", judge_ep, EST_JUDGE_TOKENS_PER_QUERY),
     ):
-        if ep.provider == "openai_compat":
+        if ep.provider == "mistral":
+            fb = fallback_model_id("generator", provider=ep.provider)
+            parts.append(
+                f"  {role}: {n}-{2 * n} requests to {ep.model} on Mistral (free tier: "
+                f"{MISTRAL_REQUESTS_PER_MIN}/min)"
+                + (f"; {fb} only if a call fails" if fb else "")
+            )
+        elif ep.provider == "openai_compat":
             parts.append(
                 f"  {role}: ~{n * toks:,} tokens on {ep.model} at {ep.base_url} (that "
                 f"provider's own rate and daily limits apply)"
@@ -1473,6 +1502,8 @@ def generation_fields(ans, hits: Sequence[SearchHit]) -> dict:
         "reasoning_tokens": getattr(ans, "reasoning_tokens", None),
         "generation_cost_usd": getattr(ans, "cost_usd", None),
         "generation_provider": getattr(ans, "provider", None),
+        "model_used": getattr(ans, "model_used", None),
+        "fallback_error": getattr(ans, "fallback_error", None),
         "verdict_source": getattr(ans, "verdict_source", None),
         "evidence_quote": quote.quote if quote else None,
         "quote_passage": quote.passage if quote else None,
@@ -1520,6 +1551,10 @@ def build_row(
         # the upstream provider that served it; None where not reported.
         "generation_cost_usd": gen["generation_cost_usd"],
         "generation_provider": gen["generation_provider"],
+        # The model that wrote the reply (the primary, or the fallback after the primary
+        # failed with fallback_error); None when the Generator doesn't report it.
+        "model_used": gen.get("model_used"),
+        "fallback_error": gen.get("fallback_error"),
         # Which parse produced the verdict ("line" | "inline" | "stance"; None = no
         # verdict), and the evidence-quote check: the reply's first quoted span, the
         # [n] next to it, and whether it really occurs in that passage (None = the
@@ -1556,6 +1591,7 @@ def request_estimate(
     (expected, and worst case with every generation retrying and re-asking)."""
     gen_free = int(gen.provider == "openrouter")
     judge_free = int(judge_ep.provider == "openrouter")
+    gen_mistral = int(gen.provider == "mistral")
     _, worst = free_requests_per_query(gen, judge_ep)
     reask_rate = reask_rate if reask else 0.0
     reask_pending = reask_pending if reask else 0
@@ -1564,6 +1600,9 @@ def request_estimate(
         return math.ceil(round(x, 6))
 
     return {
+        "mistral_requests": up(
+            remaining * gen_mistral * (1 + retry_rate + reask_rate) + gen_mistral * reask_pending
+        ),
         "rows": remaining,
         "retry_rate": retry_rate,
         "reask_rate": reask_rate,
@@ -1593,7 +1632,9 @@ def _request_line(est: dict, n_total: int, n_done: int, throttle: float, retry_s
         + f"\n  ~{est['requests']} LLM requests (per claim: 1 generation + "
         f"{est['retry_rate']:.2f} expected truncation retries [{retry_src}] + 1 judge); "
         f"~{est['free_requests']} on OpenRouter's free caps (worst case "
-        f"{est['free_requests_worst']})\n"
+        f"{est['free_requests_worst']})"
+        + (f", ~{est['mistral_requests']} on Mistral" if est.get("mistral_requests") else "")
+        + "\n"
         f"  est. wall-clock ~{est['seconds'] / 60:.0f} min ({throttle:.1f}s throttle + "
         f"~{EST_QUERY_LATENCY_S:.0f}s assumed call latency per claim){days}"
     )
@@ -1813,13 +1854,14 @@ def main(argv: Sequence[str] = ()) -> None:
         return reask_hits(done[qid]["retrieved_doc_ids"], corpus)
 
     def reask_request(qid: str) -> tuple[list[dict], str]:
-        """The re-ask messages and the v2 key a fresh reply is written under (lookups go
-        through reask_lookup: v2, then the legacy key for the canonical endpoint only)."""
+        """The re-ask messages and the v2 key a fresh reply is written under, for the
+        model that gave this row's first answer."""
         msgs = reask_messages(queries[qid], passages(qid))
-        return msgs, reask_key_v2(qid, gen_ep, msgs)
+        return msgs, reask_key_v2(qid, answering_endpoint(gen_ep, done[qid]), msgs)
 
     def reask_cached(qid: str) -> dict | None:
-        return reask_lookup(reask_cache, qid, gen_ep, reask_request(qid)[0])
+        msgs = reask_request(qid)[0]
+        return reask_lookup(reask_cache, qid, answering_endpoint(gen_ep, done[qid]), msgs)
 
     reask_done = [q for q in qids if q in done and needs_reask(queries[q], done[q]["verdict"])]
     reask_missing = [q for q in reask_done if reask_cached(q) is None] if reask_on else []
@@ -1846,7 +1888,9 @@ def main(argv: Sequence[str] = ()) -> None:
             flush=True,
         )
     print(f"LLM requests needed now: ~{est['requests']} "
-          f"({est['free_requests']} on OpenRouter's free caps)", flush=True)
+          f"({est['free_requests']} on OpenRouter's free caps"
+          + (f", {est['mistral_requests']} on Mistral" if est["mistral_requests"] else "")
+          + ")", flush=True)
     if want_quota:
         check_quota(est, gen_ep, judge_ep, fetch=fetch_key_info)  # SystemExit if short
 
@@ -1854,9 +1898,13 @@ def main(argv: Sequence[str] = ()) -> None:
     # post-step below, so checkpointed rows stay first-pass rows.
     # The batch retry policy (generator.BATCH_MAX_RETRIES / REASK_MAX_RETRIES), not the
     # API's: no user is waiting, and quick SDK retries absorb transient 429s / 5xx first.
+    # The fallback model (one retry of a failed generation on another model) is on, as in
+    # the product; a row it answered is recorded (model_used) but never checkpointed, and a
+    # canonical run refuses to write while any remains, so a re-run retries the primary.
     generator = LLMGenerator(
         endpoint=gen_ep, reask=False,
         max_retries=BATCH_MAX_RETRIES, reask_max_retries=REASK_MAX_RETRIES,
+        fallback_model=fallback_model_id("generator", provider=gen_ep.provider),
     )
     judge_client = build_client(judge_ep, factory=OpenAI, timeout=60.0)  # Nemotron Ultra: rare 20-27 s calls
 
@@ -1879,16 +1927,22 @@ def main(argv: Sequence[str] = ()) -> None:
     def judge_usd() -> float:
         return prior_judge_usd + getattr(judge_client, "cost_usd", 0.0)
 
+    def primary_rows() -> dict[str, dict]:
+        # The checkpoint's signature describes the PRIMARY model: a fallback row is kept
+        # for this session's output but never stored, so a re-run retries it.
+        return {q: r for q, r in done.items() if not _is_fallback_row(r, gen_ep.model)}
+
     def checkpoint() -> None:
         save_checkpoint(
-            ckpt, sig, sig_fields, done,
+            ckpt, sig, sig_fields, primary_rows(),
             {"judge_calls": judge_calls, "judge_reported_usd": judge_usd()},
         )
 
     def kept() -> str:
+        stored = len(primary_rows())
         return (
-            f"{len(done)}/{len(qids)} completed rows are checkpointed in {ckpt}"
-            if done else "no rows completed yet"
+            f"{stored}/{len(qids)} completed rows are checkpointed in {ckpt}"
+            if stored else "no rows completed yet"
         )
 
     def with_rate_limit_retries(call, n, qid):
@@ -1927,7 +1981,8 @@ def main(argv: Sequence[str] = ()) -> None:
             if hasattr(e, "cost_usd"):
                 account(e.cost_usd)
             raise
-        session[counter] += getattr(ans, "attempts", 1)
+        # A fallback answer also cost the primary's failed call (at least one).
+        session[counter] += getattr(ans, "attempts", 1) + bool(getattr(ans, "fallback_error", None))
         return ans
 
     def judge_once(q: str, hits: list[SearchHit], text: str) -> dict:
@@ -1983,6 +2038,12 @@ def main(argv: Sequence[str] = ()) -> None:
         done[qid] = build_row(qid, q, label, gold[qid], f, generation_fields(ans, hits), s)
         checkpoint()  # persisted at once: a daily-cap stop loses no finished row
         r = done[qid]
+        if _is_fallback_row(r, gen_ep.model):
+            print(
+                f"  [{n}/{len(qids)}] q{qid:>4} FALLBACK: answered by {r['model_used']} "
+                f"({r.get('fallback_error')} on {gen_ep.model}); not checkpointed",
+                flush=True,
+            )
         print(
             f"  [{n}/{len(qids)}] q{qid:>4} {label.label:<10} -> {r['predicted_label']:<10} "
             f"{'answered' if r['answered'] else 'abstain '}({r['answered_source'][0]}) "
@@ -2004,7 +2065,8 @@ def main(argv: Sequence[str] = ()) -> None:
         if r is None or not needs_reask(queries[qid], r["verdict"]):
             continue
         msgs, key = reask_request(qid)
-        rec = reask_lookup(reask_cache, qid, gen_ep, msgs)
+        answering = answering_endpoint(gen_ep, r)
+        rec = reask_lookup(reask_cache, qid, answering, msgs)
         if rec is not None:
             reask_stats["cached"] += 1
             account(rec.get("cost_usd"))
@@ -2012,10 +2074,10 @@ def main(argv: Sequence[str] = ()) -> None:
             continue
         n = position[qid]
 
-        def reask_once(q=queries[qid], hits=passages(qid)):
+        def reask_once(q=queries[qid], hits=passages(qid), model=answering_endpoint(gen_ep, r).model):
             session["reask_calls"] += 1
             try:
-                return generator.reask_verdict(q, hits)
+                return generator.reask_verdict(q, hits, model=model)
             except EmptyCompletionError as e:
                 account(e.cost_usd)
                 raise
@@ -2045,9 +2107,9 @@ def main(argv: Sequence[str] = ()) -> None:
             "raw": reply.raw, "finish_reason": reply.finish_reason,
             "completion_tokens": reply.completion_tokens, "reasoning_tokens": reply.reasoning_tokens,
             "provider": reply.provider, "cost_usd": reply.cost_usd, "requests": 1,
-            "kind": "reask", "query_id": qid, "model": gen_ep.model,
+            "kind": "reask", "query_id": qid, "model": answering.model,
             "max_tokens": REASK_MAX_TOKENS, "source": "rag_eval", "key_version": 2,
-            "request": reask_request_fingerprint(gen_ep),
+            "request": reask_request_fingerprint(answering),
             "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
         reask_cache.put(key, rec)  # v2 key; persisted at once, like a checkpointed row
@@ -2065,7 +2127,8 @@ def main(argv: Sequence[str] = ()) -> None:
     ]
     missing_ids = [q for q in qids if q not in done]
     failed_reasks = [r["query_id"] for r in rows if r.get("reask_attempted") and r.get("reask_error")]
-    if canonical and (missing_ids or failed_reasks):
+    fallback_ids = [r["query_id"] for r in rows if _is_fallback_row(r, gen_ep.model)]
+    if canonical and (missing_ids or failed_reasks or fallback_ids):
         # A thinned canonical artifact would silently shrink the headline's denominator
         # (or score a claim without the re-ask every other claim got): refuse. Completed
         # rows are checkpointed and fetched re-asks cached, so a re-run redoes only these.
@@ -2078,11 +2141,17 @@ def main(argv: Sequence[str] = ()) -> None:
             )
         if failed_reasks:
             why.append(f"{len(failed_reasks)} re-asks failed: {', '.join(failed_reasks[:20])}")
+        if fallback_ids:
+            why.append(
+                f"{len(fallback_ids)} rows were answered by the fallback model, not "
+                f"{gen_ep.model} (not checkpointed): {', '.join(fallback_ids[:20])}"
+                f"{' ...' if len(fallback_ids) > 20 else ''}"
+            )
         raise SystemExit(
             f"\nRefusing to write the canonical {OUT / 'rag.json'}: " + "; ".join(why) + ".\n"
             f"Nothing was written; {kept()}; re-ask replies are cached in "
             f"{reask_cache_path(dataset)}.\nRe-run the same command: only the missing claims "
-            f"(and failed re-asks) run."
+            f"(failed re-asks, fallback rows) run."
         )
     agg = aggregate(rows, gen_ep.model, judge_ep.model, gen_ep.provider, judge_ep.provider)
     out.mkdir(parents=True, exist_ok=True)

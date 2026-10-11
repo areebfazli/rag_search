@@ -28,8 +28,9 @@ COPY --chown=appuser frontend ./frontend
 
 # The index (data/) is large and built once — mount it at runtime (-v "$PWD/data:/app/data"),
 # or build inside the container:  docker run <img> .venv/bin/python -m app.ingest.build_index
-# Search needs no key. For /answer, pass the default provider's key at runtime (never bake
-# it into the image):  docker run -e SSR_OPENROUTER_API_KEY=... ...
+# Search needs no key. For /answer, pass the default generator's key at runtime (never bake
+# it into the image):  docker run -e SSR_MISTRAL_API_KEY=... ...
+# (SSR_OPENROUTER_API_KEY too only for the RAG eval's judge, or with SSR_LLM_PROVIDER=openrouter)
 # (with SSR_LLM_PROVIDER=openai_compat, pass SSR_LLM_BASE_URL and SSR_LLM_API_KEY instead)
 EXPOSE 8000
 CMD [".venv/bin/uvicorn", "app.api.main:app", "--host", "0.0.0.0", "--port", "8000"]

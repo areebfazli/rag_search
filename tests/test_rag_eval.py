@@ -36,6 +36,7 @@ from app.generate.generator import GeneratedAnswer, ReaskReply, split_verdict
 from app.ingest.corpus import ClaimLabel
 
 FAKE_OPENROUTER_KEY = "sk-or-v1-FAKE-TEST-KEY-never-real-0000"
+FAKE_MISTRAL_KEY = "FAKE-mistral-TEST-KEY-never-real-0000"
 
 
 def row(
@@ -312,7 +313,7 @@ class FakeGenerator:
         self.reask_enabled = reask
         type(self).init_kwargs.append(kw)  # the SDK retry policy rag_eval asks for
 
-    def reask_verdict(self, query, hits):
+    def reask_verdict(self, query, hits, model=None):
         type(self).reask_calls.append((query, hits))
         return ReaskReply(raw=self.REASK_REPLY, finish_reason="stop", completion_tokens=7,
                           reasoning_tokens=3, cost_usd=0.0, provider="P")
@@ -352,14 +353,16 @@ class FakeJudge:
         return {"answered": q != "Four claim holds.", "faithfulness": 0.9, "context_relevance": 0.5}
 
 
-DEFAULT_GEN_MODEL = Settings.model_fields["openrouter_llm_model"].default
+DEFAULT_GEN_MODEL = Settings.model_fields["mistral_llm_model"].default
+DEFAULT_FALLBACK_MODEL = Settings.model_fields["mistral_llm_fallback_model"].default
 DEFAULT_JUDGE_MODEL = Settings.model_fields["openrouter_judge_model"].default
 # Env the harness reads; cleared in every main() test so a developer's shell can't leak in.
 RAG_ENV = (
     "SSR_RAG_N", "SSR_RAG_DATASET", "SSR_EVAL_LIMIT", "SSR_EVAL_REFRESH", "SSR_RAG_CHECK_QUOTA",
 )
-# A non-default (free) generator: runs with it are never canonical.
+# A non-default (free OpenRouter) generator: runs with it are never canonical.
 OTHER_GEN_MODEL = "openai/gpt-oss-120b:free"
+MISTRAL_URL = "https://api.mistral.ai/v1"
 
 
 def _patch_main(
@@ -369,12 +372,19 @@ def _patch_main(
     fake_judge = judge if judge is not None else FakeJudge()
     # Pin the provider mix and generator model with a fake key, so the run neither depends
     # on the developer's .env nor needs one (CI has none). Nothing here touches the network.
-    # gen_model=OTHER_GEN_MODEL exercises a non-default (non-canonical) generator.
-    monkeypatch.setattr(settings, "llm_provider", "openrouter")
+    # gen_model=OTHER_GEN_MODEL exercises a non-default (non-canonical) generator on
+    # OpenRouter; any other id runs on the default mistral provider.
+    on_openrouter = gen_model.endswith(":free")
+    monkeypatch.setattr(settings, "llm_provider", "openrouter" if on_openrouter else "mistral")
     monkeypatch.setattr(settings, "judge_provider", "openrouter")
-    monkeypatch.setattr(settings, "openrouter_llm_model", gen_model)
+    if on_openrouter:
+        monkeypatch.setattr(settings, "openrouter_llm_model", gen_model)
+    else:
+        monkeypatch.setattr(settings, "mistral_llm_model", gen_model)
+    monkeypatch.setattr(settings, "mistral_llm_fallback_model", DEFAULT_FALLBACK_MODEL)
     monkeypatch.setattr(settings, "openrouter_judge_model", DEFAULT_JUDGE_MODEL)
     monkeypatch.setattr(settings, "openrouter_api_key", FAKE_OPENROUTER_KEY)
+    monkeypatch.setattr(settings, "mistral_api_key", FAKE_MISTRAL_KEY)
     monkeypatch.setattr(rag_eval, "OUT", out)
     # Checkpoints and non-canonical runs stay under tmp_path, never the real data/.
     monkeypatch.setattr(rag_eval, "CACHE", tmp_path / "cache")
@@ -463,6 +473,8 @@ def test_rag_json_keeps_every_scored_query(rag_run):
         "reasoning_tokens": 10,
         "generation_cost_usd": GEN_COST_USD,
         "generation_provider": "AkashML",
+        "model_used": None,  # the fake doesn't say (a real GeneratedAnswer does)
+        "fallback_error": None,
         "verdict_source": "line",  # a well-formed final line
         "evidence_quote": None,  # the fake reply quotes nothing
         "quote_passage": None,
@@ -529,6 +541,7 @@ def test_eval_generator_uses_the_batch_retry_policy(rag_run):
 
     assert FakeGenerator.init_kwargs[-1] == {
         "max_retries": BATCH_MAX_RETRIES, "reask_max_retries": REASK_MAX_RETRIES,
+        "fallback_model": DEFAULT_FALLBACK_MODEL,  # the product's fallback, on in the eval too
     }
 
 
@@ -798,20 +811,38 @@ def test_is_daily_cap_recognises_openrouter_free_tier():
 
     assert _is_daily_cap(err(1000)) is True
     assert _is_daily_cap(err(20)) is False
+    # The header rule is OpenRouter's alone: another provider's exhausted per-minute limit
+    # (Mistral's is 30/min) is not a daily cap.
+    mistral = httpx.Response(
+        429, request=httpx.Request("POST", MISTRAL_URL + "/chat/completions"),
+        json={"message": "Requests rate limit exceeded"},
+        headers={"X-RateLimit-Limit": "30", "X-RateLimit-Remaining": "0"},
+    )
+    assert _is_daily_cap(openai.RateLimitError(message="Requests rate limit exceeded",
+                                               response=mistral, body=None)) is False
 
 
-def test_default_run_is_all_free(capsys, rag_run):
+def test_default_run_is_mistral_generator_and_free_judge(capsys, rag_run):
     path, blob, _ = rag_run
     run = blob["run"]
-    assert run["generator_model"] == DEFAULT_GEN_MODEL and DEFAULT_GEN_MODEL.endswith(":free")
-    assert run["judge_model"].endswith(":free")
-    assert run["generator_extra_body"] == {"provider": FREE_ROUTING}
+    assert (run["generator_provider"], run["generator_model"]) == ("mistral", DEFAULT_GEN_MODEL)
+    assert DEFAULT_GEN_MODEL == "ministral-14b-latest"
+    assert run["generator_base_url"] == MISTRAL_URL
+    assert run["generator_fallback_model"] == DEFAULT_FALLBACK_MODEL == "ministral-8b-latest"
+    assert run["judge_provider"] == "openrouter" and run["judge_model"].endswith(":free")
+    assert run["generator_extra_body"] == {}  # no OpenRouter fields, no reasoning field
     assert run["generator_reasoning_effort"] is None and run["generator_reasoning_param"] is None
     assert set(blob["cost"]) == {"reported_usd", "judge_reported_usd"}
+    assert blob["fallback_answers"] == 0
     out = capsys.readouterr().out
-    assert "both roles are free: $0 run" in out
-    assert "total: 10-15 free OpenRouter requests" in out  # 5 claims x (1-2 gen + 1 judge)
+    assert "generator: 5-10 requests to ministral-14b-latest on Mistral (free tier: 30/min)" in out
+    assert "ministral-8b-latest only if a call fails" in out
+    assert "total: 5 free OpenRouter requests (free tier" in out  # the judge only
+    assert "both roles are free" not in out
     assert "paid" not in out and "ceiling" not in out
+    for f in ("rag.json", "rag.md"):
+        text = (path / f).read_text()
+        assert FAKE_MISTRAL_KEY not in text and FAKE_OPENROUTER_KEY not in text
 
 
 def test_estimate_line_free_vs_openai_compat():
@@ -1279,7 +1310,8 @@ def test_check_quota_in_main_aborts_before_any_llm_call(rate_limited, monkeypatc
     argv = ["--check-quota"] if how == "flag" else []
     if how == "env":
         monkeypatch.setenv("SSR_RAG_CHECK_QUOTA", "1")
-    with pytest.raises(SystemExit, match="3 free requests left today < ~12 needed"):
+    # The default mix: only the 5 judge calls are free OpenRouter requests.
+    with pytest.raises(SystemExit, match="3 free requests left today < ~5 needed"):
         rag_eval.main(argv)
     assert gen.calls == [] and fake_judge.queries == [] and not out.exists()
     assert keys == [FAKE_OPENROUTER_KEY]  # sent the OpenRouter key, to the OpenRouter URL only
@@ -1362,22 +1394,31 @@ def test_empty_completion_naming_the_daily_cap_stops_the_run(rate_limited):
 
 
 def _ep(role, model, provider="openrouter"):
-    url = "https://openrouter.ai/api/v1" if provider == "openrouter" else "https://api.groq.com/openai/v1"
+    url = {"openrouter": "https://openrouter.ai/api/v1", "mistral": MISTRAL_URL}.get(
+        provider, "https://api.groq.com/openai/v1")
     return LLMEndpoint(role, provider, url, model)
 
 
-DEFAULT_GEN_EP = _ep("generator", DEFAULT_GEN_MODEL)
+DEFAULT_GEN_EP = _ep("generator", DEFAULT_GEN_MODEL, "mistral")
 DEFAULT_JUDGE_EP = _ep("judge", DEFAULT_JUDGE_MODEL)
 
 
 def test_default_endpoints_are_the_code_defaults_not_the_environment(monkeypatch):
     monkeypatch.setenv("SSR_OPENROUTER_LLM_MODEL", OTHER_GEN_MODEL)  # e.g. a leftover in the shell
     monkeypatch.setattr(settings, "openrouter_llm_model", OTHER_GEN_MODEL)
+    monkeypatch.setenv("SSR_MISTRAL_LLM_MODEL", "ministral-8b-latest")
+    monkeypatch.setattr(settings, "mistral_llm_model", "ministral-8b-latest")
     assert rag_eval.default_endpoints() == (
-        ("openrouter", DEFAULT_GEN_MODEL), ("openrouter", DEFAULT_JUDGE_MODEL),
+        ("mistral", DEFAULT_GEN_MODEL), ("openrouter", DEFAULT_JUDGE_MODEL),
     )
     assert rag_eval.non_default_roles(DEFAULT_GEN_EP, DEFAULT_JUDGE_EP) == []
     assert rag_eval.non_default_roles(_ep("generator", OTHER_GEN_MODEL), DEFAULT_JUDGE_EP) == ["generator"]
+    # The fallback model is not the default generator: a run on it is never canonical.
+    assert rag_eval.non_default_roles(
+        _ep("generator", DEFAULT_FALLBACK_MODEL, "mistral"), DEFAULT_JUDGE_EP) == ["generator"]
+    # Nor is the earlier default (the withdrawn OpenRouter Ling generator).
+    assert rag_eval.non_default_roles(
+        _ep("generator", "inclusionai/ling-3.0-flash-sante:free"), DEFAULT_JUDGE_EP) == ["generator"]
     assert rag_eval.non_default_roles(
         _ep("generator", "openai/gpt-oss-120b", "openai_compat"),
         _ep("judge", "qwen/qwen3.8-27b", "openai_compat"),
@@ -1428,7 +1469,7 @@ def test_non_default_generator_on_full_test_split_writes_eval_runs(tmp_path, mon
     printed = capsys.readouterr().out
     upfront = printed.split("[1/5]")[0]
     assert "NON-CANONICAL: generator differs from the code defaults" in upfront
-    assert f"generator: openrouter {OTHER_GEN_MODEL} (code default: openrouter {DEFAULT_GEN_MODEL})" in upfront
+    assert f"generator: openrouter {OTHER_GEN_MODEL} (code default: mistral {DEFAULT_GEN_MODEL})" in upfront
     assert "REPLACES" not in printed and "(non-canonical: never writes" in upfront
 
 
@@ -1629,14 +1670,13 @@ def test_reask_replies_are_written_under_v2_keys_only(tmp_path, monkeypatch):
     msgs = {qid: reask_messages(QUERIES[qid], hits) for qid in ("4", "5")}
     entries = _reask_entries(tmp_path)
     assert set(entries) == {rag_eval.reask_key_v2(qid, gen_ep, m) for qid, m in msgs.items()}
-    assert not {rag_eval.reask_key(qid, gen_ep.model, m) for qid, m in msgs.items()} & set(entries)
     assert all(k.startswith("reask|v2|") for k in entries)
     fp = rag_eval.reask_request_fingerprint(gen_ep)
     assert all(e["kind"] == "reask" and e["max_tokens"] == REASK_MAX_TOKENS
                and e["key_version"] == 2 and e["request"] == fp for e in entries.values())
 
 
-# --- re-ask cache keys: v2 (endpoint fingerprint) + the legacy-key migration ---------------
+# --- re-ask cache keys: v2 (endpoint fingerprint) ------------------------------------------
 
 CANON_GEN_MODEL = rag_eval.default_endpoints()[0][1]
 GROQ_URL = "https://api.groq.com/openai/v1"
@@ -1644,7 +1684,7 @@ REASK_MSGS = [{"role": "system", "content": "s"}, {"role": "user", "content": "c
 
 
 def _canon_ep(model=CANON_GEN_MODEL):
-    return LLMEndpoint("generator", "openrouter", "https://openrouter.ai/api/v1", model)
+    return LLMEndpoint("generator", "mistral", MISTRAL_URL, model)
 
 
 @pytest.fixture()
@@ -1652,33 +1692,21 @@ def auto_effort(monkeypatch):
     monkeypatch.setattr(settings, "llm_reasoning_effort", "auto")
 
 
-def test_reask_lookup_takes_a_legacy_entry_only_for_the_canonical_endpoint(tmp_path, auto_effort):
-    cache = ReplyCache(tmp_path / "c.json")
-    cache.put(rag_eval.reask_key("7", CANON_GEN_MODEL, REASK_MSGS), {"raw": "Verdict: SUPPORTED"})
-    canon = _canon_ep()
-    assert rag_eval.is_legacy_reask_endpoint(canon)
-    assert rag_eval.reask_lookup(cache, "7", canon, REASK_MSGS)["raw"] == "Verdict: SUPPORTED"
-    # Same model id + messages on another provider: the legacy key would collide, so the
-    # migration never reads it there.
-    groq = LLMEndpoint("generator", "openai_compat", GROQ_URL, CANON_GEN_MODEL)
-    assert not rag_eval.is_legacy_reask_endpoint(groq)
-    assert rag_eval.reask_lookup(cache, "7", groq, REASK_MSGS) is None
-    assert rag_eval.reask_lookup(cache, "8", canon, REASK_MSGS) is None  # other claim
-
-
-def test_reask_lookup_v2_hits_and_is_endpoint_specific(tmp_path, auto_effort):
+def test_reask_lookup_v2_hits_and_is_endpoint_and_model_specific(tmp_path, auto_effort):
     cache = ReplyCache(tmp_path / "c.json")
     groq = LLMEndpoint("generator", "openai_compat", GROQ_URL, CANON_GEN_MODEL)
     cache.put(rag_eval.reask_key_v2("7", groq, REASK_MSGS), {"raw": "Verdict: REFUTED"})
     assert rag_eval.reask_lookup(cache, "7", groq, REASK_MSGS)["raw"] == "Verdict: REFUTED"
+    # Same model id + messages on another provider or base URL: a miss, never a cross hit.
     assert rag_eval.reask_lookup(cache, "7", _canon_ep(), REASK_MSGS) is None
     other_url = LLMEndpoint("generator", "openai_compat", "http://localhost:11434/v1", CANON_GEN_MODEL)
     assert rag_eval.reask_lookup(cache, "7", other_url, REASK_MSGS) is None
-    # v2 wins over a legacy entry for the same request on the canonical endpoint.
+    # The primary's reply is not the fallback model's.
     canon = _canon_ep()
-    cache.put(rag_eval.reask_key("7", CANON_GEN_MODEL, REASK_MSGS), {"raw": "legacy"})
-    cache.put(rag_eval.reask_key_v2("7", canon, REASK_MSGS), {"raw": "v2"})
-    assert rag_eval.reask_lookup(cache, "7", canon, REASK_MSGS)["raw"] == "v2"
+    cache.put(rag_eval.reask_key_v2("7", canon, REASK_MSGS), {"raw": "primary"})
+    assert rag_eval.reask_lookup(cache, "7", canon, REASK_MSGS)["raw"] == "primary"
+    assert rag_eval.reask_lookup(cache, "7", _canon_ep(DEFAULT_FALLBACK_MODEL), REASK_MSGS) is None
+    assert rag_eval.reask_lookup(cache, "8", canon, REASK_MSGS) is None  # other claim
 
 
 def test_v2_key_covers_reasoning_effort_temperature_and_routing(monkeypatch, auto_effort):
@@ -1686,45 +1714,97 @@ def test_v2_key_covers_reasoning_effort_temperature_and_routing(monkeypatch, aut
     base = rag_eval.reask_key_v2("7", canon, REASK_MSGS)
     fp = rag_eval.reask_request_fingerprint(canon)
     assert fp == {
-        "provider": "openrouter", "base_url": "https://openrouter.ai/api/v1",
+        "provider": "mistral", "base_url": MISTRAL_URL,
         "model": CANON_GEN_MODEL, "reasoning_effort": None, "temperature": 0.1,
-        "extra_body": rag_eval.LEGACY_REASK_EXTRA_BODY,
+        "extra_body": {},
     }
     monkeypatch.setattr(settings, "llm_reasoning_effort", "high")
     assert rag_eval.reask_key_v2("7", canon, REASK_MSGS) != base
-    assert not rag_eval.is_legacy_reask_endpoint(canon)  # an explicit effort: no migration
     monkeypatch.setattr(settings, "llm_reasoning_effort", "auto")
     monkeypatch.setattr(rag_eval, "GENERATION_TEMPERATURE", None)
     assert rag_eval.reask_key_v2("7", canon, REASK_MSGS) != base
-    assert not rag_eval.is_legacy_reask_endpoint(canon)
     monkeypatch.undo()
     monkeypatch.setattr(settings, "llm_reasoning_effort", "auto")
     monkeypatch.setattr(LLMEndpoint, "extra_body", lambda self: {"provider": {"sort": "price"}})
     assert rag_eval.reask_key_v2("7", canon, REASK_MSGS) != base
-    assert not rag_eval.is_legacy_reask_endpoint(canon)
 
 
-def test_main_off_the_canonical_endpoint_ignores_legacy_entries_and_writes_v2(
-    rate_limited, tmp_path, monkeypatch
-):
-    # Legacy entries the canonical endpoint would hit; with the endpoint treated as
-    # non-canonical (as a Groq / re-routed one is) main must fetch fresh, under v2 keys.
-    setup, _, out = rate_limited
-    setup("generate", None, [])
-    settings.llm_reask = False
-    rag_eval.main()
-    setup("generate", None, [])
-    hits = rag_eval.reask_hits(["d1", "d2"], {d["doc_id"]: d for d in CORPUS})
-    cache = ReplyCache(tmp_path / "reask_cache" / "beir-scifact-test.json")
-    for qid in ("4", "5"):
-        msgs = reask_messages(QUERIES[qid], hits)
-        cache.put(rag_eval.reask_key(qid, DEFAULT_GEN_MODEL, msgs),
-                  {"raw": "Verdict: SUPPORTED [2]", "finish_reason": "stop", "kind": "reask"})
-    monkeypatch.setattr(rag_eval, "is_legacy_reask_endpoint", lambda ep: False)
-    rag_eval.main()
-    assert len(FakeGenerator.reask_calls) == 2  # the legacy entries were not taken
+def test_answering_endpoint_follows_the_rows_model():
+    canon = _canon_ep()
+    assert rag_eval.answering_endpoint(canon, {}) is canon
+    assert rag_eval.answering_endpoint(canon, {"model_used": CANON_GEN_MODEL}) is canon
+    fb = rag_eval.answering_endpoint(canon, {"model_used": DEFAULT_FALLBACK_MODEL})
+    assert (fb.provider, fb.base_url, fb.model) == ("mistral", MISTRAL_URL, DEFAULT_FALLBACK_MODEL)
+
+
+# --- the generator's fallback model in the eval --------------------------------------------
+
+
+class FallbackGenerator(FakeGenerator):
+    """FakeGenerator whose answers for ``fallback_queries`` came from the fallback model
+    (as LLMGenerator.generate reports them), and which records each re-ask's model."""
+
+    fallback_queries: set[str] = set()
+    reask_models: list = []
+
+    def generate(self, query, hits):
+        ans = super().generate(query, hits)
+        if isinstance(ans, GeneratedAnswer):
+            if query in self.fallback_queries:
+                ans.model_used, ans.fallback_error = DEFAULT_FALLBACK_MODEL, "RateLimitError"
+            else:
+                ans.model_used = DEFAULT_GEN_MODEL
+        return ans
+
+    def reask_verdict(self, query, hits, model=None):
+        type(self).reask_models.append((query, model))
+        return super().reask_verdict(query, hits, model=model)
+
+
+def _fallback_gen(queries):
+    return type("FB", (FallbackGenerator,), {"fallback_queries": set(queries), "reask_models": []})
+
+
+def test_a_canonical_run_refuses_fallback_rows_and_never_checkpoints_them(tmp_path, monkeypatch, capsys):
+    out = tmp_path / "results"
+    gen = _fallback_gen({"Two claim holds.", "Four claim holds."})
+    _patch_main(tmp_path, monkeypatch, out, generator=gen)
+    with pytest.raises(SystemExit) as exc:
+        rag_eval.main()
+    msg = str(exc.value.code)
+    assert "2 rows were answered by the fallback model, not ministral-14b-latest" in msg
+    assert "2, 4" in msg and "Nothing was written" in msg and not out.exists()
+    assert "q   2 FALLBACK: answered by ministral-8b-latest (RateLimitError" in capsys.readouterr().out
+    # The checkpoint holds only the primary model's rows ...
+    (ckpt,) = (tmp_path / "cache").iterdir()
+    assert sorted(json.loads(ckpt.read_text())["rows"]) == ["1", "3", "5"]
+    # ... and q4's re-ask went to the model that answered it.
+    assert ("Four claim holds.", DEFAULT_FALLBACK_MODEL) in gen.reask_models
     entries = _reask_entries(tmp_path)
-    assert sum(k.startswith("reask|v2|") for k in entries) == 2
+    assert {e["model"] for e in entries.values()} == {DEFAULT_FALLBACK_MODEL, DEFAULT_GEN_MODEL}
+    # A re-run with the primary healthy regenerates only the fallback rows, and writes.
+    gen2 = _fallback_gen(set())
+    calls = []
+    monkeypatch.setattr(gen2, "generate", lambda self, q, h: calls.append(q) or FallbackGenerator.generate(self, q, h))
+    monkeypatch.setattr(rag_eval, "LLMGenerator", gen2)
+    rag_eval.main()
+    assert sorted(calls) == ["Four claim holds.", "Two claim holds."]
+    blob = json.loads((out / "rag.json").read_text())
+    assert blob["run"]["canonical"] is True and blob["fallback_answers"] == 0
+    assert {r["model_used"] for r in blob["rows"]} == {DEFAULT_GEN_MODEL, None}  # q5: plain Answer
+
+
+def test_a_non_canonical_run_writes_fallback_rows_and_names_them(tmp_path, monkeypatch):
+    _patch_main(tmp_path, monkeypatch, tmp_path, generator=_fallback_gen({"Two claim holds."}))
+    monkeypatch.setenv("SSR_EVAL_LIMIT", "5")
+    rag_eval.main()
+    (run_dir,) = (tmp_path / "runs").iterdir()
+    blob = json.loads((run_dir / "rag.json").read_text())
+    rows = {r["query_id"]: r for r in blob["rows"]}
+    assert (rows["2"]["model_used"], rows["2"]["fallback_error"]) == (DEFAULT_FALLBACK_MODEL, "RateLimitError")
+    assert rows["1"]["model_used"] == DEFAULT_GEN_MODEL and rows["1"]["fallback_error"] is None
+    assert blob["fallback_answers"] == 1
+    assert "1 answer from the generator's fallback model" in (run_dir / "rag.md").read_text()
 
 
 # --- faithfulness: re-ask-only answers whose first reply was a placeholder -----------------
@@ -1824,35 +1904,6 @@ def test_rerun_from_a_complete_checkpoint_reasks_from_the_cache_with_no_llm_call
     assert second["run"]["reask_replies"] == {"cached": 2, "fetched": 0, "failed": 0}
 
 
-def test_a_legacy_v1_cached_reask_reply_is_a_hit_for_a_resumed_row(rate_limited, tmp_path, capsys):
-    # A complete first-pass checkpoint (re-ask off), then a re-ask reply cached under the
-    # legacy v1 key (ReplyCache.key, as 15 of the 16 replies behind the committed rag.json
-    # are), with passages rebuilt from the corpus: the canonical re-run must take the
-    # reply from it and make no call at all.
-    setup, _, out = rate_limited
-    setup("generate", None, [])
-    settings.llm_reask = False
-    rag_eval.main()
-    assert FakeGenerator.reask_calls == []
-    gen2, judge2 = setup("generate", None, [])  # llm_reask back on
-    hits = rag_eval.reask_hits(["d1", "d2"], {d["doc_id"]: d for d in CORPUS})
-    cache = ReplyCache(tmp_path / "reask_cache" / "beir-scifact-test.json")
-    for qid in ("4", "5"):
-        msgs = reask_messages(QUERIES[qid], hits)
-        cache.put(ReplyCache.key("reask", qid, DEFAULT_GEN_MODEL, REASK_MAX_TOKENS, msgs),
-                  {"raw": "Verdict: SUPPORTED [2]", "finish_reason": "stop", "kind": "reask"})
-    capsys.readouterr()
-    rag_eval.main(["--check-quota"])  # nothing needed: no /key request either
-    printed = capsys.readouterr().out
-    assert "2 resumed claims have no verdict -> 2 replies cached" in printed
-    assert "LLM requests needed now: ~0 (0 on OpenRouter's free caps)" in printed
-    assert "no free OpenRouter requests needed" in printed
-    assert gen2.calls == [] and judge2.queries == [] and FakeGenerator.reask_calls == []
-    blob = json.loads((out / "rag.json").read_text())
-    assert {r["query_id"]: r["predicted_label"] for r in blob["rows"]}["4"] == "SUPPORT"
-    assert blob["run"]["canonical"] is True
-
-
 def test_estimate_counts_the_reasks_resumed_rows_still_need(rate_limited, tmp_path, capsys):
     setup, _, out = rate_limited
     setup("generate", None, [])
@@ -1863,7 +1914,8 @@ def test_estimate_counts_the_reasks_resumed_rows_still_need(rate_limited, tmp_pa
     rag_eval.main()
     printed = capsys.readouterr().out
     assert "2 resumed claims have no verdict -> 0 replies cached" in printed and "2 to fetch" in printed
-    assert "LLM requests needed now: ~2 (2 on OpenRouter's free caps)" in printed
+    # The re-asks go to the Mistral generator: none on OpenRouter's free caps.
+    assert "LLM requests needed now: ~2 (0 on OpenRouter's free caps, 2 on Mistral)" in printed
     assert len(FakeGenerator.reask_calls) == 2
 
 
@@ -1897,7 +1949,7 @@ def test_a_failed_reask_keeps_the_first_pass_and_is_retried_next_run(rate_limite
     setup, _, out = rate_limited
     setup("generate", None, [])
 
-    def boom(self, query, hits):
+    def boom(self, query, hits, model=None):
         type(self).reask_calls.append((query, hits))
         raise RuntimeError("upstream 500")
 

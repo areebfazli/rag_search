@@ -192,5 +192,6 @@ def answer(
         hits=_to_hits(hits),
         verdict=ans.verdict,
         verdict_source=getattr(ans, "verdict_source", None),  # GeneratedAnswer side channel
+        model_used=getattr(ans, "model_used", None),
         warnings=[reask_warning] if reask_warning else [],
     )

@@ -30,6 +30,10 @@ class AnswerResponse(BaseModel):
     # (parsed from the answer), "reask" (the claim's answer had no verdict, so one
     # verdict-only re-check of the same passages supplied it), or None with no verdict.
     verdict_source: str | None = None
+    # Additive + optional: the model that wrote this answer — the configured generator,
+    # or its fallback model when the primary call failed (generator.LLMGenerator.generate).
+    # None when the generator does not report it.
+    model_used: str | None = None
     # Human-readable notes, de-duplicated: e.g. the verdict re-ask failed (only the error
     # CLASS name is shown, never its message) so the first answer is served without a
     # verdict.

@@ -16,7 +16,7 @@ dependencies = [
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
     "numpy>=1.26",
-    # OpenAI-compatible client for RAG generation (OpenRouter by default; any
+    # OpenAI-compatible client for RAG generation (Mistral by default; OpenRouter or any
     # OpenAI-compatible endpoint such as Groq, Ollama or OpenAI). Core because
     # /answer and app/eval/rag_eval depend on it.
     "openai>=1.40",
