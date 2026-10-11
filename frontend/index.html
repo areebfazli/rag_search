@@ -6,113 +6,292 @@
   <title>Scientific Claim Checker</title>
   <style>
     :root {
-      --bg: #0f1117; --panel: #171a23; --panel-2: #1e222d; --border: #2a2f3a;
-      --text: #e6e8ee; --muted: #9aa3b2; --accent: #6ea8fe; --accent-2: #7ee2b8; --danger: #f28b82;
+      --bg: #0c0e14; --panel: #151821; --panel-2: #1b1f2a; --panel-3: #222736;
+      --border: #272c38; --border-hi: #3a4152;
+      --text: #e8eaf0; --text-2: #c3c8d4; --muted: #8e97a8;
+      --accent: #7aaefc; --accent-2: #7ee2b8; --danger: #f28b82; --amber: #f2c46d;
+      --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px; --s7: 48px;
+      --r: 14px; --r-sm: 10px;
+      --v-color: var(--border-hi);
+      color-scheme: dark;
     }
     * { box-sizing: border-box; }
+    html { -webkit-text-size-adjust: 100%; }
     body {
-      margin: 0; background: var(--bg); color: var(--text);
-      font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      margin: 0; min-height: 100vh; color: var(--text);
+      background:
+        radial-gradient(900px 420px at 50% -140px, rgba(122, 174, 252, .16), transparent 70%),
+        radial-gradient(600px 300px at 85% -80px, rgba(126, 226, 184, .07), transparent 70%),
+        var(--bg);
+      background-repeat: no-repeat;
+      font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      -webkit-font-smoothing: antialiased;
     }
-    .wrap { max-width: 860px; margin: 0 auto; padding: 40px 20px 80px; }
-    header h1 { margin: 0 0 4px; font-size: 26px; letter-spacing: -0.02em; }
-    header p { margin: 0 0 28px; color: var(--muted); }
-    header .accent { color: var(--accent); }
+    .wrap { max-width: 880px; margin: 0 auto; padding: var(--s7) var(--s4) var(--s6); }
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    button { font-family: inherit; }
+
+    /* Header */
+    header { margin-bottom: var(--s5); }
+    header h1 { margin: 0 0 var(--s3); font-size: 34px; line-height: 1.15; letter-spacing: -0.025em; font-weight: 700; }
+    header h1 .accent { color: var(--accent); }
+    header .lede { margin: 0; max-width: 680px; color: var(--text-2); font-size: 17px; line-height: 1.55; }
+    .stats {
+      list-style: none; display: flex; flex-wrap: wrap; gap: var(--s2); margin: var(--s4) 0 0; padding: 0;
+    }
+    .stats li {
+      font-size: 13px; color: var(--muted); padding: 3px 10px; border-radius: 999px;
+      background: rgba(255, 255, 255, .03); border: 1px solid var(--border);
+    }
+    .stats b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+
+    /* Form */
     form {
-      display: flex; flex-direction: column; gap: 10px;
-      background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 12px;
+      background: var(--panel); border: 1px solid var(--border); border-radius: var(--r);
+      padding: var(--s3); box-shadow: 0 10px 30px rgba(0, 0, 0, .25);
     }
-    .row2 { display: flex; gap: 10px; align-items: center; }
-    .row2 .spacer { flex: 1; }
-    input[type=text], select, input[type=number] {
+    .ask { display: flex; gap: var(--s2); }
+    #q {
+      flex: 1; min-width: 0; background: var(--panel-2); color: var(--text);
+      border: 1px solid var(--border); border-radius: var(--r-sm);
+      padding: 14px 16px; font: inherit; font-size: 17px;
+      transition: border-color .15s, box-shadow .15s;
+    }
+    #q::placeholder { color: #6c7486; }
+    #q:hover { border-color: var(--border-hi); }
+    #q:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(122, 174, 252, .2); }
+    #go {
+      border: 0; border-radius: var(--r-sm); padding: 0 24px; font-weight: 600; font-size: 16px; white-space: nowrap;
+      cursor: pointer; color: #0b0e14; background: var(--accent); transition: filter .15s, transform .15s;
+    }
+    #go:hover:not(:disabled) { filter: brightness(1.1); }
+    #go:active:not(:disabled) { transform: translateY(1px); }
+    #go:disabled { opacity: .55; cursor: default; }
+    .settings {
+      display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2) var(--s5);
+      margin-top: var(--s3); padding: var(--s3) var(--s1) 0; border-top: 1px solid var(--border);
+      font-size: 13.5px; color: var(--muted);
+    }
+    .field { display: flex; align-items: center; gap: var(--s2); }
+    .field label { white-space: nowrap; }
+    .settings select, .settings input[type=number] {
       background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
-      border-radius: 8px; padding: 10px 12px; font-size: 15px;
+      border-radius: 8px; padding: 6px 10px; font: inherit; font-size: 14px;
     }
-    input[type=text] { width: 100%; }
-    input[type=number] { width: 74px; }
-    button {
-      border: 0; border-radius: 8px; padding: 10px 18px; font-weight: 600; font-size: 15px;
-      cursor: pointer; color: #0b0e14;
+    .settings select:hover, .settings input[type=number]:hover { border-color: var(--border-hi); }
+    .settings input[type=number] { width: 64px; }
+    details.modes { margin-left: auto; }
+    details.modes summary { cursor: pointer; color: var(--accent); list-style: none; }
+    details.modes summary::-webkit-details-marker { display: none; }
+    details.modes summary::after { content: " \25BE"; font-size: 11px; }
+    details.modes[open] summary::after { content: " \25B4"; }
+    details.modes summary:hover { text-decoration: underline; }
+    details.modes[open] { flex-basis: 100%; margin-left: 0; }
+    details.modes .modes-body {
+      margin-top: var(--s2); padding: var(--s3) var(--s4); border-radius: var(--r-sm);
+      background: var(--panel-2); border: 1px solid var(--border); line-height: 1.55;
     }
-    #go { background: var(--accent); }
-    button:disabled { opacity: .55; cursor: default; }
-    .hint { color: var(--muted); font-size: 13px; margin: 10px 2px 0; }
-    details.modes { color: var(--muted); font-size: 13px; margin: 10px 2px 0; }
-    details.modes summary { cursor: pointer; color: var(--accent); }
-    details.modes ul { margin: 8px 0 0; padding-left: 20px; }
-    details.modes li { margin: 4px 0; }
+    details.modes ul { margin: 0; padding-left: 18px; }
+    details.modes li { margin: var(--s1) 0; }
     details.modes b { color: var(--text); font-weight: 600; }
-    details.modes .note { margin: 8px 0 0; }
-    #status { margin: 22px 2px 6px; color: var(--muted); min-height: 20px; }
+    details.modes .note { margin: var(--s2) 0 0; }
+
+    /* Examples */
+    .examples { margin-top: var(--s5); }
+    .examples .ex-label { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; margin: 0 0 var(--s2) 2px; }
+    .chips { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--s2); }
+    .chip {
+      background: rgba(255, 255, 255, .02); color: var(--text-2); border: 1px solid var(--border); border-radius: var(--r-sm);
+      padding: 10px 14px; font-size: 14px; line-height: 1.45; cursor: pointer; text-align: left;
+      transition: border-color .15s, background .15s, color .15s;
+    }
+    .chip:hover:not(:disabled) { border-color: var(--accent); background: var(--panel-2); color: var(--text); }
+    .chip:disabled { opacity: .55; cursor: default; }
+    .steps { list-style: none; padding: 0; display: flex; flex-wrap: wrap; align-items: center; gap: var(--s1) var(--s2); margin: var(--s4) 2px 0; font-size: 13px; color: var(--muted); }
+    .steps .n {
+      display: inline-grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; margin-right: 6px;
+      font-size: 11px; font-weight: 700; color: var(--accent); background: rgba(122, 174, 252, .12);
+    }
+    .steps .arrow { color: var(--border-hi); }
+
+    /* Status / section heading */
+    #status { margin: var(--s6) 2px var(--s3); font-size: 14px; color: var(--muted); }
+    #status:empty { display: none; }
+    #answer:empty { display: none; }
+    #answer { margin-top: var(--s6); }
+    #answer + #status { margin-top: var(--s6); }
+    .sec-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: var(--s1) var(--s3); }
+    .sec-head h2 { margin: 0; font-size: 18px; font-weight: 650; color: var(--text); letter-spacing: -0.01em; }
+    .sec-head .sub { font-size: 13.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+    .status-err { color: var(--danger); }
+
+    /* Cards */
     .card {
-      background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
-      padding: 16px 18px; margin: 12px 0;
+      background: var(--panel); border: 1px solid var(--border); border-radius: var(--r);
+      padding: var(--s4) var(--s5); margin: var(--s3) 0;
     }
-    .answer { border-color: #33513f; background: #14201a; }
-    .answer .label { color: var(--accent-2); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; margin-bottom: 6px; }
-    .verdict-pill {
-      display: inline-block; margin-left: 8px; padding: 2px 9px; border-radius: 999px;
-      font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; vertical-align: 1px;
+
+    /* Verdict card */
+    .answer { padding: var(--s5); border-top: 3px solid var(--v-color); margin: 0; }
+    .answer.supported { --v-color: var(--accent-2); --v-rgb: 126, 226, 184; background: linear-gradient(180deg, rgba(126, 226, 184, .08), rgba(126, 226, 184, .02) 140px), var(--panel); border-color: #2c4a3a; }
+    .answer.refuted { --v-color: var(--danger); --v-rgb: 242, 139, 130; background: linear-gradient(180deg, rgba(242, 139, 130, .09), rgba(242, 139, 130, .02) 140px), var(--panel); border-color: #5a2f33; }
+    .answer.nei { --v-color: var(--amber); --v-rgb: 242, 196, 109; background: linear-gradient(180deg, rgba(242, 196, 109, .08), rgba(242, 196, 109, .02) 140px), var(--panel); border-color: #53451f; }
+    .answer.supported, .answer.refuted, .answer.nei { border-top-color: var(--v-color); }
+    .v-head { display: flex; align-items: center; gap: var(--s4); }
+    .v-icon {
+      flex-shrink: 0; display: grid; place-items: center; width: 44px; height: 44px; border-radius: 50%;
+      font-size: 22px; font-weight: 700; line-height: 1; color: var(--v-color);
+      background: rgba(var(--v-rgb, 142, 151, 168), .14); border: 1px solid rgba(var(--v-rgb, 142, 151, 168), .45);
     }
-    .verdict-pill.supported { color: var(--accent-2); background: rgba(126, 226, 184, .15); border: 1px solid rgba(126, 226, 184, .4); }
-    .verdict-pill.refuted { color: var(--danger); background: rgba(242, 139, 130, .15); border: 1px solid rgba(242, 139, 130, .4); }
-    .verdict-pill.nei { color: var(--muted); background: rgba(154, 163, 178, .15); border: 1px solid rgba(154, 163, 178, .35); }
-    .answer .model { color: var(--muted); font-size: 12px; margin: -2px 0 8px; }
-    .answer .body { font-size: 15.5px; }
-    .answer .sources { color: var(--muted); font-size: 13px; margin-top: 10px; }
-    .answer .sources ol { margin: 4px 0 0; padding-left: 22px; }
-    .answer.pending { border-color: var(--border); background: var(--panel); }
-    .answer.pending .body, .answer.failed .body { color: var(--muted); }
-    .answer.failed { border-color: var(--border); background: var(--panel); }
-    .cite { color: var(--accent-2); font-weight: 600; }
-    .card .top { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
-    .card .title { font-weight: 600; }
-    .card .meta { color: var(--muted); font-size: 12.5px; white-space: nowrap; }
-    .card .score { color: var(--accent-2); font-variant-numeric: tabular-nums; }
-    .card .snippet { color: var(--muted); margin-top: 8px; font-size: 14px; }
-    .rank { color: var(--accent); font-weight: 700; margin-right: 8px; }
-    .warn { color: var(--danger); }
-    footer { margin-top: 40px; color: var(--muted); font-size: 12.5px; text-align: center; }
-    @media (max-width: 620px) { .row2 { flex-wrap: wrap; } .row2 .spacer { display: none; } }
+    .v-eyebrow { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; }
+    .v-title { font-size: 26px; font-weight: 700; line-height: 1.2; letter-spacing: -0.015em; color: var(--text); }
+    .answer.supported .v-title, .answer.refuted .v-title, .answer.nei .v-title { color: var(--v-color); }
+    .v-meaning { margin-top: 2px; font-size: 15px; color: var(--text-2); }
+    .answer .body { margin-top: var(--s4); padding-top: var(--s4); border-top: 1px solid rgba(255, 255, 255, .07); font-size: 16.5px; line-height: 1.7; }
+    .answer .body strong { color: var(--text); }
+    .answer.failed .body { color: var(--text-2); }
+    .answer .model { margin-top: var(--s4); font-size: 13px; color: var(--muted); }
+    .skeleton { display: flex; flex-direction: column; gap: 10px; padding: 4px 0; }
+    .skeleton i { display: block; height: 12px; border-radius: 6px; background: var(--border-hi); animation: pulse 1.3s ease-in-out infinite; }
+    .skeleton i:nth-child(1) { width: 92%; } .skeleton i:nth-child(2) { width: 78%; animation-delay: .15s; } .skeleton i:nth-child(3) { width: 54%; animation-delay: .3s; }
+    @keyframes pulse { 0%, 100% { opacity: .35; } 50% { opacity: .85; } }
+    .answer.pending .v-icon { animation: pulse 1.3s ease-in-out infinite; }
+    .cite {
+      font: inherit; font-weight: 600; color: var(--accent-2); background: none; border: 0; padding: 0 1px;
+      cursor: pointer; text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 3px;
+    }
+    .cite:hover { text-decoration-style: solid; }
+    details.srcs { margin-top: var(--s4); color: var(--muted); font-size: 13.5px; }
+    details.srcs summary { cursor: pointer; color: var(--accent); }
+    details.srcs ol { margin: var(--s2) 0 0; padding-left: 22px; }
+    details.srcs li { margin: var(--s1) 0; }
+
+    /* Paper cards */
+    .hit { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: var(--s4); transition: border-color .15s, background .15s; }
+    .hit:hover { border-color: var(--border-hi); background: #181c26; }
+    .hit.flash { animation: flash 1.6s ease-out; }
+    @keyframes flash {
+      0%, 60% { border-color: var(--accent-2); box-shadow: 0 0 0 3px rgba(126, 226, 184, .35); }
+      100% { box-shadow: 0 0 0 0 rgba(126, 226, 184, 0); }
+    }
+    .rank {
+      display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; margin-top: 1px;
+      font-size: 13px; font-weight: 700; color: var(--accent); background: rgba(122, 174, 252, .12);
+      border: 1px solid rgba(122, 174, 252, .3); font-variant-numeric: tabular-nums;
+    }
+    .card .title { font-weight: 600; font-size: 16px; line-height: 1.45; color: var(--text); }
+    .card .meta { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s1) var(--s3); margin-top: var(--s1); font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+    .badge {
+      color: var(--accent-2); border: 1px solid rgba(126, 226, 184, .45); background: rgba(126, 226, 184, .12);
+      border-radius: 999px; padding: 0 8px; font-size: 11.5px; font-weight: 600; white-space: nowrap;
+    }
+    .card .snippet {
+      color: var(--muted); margin-top: var(--s2); font-size: 14.5px; line-height: 1.6;
+      display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+    }
+    .card .snippet.open { display: block; -webkit-line-clamp: unset; }
+    .more { background: none; border: 0; padding: 0; margin-top: var(--s2); color: var(--accent); font-size: 13.5px; cursor: pointer; }
+    .more:hover { text-decoration: underline; }
+    .warn { color: var(--danger); margin-top: var(--s2); font-size: 14px; }
+
+    footer {
+      margin-top: var(--s7); padding-top: var(--s5); border-top: 1px solid var(--border);
+      color: var(--muted); font-size: 13px; text-align: center; line-height: 1.8;
+    }
+    footer a { color: var(--accent); text-decoration: none; }
+    footer a:hover { text-decoration: underline; }
+    footer .tech { font-size: 12px; opacity: .8; }
+
+    @media (max-width: 720px) {
+      .chips { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 560px) {
+      .wrap { padding-top: var(--s6); }
+      header h1 { font-size: 28px; }
+      header .lede { font-size: 16px; }
+      .ask { flex-direction: column; }
+      #go { padding: 13px 20px; width: 100%; }
+      .settings { flex-direction: column; align-items: stretch; gap: var(--s3); }
+      .field { flex-direction: column; align-items: stretch; gap: var(--s1); }
+      .settings select, .settings input[type=number] { width: 100%; min-width: 0; padding: 9px 10px; font-size: 16px; }
+      .steps { flex-direction: column; align-items: flex-start; gap: var(--s2); }
+      .steps .arrow { display: none; }
+      details.modes { margin-left: 0; }
+      .card { padding: var(--s4); }
+      .answer { padding: var(--s4); }
+      .hit { gap: var(--s3); }
+      .v-title { font-size: 23px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .skeleton i, .answer.pending .v-icon { animation: none; opacity: .6; }
+      .hit.flash { animation: none; border-color: var(--accent-2); box-shadow: 0 0 0 3px rgba(126, 226, 184, .35); }
+      * { transition: none !important; scroll-behavior: auto !important; }
+    }
   </style>
 </head>
 <body>
   <div class="wrap">
     <header>
       <h1>Scientific <span class="accent">Claim Checker</span></h1>
-      <p>Hybrid retrieval over 5,183 SciFact abstracts — BM25 + dense embeddings fused with RRF, grounded answers with citations.</p>
+      <p class="lede">Checks a health or science claim against 5,183 research abstracts and says whether the papers support it, refute it, or don't say — with citations.</p>
+      <ul class="stats" aria-label="Measured results">
+        <li><b>75%</b> correct verdicts on 300 test claims</li>
+        <li>right paper in top 10 for <b>86%</b> of claims</li>
+        <li><b>0.12 s</b> search</li>
+        <li><b>$0</b> to run</li>
+      </ul>
     </header>
 
     <form id="f">
-      <input id="q" type="text" placeholder="e.g. Does vitamin D supplementation reduce mortality?" autocomplete="off" />
-      <div class="row2">
-        <select id="mode" title="Search mode" aria-label="Search mode">
-          <option value="hybrid" selected>Hybrid: keywords + meaning (recommended)</option>
-          <option value="bm25">Keywords only (BM25)</option>
-          <option value="dense">Meaning only (embeddings)</option>
-        </select>
-        <input id="k" type="number" min="1" max="20" value="8" title="results" />
-        <span class="spacer"></span>
+      <div class="ask">
+        <input id="q" type="text" placeholder="Type a claim, e.g. Vitamin D supplements reduce mortality." autocomplete="off" aria-label="Claim to check" />
         <button id="go" type="submit">Check claim</button>
       </div>
+      <div class="settings">
+        <div class="field">
+          <label for="mode">Search method</label>
+          <select id="mode" title="Search method">
+            <option value="hybrid" selected>Hybrid: keywords + meaning (recommended)</option>
+            <option value="bm25">Keywords only (BM25)</option>
+            <option value="dense">Meaning only (embeddings)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="k">Papers to show</label>
+          <input id="k" type="number" min="1" max="20" value="8" title="Papers to show" />
+        </div>
+        <details class="modes">
+          <summary>How do the methods differ?</summary>
+          <div class="modes-body">
+            <ul>
+              <li><b>Keywords only (BM25)</b>, right paper in the top 10 for 0.819 of claims: matches exact words, great for drug and gene names, misses synonyms.</li>
+              <li><b>Meaning only (embeddings, bge-small)</b>, 0.836: matches meaning and handles synonyms, but can blur precise terms.</li>
+              <li><b>Hybrid</b>, 0.855 (default): runs both and merges the rankings (Reciprocal Rank Fusion), so each catches what the other misses.</li>
+            </ul>
+            <p class="note">Measured on 300 SciFact test claims. Verdicts always use hybrid search, the measured setting; this choice only changes the paper list.</p>
+          </div>
+        </details>
+      </div>
     </form>
-    <div class="hint">Finds the most relevant papers, then a free Mistral model reads the top 5 and gives a verdict that cites them.</div>
 
-    <details class="modes">
-      <summary>How do the search modes differ?</summary>
-      <ul>
-        <li><b>Keywords only (BM25)</b>, right paper in the top 10 for 0.819 of claims: matches exact words, great for drug and gene names, misses synonyms.</li>
-        <li><b>Meaning only (embeddings, bge-small)</b>, 0.836: matches meaning and handles synonyms, but can blur precise terms.</li>
-        <li><b>Hybrid</b>, 0.855 (default): runs both and merges the rankings (Reciprocal Rank Fusion), so each catches what the other misses.</li>
-      </ul>
-      <p class="note">Measured on 300 SciFact test claims. Answers always use hybrid, the measured setting.</p>
-    </details>
+    <div class="examples">
+      <p class="ex-label" id="ex-label">Try an example</p>
+      <div class="chips" id="examples" role="group" aria-labelledby="ex-label"></div>
+    </div>
+    <ol class="steps" aria-label="How it works">
+      <li><span class="n">1</span>Search 5,183 papers</li><li class="arrow" aria-hidden="true">→</li>
+      <li><span class="n">2</span>A free Mistral model reads the top 5</li><li class="arrow" aria-hidden="true">→</li>
+      <li><span class="n">3</span>Verdict with citations</li>
+    </ol>
 
-    <div id="status"></div>
     <div id="answer"></div>
+    <div id="status" aria-live="polite"></div>
     <div id="results"></div>
 
-    <footer>FastAPI · Qdrant · bm25s · sentence-transformers · ranx · Mistral</footer>
+    <footer>
+      Research demo, not medical advice. · <a href="https://github.com/areebfazli/rag_search">Source on GitHub</a>
+      <div class="tech">FastAPI · Qdrant · bm25s · sentence-transformers · ranx · Mistral</div>
+    </footer>
   </div>
 
   <script>
@@ -120,130 +299,218 @@
     const statusEl = document.getElementById('status');
     const resultsEl = document.getElementById('results');
     const answerEl = document.getElementById('answer');
+    const qEl = document.getElementById('q');
     const MODE_NAMES = { hybrid: 'Hybrid search', bm25: 'Keywords-only search (BM25)', dense: 'Meaning-only search (embeddings)' };
     const go = document.getElementById('go');
+    const EXAMPLES = [  // real SciFact test claims; gold SUPPORT, CONTRADICT, NEI
+      'Bariatric surgery has a positive impact on mental health.',
+      'LDL cholesterol has no involvement in the development of cardiovascular disease.',
+      'Aspirin inhibits the production of PGE2.',
+    ];
     let reqId = 0;
+    let curAnswer = null;      // /answer payload for the current request
+    let searchSettled = false; // /search finished for the current request
+    const reduceMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-    function esc(s) { const d = document.createElement('div'); d.textContent = s ?? ''; return d.innerHTML; }
-    // Escaped first, so only these fixed tags are ever added: [n] citations and **bold**.
-    function citeMarkup(s) {
-      return esc(s)
-        .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
-        .replace(/\[(\d+)\]/g, '<span class="cite">[$1]</span>');
+    // Whitelist of known verdict values -> {label, cls, icon, meaning}. Anything else
+    // (including null/undefined/unrecognized strings) renders a neutral "Answer" header.
+    // The raw verdict string is only ever used as a lookup key, never inserted into the DOM.
+    const VERDICTS = {
+      SUPPORTED: { label: 'Supported', cls: 'supported', icon: '✓', meaning: 'The papers support this claim.' },
+      REFUTED: { label: 'Refuted', cls: 'refuted', icon: '✗', meaning: 'The papers contradict this claim.' },
+      'NOT ENOUGH EVIDENCE': { label: 'Not enough evidence', cls: 'nei', icon: '?', meaning: "The papers don't settle this claim." },
+    };
+    function verdictInfo(verdict) {
+      return Object.prototype.hasOwnProperty.call(VERDICTS, verdict) ? VERDICTS[verdict] : null;
     }
 
-    // Whitelist of known verdict values -> {label, cls}. Anything else (including
-    // null/undefined/unrecognized strings) renders no pill. The raw verdict string
-    // is only ever used as a lookup key here, never inserted into the DOM.
-    const VERDICTS = {
-      SUPPORTED: { label: 'Supported', cls: 'supported' },
-      REFUTED: { label: 'Refuted', cls: 'refuted' },
-      'NOT ENOUGH EVIDENCE': { label: 'Not Enough Evidence', cls: 'nei' },
-    };
+    function el(tag, cls, text) {
+      const n = document.createElement(tag);
+      if (cls) n.className = cls;
+      if (text != null) n.textContent = text;
+      return n;
+    }
 
-    function buildVerdictPill(verdict) {
-      if (!Object.prototype.hasOwnProperty.call(VERDICTS, verdict)) return null;
-      const v = VERDICTS[verdict];
-      const span = document.createElement('span');
-      span.className = `verdict-pill ${v.cls}`;
-      span.textContent = v.label;
-      span.setAttribute('aria-label', `Verdict: ${v.label}`);
-      return span;
+    // Answer text -> DOM using only textContent: **bold** and [n] (clickable citation) are
+    // the only constructs ever created; everything else stays plain text.
+    function renderAnswerText(container, text, onCite) {
+      const parts = String(text ?? '').split(/(\*\*[^*\n]+\*\*|\[\d+\])/);
+      for (const p of parts) {
+        if (!p) continue;
+        let m;
+        if ((m = /^\*\*([^*\n]+)\*\*$/.exec(p))) {
+          const b = document.createElement('strong'); b.textContent = m[1]; container.appendChild(b);
+        } else if ((m = /^\[(\d+)\]$/.exec(p))) {
+          const btn = document.createElement('button');
+          btn.type = 'button'; btn.className = 'cite'; btn.textContent = p;
+          btn.setAttribute('aria-label', `Go to source ${m[1]}`);
+          btn.addEventListener('click', () => onCite(Number(m[1])));
+          container.appendChild(btn);
+        } else container.appendChild(document.createTextNode(p));
+      }
     }
 
     // Built with DOM APIs + textContent only: hit text is never parsed as HTML.
     function buildHitCard(h, i) {
-      const card = document.createElement('div');
-      card.className = 'card';
-      const top = document.createElement('div');
-      top.className = 'top';
-      const title = document.createElement('div');
-      title.className = 'title';
-      const rank = document.createElement('span');
-      rank.className = 'rank';
-      rank.textContent = String(i + 1);
-      title.appendChild(rank);
-      title.appendChild(document.createTextNode(h.title || '(untitled)'));
-      const meta = document.createElement('div');
-      meta.className = 'meta';
-      meta.appendChild(document.createTextNode(`doc ${h.doc_id} · `));
-      const score = document.createElement('span');
-      score.className = 'score';
-      score.textContent = Number(h.score).toFixed(4);
-      meta.appendChild(score);
-      top.append(title, meta);
-      const snippet = document.createElement('div');
-      snippet.className = 'snippet';
-      const text = h.text || '';
-      snippet.textContent = text.slice(0, 280) + (text.length > 280 ? '…' : '');
-      card.append(top, snippet);
+      const card = el('div', 'card hit');
+      card.dataset.doc = String(h.doc_id);
+      const rank = el('div', 'rank', String(i + 1));
+      rank.setAttribute('aria-label', `Rank ${i + 1}`);
+      const main = el('div', 'main');
+      const title = el('div', 'title', h.title || '(untitled)');
+      const meta = el('div', 'meta');
+      const score = el('span', 'score', `relevance ${Number(h.score).toFixed(4)}`);
+      score.title = 'Retrieval score (higher is more relevant; scale depends on the search method)';
+      meta.append(el('span', 'docid', `doc ${h.doc_id}`), score);
+      const snippet = el('div', 'snippet', h.text || '');
+      main.append(title, meta, snippet);
+      card.append(rank, main);
       return card;
     }
 
+    // Add a "Show more" toggle to every clamped abstract that actually overflows.
+    function setupClamps() {
+      resultsEl.querySelectorAll('.hit').forEach(card => {
+        const sn = card.querySelector('.snippet');
+        let btn = card.querySelector('.more');
+        if (!sn.classList.contains('open')) {
+          if (sn.scrollHeight > sn.clientHeight + 1) {
+            if (!btn) {
+              btn = el('button', 'more', 'Show more');
+              btn.type = 'button';
+              btn.setAttribute('aria-expanded', 'false');
+              btn.addEventListener('click', () => {
+                const open = sn.classList.toggle('open');
+                btn.textContent = open ? 'Show less' : 'Show more';
+                btn.setAttribute('aria-expanded', String(open));
+              });
+              sn.after(btn);
+            }
+          } else if (btn) btn.remove();
+        }
+      });
+    }
+    window.addEventListener('resize', setupClamps);
+
     function renderHits(hits) {
       resultsEl.replaceChildren(...hits.map(buildHitCard));
+      setupClamps();
+      applyCitations();
     }
 
     function showWarnings(data) {
       if (!Array.isArray(data.warnings) || !data.warnings.length) return;
-      const w = document.createElement('div');
-      w.className = 'warn';
-      w.textContent = data.warnings.join(' ');
-      statusEl.appendChild(w);
+      statusEl.appendChild(el('div', 'warn', data.warnings.join(' ')));
+    }
+
+    function setStatusHeading(title, sub) {
+      const head = el('div', 'sec-head');
+      head.append(el('h2', null, title));
+      if (sub) head.append(el('span', 'sub', sub));
+      statusEl.replaceChildren(head);
     }
 
     function params() {
-      const q = document.getElementById('q').value.trim();
+      const q = qEl.value.trim();
       const mode = document.getElementById('mode').value;
       const k = document.getElementById('k').value || 8;
       return { q, mode, k };
     }
 
-    function answerCard(cls, labelText, bodyText) {
-      const card = document.createElement('div');
-      card.className = `card answer ${cls}`;
-      const label = document.createElement('div');
-      label.className = 'label';
-      label.textContent = labelText;
-      const body = document.createElement('div');
-      body.className = 'body';
-      body.textContent = bodyText;
-      card.append(label, body);
+    // Verdict card: icon + big title + one-line meaning, then the body node.
+    function answerCard(cls, head, bodyNode) {
+      const card = el('div', `card answer ${cls}`);
+      card.setAttribute('role', 'region');
+      card.setAttribute('aria-label', 'Verdict');
+      const hd = el('div', 'v-head');
+      const icon = el('div', 'v-icon', head.icon);
+      icon.setAttribute('aria-hidden', 'true');
+      const txt = el('div', 'v-text');
+      txt.append(el('div', 'v-eyebrow', 'Verdict'), el('div', 'v-title', head.title));
+      if (head.meaning) txt.append(el('div', 'v-meaning', head.meaning));
+      hd.append(icon, txt);
+      const body = el('div', 'body');
+      if (typeof bodyNode === 'string') body.textContent = bodyNode; else if (bodyNode) body.appendChild(bodyNode);
+      card.append(hd, body);
       return card;
     }
 
-    // Citation numbers [n] refer to /answer's own ranked sources, so they are listed here.
-    function renderAnswer(data) {
-      const card = answerCard('', 'Verdict', '');
-      card.querySelector('.body').innerHTML = citeMarkup(data.answer);
-      const pill = buildVerdictPill(data.verdict);
-      if (pill) card.querySelector('.label').appendChild(pill);
-      if (typeof data.model_used === 'string' && data.model_used) {
-        const m = document.createElement('div');
-        m.className = 'model';
-        m.textContent = `answered by ${data.model_used}`;
-        card.querySelector('.label').after(m);
-      }
-      const src = document.createElement('div');
-      src.className = 'sources';
-      const cited = Array.isArray(data.citations) ? data.citations.map(String) : [];
-      src.appendChild(document.createTextNode(
-        `Cited sources: ${cited.length ? cited.map(c => 'doc ' + c).join(', ') : '—'}. Numbers refer to the sources the model read:`));
-      const ol = document.createElement('ol');
-      (data.hits || []).forEach(h => {
-        const li = document.createElement('li');
-        li.textContent = `${h.title || '(untitled)'} (doc ${h.doc_id})`;
-        ol.appendChild(li);
+    function skeleton() {
+      const s = el('div', 'skeleton');
+      s.setAttribute('role', 'status');
+      s.setAttribute('aria-label', 'Checking the evidence');
+      s.append(document.createElement('i'), document.createElement('i'), document.createElement('i'));
+      return s;
+    }
+
+    // doc ids the answer cites (data.citations).
+    function citedDocIds() {
+      const ids = new Set();
+      if (!curAnswer) return ids;
+      (Array.isArray(curAnswer.citations) ? curAnswer.citations : []).forEach(c => ids.add(String(c)));
+      return ids;
+    }
+    function docForCitation(n) {
+      const h = curAnswer && Array.isArray(curAnswer.hits) ? curAnswer.hits[n - 1] : null;
+      return h ? String(h.doc_id) : null;
+    }
+    function findCard(doc) {
+      return Array.from(resultsEl.children).find(c => c.dataset && c.dataset.doc === doc) || null;
+    }
+
+    // "cited" badges on result cards; compact sources fallback if a cited paper isn't listed.
+    function applyCitations() {
+      const ids = citedDocIds();
+      resultsEl.querySelectorAll('.hit').forEach(card => {
+        const has = card.querySelector('.badge');
+        if (ids.has(card.dataset.doc)) {
+          if (!has) card.querySelector('.meta').appendChild(el('span', 'badge', 'cited'));
+        } else if (has) has.remove();
       });
-      src.appendChild(ol);
-      card.appendChild(src);
-      if (Array.isArray(data.warnings) && data.warnings.length) {
-        const w = document.createElement('div');
-        w.className = 'warn';
-        w.textContent = data.warnings.join(' ');
-        card.appendChild(w);
+      const srcs = answerEl.querySelector('details.srcs');
+      if (srcs && searchSettled) {
+        const missing = Array.from(ids).some(d => !findCard(d));
+        srcs.hidden = !missing;
       }
+    }
+
+    function onCite(n) {
+      const doc = docForCitation(n);
+      const card = doc ? findCard(doc) : null;
+      if (card) {
+        card.scrollIntoView({ behavior: reduceMotion() ? 'auto' : 'smooth', block: 'center' });
+        card.classList.remove('flash'); void card.offsetWidth; card.classList.add('flash');
+        setTimeout(() => card.classList.remove('flash'), 1800);
+        return;
+      }
+      const srcs = answerEl.querySelector('details.srcs');
+      if (srcs) { srcs.hidden = false; srcs.open = true; srcs.scrollIntoView({ block: 'nearest' }); }
+    }
+
+    function renderAnswer(data) {
+      curAnswer = data;
+      const v = verdictInfo(data.verdict);
+      const body = document.createElement('div');
+      renderAnswerText(body, data.answer, onCite);
+      const head = v ? { icon: v.icon, title: v.label, meaning: v.meaning }
+        : { icon: '•', title: 'Answer', meaning: 'No clear verdict was given; read the answer below.' };
+      const card = answerCard(v ? v.cls : '', head, body);
+      // Compact fallback list of the sources the model read ([n] = position); only shown
+      // when a cited paper is not in the visible results list.
+      const srcs = el('details', 'srcs');
+      srcs.hidden = true;
+      const ol = document.createElement('ol');
+      const read = Array.isArray(data.hits) ? data.hits : [];
+      read.forEach(h => ol.appendChild(el('li', null, `${h.title || '(untitled)'} (doc ${h.doc_id})`)));
+      srcs.append(el('summary', null, 'Sources the model read'), ol);
+      card.appendChild(srcs);
+      if (Array.isArray(data.warnings) && data.warnings.length) card.appendChild(el('div', 'warn', data.warnings.join(' ')));
+      const foot = [];
+      if (typeof data.model_used === 'string' && data.model_used) foot.push(`Answered by ${data.model_used}`);
+      if (read.length) foot.push(`read the top ${read.length} paper${read.length === 1 ? '' : 's'}`);
+      if (foot.length) card.appendChild(el('div', 'model', foot.join(' · ')));
       answerEl.replaceChildren(card);
+      applyCitations();
     }
 
     async function fetchJSON(url) {
@@ -263,9 +530,10 @@
       const { q, mode, k } = params();
       if (!q || go.disabled) return;
       const id = ++reqId;
-      go.disabled = true; resultsEl.replaceChildren();
-      answerEl.replaceChildren(answerCard('pending', 'Verdict', 'Checking the evidence…'));
-      statusEl.textContent = `Searching (${MODE_NAMES[mode] || mode})…`;
+      setBusy(true); resultsEl.replaceChildren();
+      curAnswer = null; searchSettled = false;
+      answerEl.replaceChildren(answerCard('pending', { icon: '…', title: 'Checking the evidence…', meaning: 'Reading the top 5 papers. This usually takes a few seconds.' }, skeleton()));
+      statusEl.textContent = `Searching 5,183 papers (${MODE_NAMES[mode] || mode})…`;
       const t0 = performance.now();
       const enc = encodeURIComponent;
       const searchP = fetchJSON(`/search?q=${enc(q)}&mode=${enc(mode)}&top_k=${enc(k)}`);
@@ -273,23 +541,38 @@
       const searchDone = searchP.then(data => {
         if (id !== reqId) return;
         const n = data.hits.length;
-        statusEl.textContent = `${MODE_NAMES[data.mode] || data.mode} · ${n} paper${n === 1 ? '' : 's'} · ${Math.round(performance.now() - t0)} ms`;
+        setStatusHeading('Papers found', `${n} · ${Math.round(performance.now() - t0)} ms · ${MODE_NAMES[data.mode] || data.mode}`);
         showWarnings(data);
+        searchSettled = true;
         renderHits(data.hits);
       }, err => {
         if (id !== reqId) return;
-        statusEl.textContent = `Search error: ${err.message}`;
+        searchSettled = true;
+        statusEl.replaceChildren(el('div', 'status-err', `Search error: ${err.message}`));
       });
       const answerDone = answerP.then(data => {
         if (id !== reqId) return;
         renderAnswer(data);
       }, err => {
         if (id !== reqId) return;
-        answerEl.replaceChildren(answerCard('failed', 'Verdict', `Answer unavailable: ${err.message}`));
+        answerEl.replaceChildren(answerCard('failed', { icon: '!', title: 'Verdict unavailable', meaning: 'The model could not answer this time.' }, `Answer unavailable: ${err.message}`));
       });
       await Promise.all([searchDone, answerDone]);
-      if (id === reqId) go.disabled = false;
+      if (id === reqId) setBusy(false);
     }
+
+    function setBusy(b) {
+      go.disabled = b;
+      document.querySelectorAll('.chip').forEach(c => { c.disabled = b; });
+    }
+
+    const exWrap = document.getElementById('examples');
+    EXAMPLES.forEach(text => {
+      const b = el('button', 'chip', text);
+      b.type = 'button';
+      b.addEventListener('click', () => { qEl.value = text; runCheck(); });
+      exWrap.appendChild(b);
+    });
 
     f.addEventListener('submit', runCheck);
   </script>

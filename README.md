@@ -10,11 +10,11 @@ papers it used. Retrieval is hand-rolled (keyword search + embeddings, fused), t
 from free models, so running it costs $0, and every headline number is measured against the
 benchmark's expert labels.
 
-In the UI you type a claim and press **Check claim**: one click returns a verdict card (the
-verdict, the model that answered, a cited explanation and the five papers it read) above the
-ranked list of matching papers.
+In the UI you type a claim (or click one of three examples) and press **Check claim**: one click
+returns a colour-coded verdict card (the verdict, a cited explanation whose [n] links jump to the
+paper, and the model that answered) above the ranked list of matching papers.
 
-![The UI after checking "Vitamin D deficiency increases the risk of multiple sclerosis": the claim box and the single Check claim button, a Verdict card marked SUPPORTED and answered by ministral-14b-latest with numbered citations, and the start of the ranked SciFact abstracts](docs/ui.png)
+![The UI after checking the example claim "Bariatric surgery has a positive impact on mental health.": the claim box with its Check claim button and search settings, three example claims, a green Supported verdict card answered by ministral-14b-latest with clickable numbered citations, and the first of the papers found, marked cited](docs/ui.png)
 
 ## Results
 
