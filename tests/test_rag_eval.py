@@ -2076,7 +2076,7 @@ def test_default_signature_keys_and_the_default_prompt_hash_are_pinned(monkeypat
     gen, judge_ep = _endpoints()
     base = rag_eval.signature_fields("beir/scifact/train", 100, gen, judge_ep)
     assert set(base) == DEFAULT_SIGNATURE_KEYS
-    assert rag_eval.prompt_hash().startswith("d0921f4e")  # the committed runs' prompt
+    assert rag_eval.prompt_hash().startswith("11034d39")  # the committed run's prompt
 
 
 def test_aggregate_tolerates_none_judge_fields():

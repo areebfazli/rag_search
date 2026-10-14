@@ -1,6 +1,6 @@
 # RAG verdicts under the SciFact label audit (secondary artifact)
 
-Source run: `eval/results/rag.json` (git aa6f301, generator `ministral-14b-latest`). Same stored answers, re-scored offline — no LLM calls.
+Source run: `eval/results/rag.json` (git 193426e, generator `ministral-14b-latest`). Same stored answers, re-scored offline — no LLM calls.
 
 **The headline stays the original SciFact labels** (`eval/results/rag.md`). This page is a sensitivity check against one published label audit, whose corrections come from a **single annotator** and have not been independently ratified; the audit's own authors recommend a multi-annotator re-audit before any corrected release.
 
@@ -8,11 +8,11 @@ Audit: Sylvestre, J. (2026). Gold Label Errors in the SciFact Benchmark: An LLM-
 
 | Labels | n | Verdict accuracy | SUPPORT | CONTRADICT | NEI |
 |---|---|---|---|---|---|
-| Original SciFact labels (headline) | 300 | 0.7500 | 0.7177 (n=124) | 0.8125 (n=64) | 0.7500 (n=112) |
-| Corrected labels — strict (the 11 confirmed errors only) | 300 | 0.7667 | 0.7672 (n=116) | 0.8182 (n=66) | 0.7373 (n=118) |
-| Corrected labels, 8 debatable claims excluded from scoring | 292 | 0.7740 | 0.7818 (n=110) | 0.8281 (n=64) | 0.7373 (n=118) |
+| Original SciFact labels (headline) | 300 | 0.7567 | 0.7339 (n=124) | 0.7500 (n=64) | 0.7857 (n=112) |
+| Corrected labels — strict (the 11 confirmed errors only) | 300 | 0.7800 | 0.7931 (n=116) | 0.7576 (n=66) | 0.7797 (n=118) |
+| Corrected labels, 8 debatable claims excluded from scoring | 292 | 0.7877 | 0.8091 (n=110) | 0.7656 (n=64) | 0.7797 (n=118) |
 
-11 of 300 claims change label under the strict corrections; on those, the stored prediction goes wrong→right on 6 and right→wrong on 1. Accuracy moves 0.7500 → 0.7667 (strict) and → 0.7740 with the 8 debatable claims excluded (n=292). The predictions are identical in every row; only the answer key differs, so this is not a paired test of a model change (to compare two runs under the corrected key: `make rag-compare A=… B=… ARGS=--labels=audit`).
+11 of 300 claims change label under the strict corrections; on those, the stored prediction goes wrong→right on 7 and right→wrong on 0. Accuracy moves 0.7567 → 0.7800 (strict) and → 0.7877 with the 8 debatable claims excluded (n=292). The predictions are identical in every row; only the answer key differs, so this is not a paired test of a model change (to compare two runs under the corrected key: `make rag-compare A=… B=… ARGS=--labels=audit`).
 
 ## Caveats — read before quoting the corrected numbers
 
@@ -32,7 +32,7 @@ The audit corrects claim–doc pairs; our label is per claim (`load_claim_labels
 | 208 | overgeneralization | SUPPORT → CONTRADICT | NEI | no → no | yes → yes | false_abstention → false_abstention |
 | 343 | outcome_mismatch | SUPPORT → NEI | CONTRADICT | no → no | yes → no | answered_with_evidence → answered_without_evidence |
 | 593 | label_reversal | SUPPORT → CONTRADICT | CONTRADICT | no → yes | yes → yes | answered_with_evidence → answered_with_evidence |
-| 770 | outcome_mismatch | SUPPORT → NEI | SUPPORT | yes → no | yes → no | answered_with_evidence → answered_without_evidence |
+| 770 | outcome_mismatch | SUPPORT → NEI | NEI | no → yes | yes → no | false_abstention → correct_abstention |
 | 808 | label_reversal | SUPPORT → CONTRADICT | NEI | no → no | yes → yes | false_abstention → false_abstention |
 | 847 | entity_mismatch | CONTRADICT → NEI | SUPPORT | no → no | yes → no | answered_with_evidence → answered_without_evidence |
 | 879 | label_reversal | CONTRADICT → SUPPORT | SUPPORT | no → yes | yes → yes | answered_with_evidence → answered_with_evidence |
@@ -64,36 +64,36 @@ Claim 597: the corrections file records `doc_id None -> NEI`, but the paper excl
 
 ### Original SciFact labels (headline)
 
-n = 300 · verdict accuracy **0.7500** (225/300; 95% Wilson CI 0.698–0.796)
+n = 300 · verdict accuracy **0.7567** (227/300; 95% Wilson CI 0.705–0.802)
 
 | Gold \ predicted | SUPPORT | CONTRADICT | NEI | NONE | n | Accuracy |
 |---|---|---|---|---|---|---|
-| **SUPPORT** | 89 | 5 | 30 | 0 | 124 | 0.7177 |
-| **CONTRADICT** | 3 | 52 | 9 | 0 | 64 | 0.8125 |
-| **NEI** | 14 | 14 | 84 | 0 | 112 | 0.7500 |
+| **SUPPORT** | 91 | 4 | 29 | 0 | 124 | 0.7339 |
+| **CONTRADICT** | 2 | 48 | 14 | 0 | 64 | 0.7500 |
+| **NEI** | 10 | 14 | 88 | 0 | 112 | 0.7857 |
 
-Abstention (rationale oracle): answered 0.5900 · evidence retrieved 0.5833 · abstention precision 0.7561 · recall 0.7440 · false abstention 0.1714 · answered without evidence 0.1808 · quadrants (ans+ev / ans−ev / false abst. / correct abst.) 145 / 32 / 30 / 93
+Abstention (rationale oracle): answered 0.5633 · evidence retrieved 0.5833 · abstention precision 0.7328 · recall 0.7680 · false abstention 0.2000 · answered without evidence 0.1716 · quadrants (ans+ev / ans−ev / false abst. / correct abst.) 140 / 29 / 35 / 96
 
 ### Corrected labels — strict (the 11 confirmed errors only)
 
-n = 300 · verdict accuracy **0.7667** (230/300; 95% Wilson CI 0.716–0.811)
+n = 300 · verdict accuracy **0.7800** (234/300; 95% Wilson CI 0.730–0.823)
 
 | Gold \ predicted | SUPPORT | CONTRADICT | NEI | NONE | n | Accuracy |
 |---|---|---|---|---|---|---|
-| **SUPPORT** | 89 | 2 | 25 | 0 | 116 | 0.7672 |
-| **CONTRADICT** | 1 | 54 | 11 | 0 | 66 | 0.8182 |
-| **NEI** | 16 | 15 | 87 | 0 | 118 | 0.7373 |
+| **SUPPORT** | 92 | 1 | 23 | 0 | 116 | 0.7931 |
+| **CONTRADICT** | 0 | 50 | 16 | 0 | 66 | 0.7576 |
+| **NEI** | 11 | 15 | 92 | 0 | 118 | 0.7797 |
 
-Abstention (rationale oracle): answered 0.5900 · evidence retrieved 0.5667 · abstention precision 0.7724 · recall 0.7308 · false abstention 0.1647 · answered without evidence 0.1977 · quadrants (ans+ev / ans−ev / false abst. / correct abst.) 142 / 35 / 28 / 95
+Abstention (rationale oracle): answered 0.5633 · evidence retrieved 0.5667 · abstention precision 0.7557 · recall 0.7615 · false abstention 0.1882 · answered without evidence 0.1834 · quadrants (ans+ev / ans−ev / false abst. / correct abst.) 138 / 31 / 32 / 99
 
 ### Corrected labels, 8 debatable claims excluded from scoring
 
-n = 292 · verdict accuracy **0.7740** (226/292; 95% Wilson CI 0.723–0.818)
+n = 292 · verdict accuracy **0.7877** (230/292; 95% Wilson CI 0.737–0.831)
 
 | Gold \ predicted | SUPPORT | CONTRADICT | NEI | NONE | n | Accuracy |
 |---|---|---|---|---|---|---|
-| **SUPPORT** | 86 | 2 | 22 | 0 | 110 | 0.7818 |
-| **CONTRADICT** | 1 | 53 | 10 | 0 | 64 | 0.8281 |
-| **NEI** | 16 | 15 | 87 | 0 | 118 | 0.7373 |
+| **SUPPORT** | 89 | 1 | 20 | 0 | 110 | 0.8091 |
+| **CONTRADICT** | 0 | 49 | 15 | 0 | 64 | 0.7656 |
+| **NEI** | 11 | 15 | 92 | 0 | 118 | 0.7797 |
 
-Abstention (rationale oracle): answered 0.5925 · evidence retrieved 0.5651 · abstention precision 0.7731 · recall 0.7244 · false abstention 0.1636 · answered without evidence 0.2023 · quadrants (ans+ev / ans−ev / false abst. / correct abst.) 138 / 35 / 27 / 92
+Abstention (rationale oracle): answered 0.5651 · evidence retrieved 0.5651 · abstention precision 0.7559 · recall 0.7559 · false abstention 0.1879 · answered without evidence 0.1879 · quadrants (ans+ev / ans−ev / false abst. / correct abst.) 134 / 31 / 31 / 96

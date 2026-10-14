@@ -147,6 +147,22 @@ def test_system_prompt_keeps_abstention_and_adds_optional_verdict():
     assert "do not add a verdict line" in SYSTEM  # optional: questions get none
 
 
+def test_system_prompt_requires_a_bare_verdict_line_for_claims():
+    # ministral-14b skipped the line on hedged claims (prose only, or "Verdict: SUPPORTED
+    # (with caveats)", which the strict parser rightly rejects): the prompt says the line
+    # is required and that caveats belong in the prose above it.
+    assert "required for every claim" in SYSTEM
+    assert "never on the Verdict line itself" in SYSTEM
+
+
+def test_build_user_prompt_ends_with_the_verdict_reminder_after_the_question():
+    prompt = build_user_prompt("Aspirin lowers stroke risk.", [SearchHit("d", 1.0, "b", {})])
+    lines = prompt.splitlines()
+    assert lines[-1] == "Answer (cite with [n]):"
+    assert lines[-2] == "If the question is a claim to check, end with the Verdict line."
+    assert prompt.index('Question: """') < prompt.index("end with the Verdict line")
+
+
 
 class _FakeCompletions:
     """Replays (content, finish_reason) replies in order and records every request."""
@@ -1224,7 +1240,8 @@ def test_a_verdict_line_with_grouped_citations_parses(line):
 
 # --- the product system prompt ------------------------------------------------------------
 
-SYSTEM_SHA256 = "f7a590b55959c08db24e2507688ebf73e83b4a6eddb70e4599fd1021c7b05721"
+# Moved 2026-10 by the verdict-line requirement (chosen on train; see docs/DETAILS.md).
+SYSTEM_SHA256 = "9967322ed146c3224c7cb8a626db9cf63350db3958ec548b840e93083ca870bc"
 
 
 def test_default_system_prompt_is_byte_identical():

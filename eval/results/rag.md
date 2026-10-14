@@ -6,7 +6,7 @@
 
 | Metric | Score |
 |---|---|
-| Faithfulness (over answered) | 0.99 |
+| Faithfulness (over answered) | 0.98 |
 | Context relevance (all) | 0.69 |
 
 ## Claim verdicts, scored against the gold label (no judge)
@@ -15,16 +15,16 @@ The final `Verdict:` line maps SUPPORTED→SUPPORT, REFUTED→CONTRADICT, NOT EN
 
 | Metric | Score |
 |---|---|
-| 3-class verdict accuracy | 0.75 |
+| 3-class verdict accuracy | 0.76 |
 | Verdict line parsed | 1.00 |
 | Truncated answers (hit the token budget after 1 retry) | 0 of 300 |
-| Re-asked (claim with no verdict: one verdict-only call) | 61 of 300 (61 gave a verdict) |
+| Re-asked (claim with no verdict: one verdict-only call) | 2 of 300 (2 gave a verdict) |
 
 | Gold \ predicted | SUPPORT | CONTRADICT | NEI | NONE |
 |---|---|---|---|---|
-| **SUPPORT** | 89 | 5 | 30 | 0 |
-| **CONTRADICT** | 3 | 52 | 9 | 0 |
-| **NEI** | 14 | 14 | 84 | 0 |
+| **SUPPORT** | 91 | 4 | 29 | 0 |
+| **CONTRADICT** | 2 | 48 | 14 | 0 |
+| **NEI** | 10 | 14 | 88 | 0 |
 
 ## Abstention — rationale oracle (headline)
 
@@ -32,23 +32,23 @@ The final `Verdict:` line maps SUPPORTED→SUPPORT, REFUTED→CONTRADICT, NOT EN
 
 | | Evidence retrieved | No evidence |
 |---|---|---|
-| Answered | 145 | 32 |
-| Abstained | 30 (false) | 93 (correct) |
+| Answered | 140 | 29 |
+| Abstained | 35 (false) | 96 (correct) |
 
 | Metric | Score |
 |---|---|
 | Evidence retrieved | 0.58 |
-| Answered (model attempted an answer) | 0.59 |
-| Abstention precision (abstained & no evidence) | 0.76 |
-| Abstention recall (no evidence & abstained) | 0.74 |
-| False abstention (had evidence, still abstained) | 0.17 |
-| Answered without evidence (hallucination risk) | 0.18 |
+| Answered (model attempted an answer) | 0.56 |
+| Abstention precision (abstained & no evidence) | 0.73 |
+| Abstention recall (no evidence & abstained) | 0.77 |
+| False abstention (had evidence, still abstained) | 0.20 |
+| Answered without evidence (hallucination risk) | 0.17 |
 
 | Gold label | n | Answered |
 |---|---|---|
-| SUPPORT | 124 | 94 |
-| CONTRADICT | 64 | 55 |
-| NEI | 112 | 28 |
+| SUPPORT | 124 | 95 |
+| CONTRADICT | 64 | 50 |
+| NEI | 112 | 24 |
 
 ## Abstention — legacy qrels oracle
 
@@ -56,14 +56,14 @@ The final `Verdict:` line maps SUPPORTED→SUPPORT, REFUTED→CONTRADICT, NOT EN
 
 | | Evidence retrieved | No evidence |
 |---|---|---|
-| Answered | 162 | 15 |
-| Abstained | 73 (false) | 50 (correct) |
+| Answered | 154 | 15 |
+| Abstained | 81 (false) | 50 (correct) |
 
 | Metric | Score |
 |---|---|
 | Evidence retrieved | 0.78 |
-| Answered (model attempted an answer) | 0.59 |
-| Abstention precision (abstained & no evidence) | 0.41 |
+| Answered (model attempted an answer) | 0.56 |
+| Abstention precision (abstained & no evidence) | 0.38 |
 | Abstention recall (no evidence & abstained) | 0.77 |
-| False abstention (had evidence, still abstained) | 0.31 |
-| Answered without evidence (hallucination risk) | 0.08 |
+| False abstention (had evidence, still abstained) | 0.34 |
+| Answered without evidence (hallucination risk) | 0.09 |

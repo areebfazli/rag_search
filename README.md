@@ -28,11 +28,11 @@ fallback if a call fails), and a free Nemotron 3 Ultra model on OpenRouter is th
 | Right paper in the top 10 results (Recall@10) | 0.855 | [`retrieval.md`](eval/results/retrieval.md) |
 | Right paper in the top 100 results (Recall@100) | 0.965 | [`retrieval.md`](eval/results/retrieval.md) |
 | Ranking quality (nDCG@10) | 0.724 | [`retrieval.md`](eval/results/retrieval.md) |
-| Correct verdict (support / contradict / not enough evidence) | **0.750** (225 of 300; 95% CI 0.698–0.796) | [`rag.md`](eval/results/rag.md), [`rag_label_audit.md`](eval/results/rag_label_audit.md) |
-| Correct verdict under a published label audit (one-sided check, not the headline) | 0.767 | [`rag_label_audit.md`](eval/results/rag_label_audit.md) |
-| When it abstains, the papers really lacked evidence (abstention precision) | 0.76 | [`rag.md`](eval/results/rag.md) |
-| Answers citing at least one paper | 281 of 300 | [`rag.json`](eval/results/rag.json) |
-| Answers that stick to the papers (faithfulness, LLM judge, 177 answers) | 0.99 | [`rag.md`](eval/results/rag.md) |
+| Correct verdict (support / contradict / not enough evidence) | **0.757** (227 of 300; 95% CI 0.705–0.802) | [`rag.md`](eval/results/rag.md), [`rag_label_audit.md`](eval/results/rag_label_audit.md) |
+| Correct verdict under a published label audit (one-sided check, not the headline) | 0.780 | [`rag_label_audit.md`](eval/results/rag_label_audit.md) |
+| When it abstains, the papers really lacked evidence (abstention precision) | 0.73 | [`rag.md`](eval/results/rag.md) |
+| Answers citing at least one paper | 291 of 300 | [`rag.json`](eval/results/rag.json) |
+| Answers that stick to the papers (faithfulness, LLM judge, 169 answers) | 0.98 | [`rag.md`](eval/results/rag.md) |
 | Search time per query (laptop CPU) | 0.124 s | [`latency.md`](eval/results/latency.md) |
 | Cost of the full 300-claim answer evaluation | $0 | [`rag.json`](eval/results/rag.json) (`cost`) |
 
@@ -45,15 +45,15 @@ fallback if a call fails), and a free Nemotron 3 Ultra model on OpenRouter is th
   claims differ (9 better, 2 worse; sign test p = 0.065, suggestive, not significant), and all of
   them are claims the dataset says have no evidence, so fusion does not find more evidence.
   [Details](docs/DETAILS.md#retrieval).
-- **Verdicts are right 75.0% of the time (225 of 300).** Of the 75 wrong verdicts, 39 are
-  supported/contradicted claims the model declined to call (30 of them supported claims, the
-  largest error cell) and 28 are "not enough evidence" (NEI) claims it answered anyway.
+- **Verdicts are right 75.7% of the time (227 of 300).** Of the 73 wrong verdicts, 43 are
+  supported/contradicted claims the model declined to call (29 of them supported claims, the
+  largest error cell) and 24 are "not enough evidence" (NEI) claims it answered anyway.
 - **The answer model changed, and the score difference is not significant.** The project was
   built on the free Ling 3.0 Flash Sante model on OpenRouter, which scored 0.797 (239 of 300,
   git `348c919`) and was withdrawn upstream in October 2026. It now uses Mistral's free
-  `ministral-14b-latest`. On the same 300 claims, Ling was right on 31 claims Mistral got wrong
-  and Mistral on 17 that Ling got wrong: McNemar p = 0.06, not significant. Abstention
-  (p = 0.58) and citation rate (p = 1.0) don't move either.
+  `ministral-14b-latest`. On the same 300 claims, Ling was right on 27 claims Mistral got wrong
+  and Mistral on 15 that Ling got wrong: McNemar p = 0.09, not significant. Abstention
+  (p = 0.38) and citation rate (p = 0.11) don't move significantly either.
   [Details](docs/DETAILS.md#the-generator-change-ling-to-mistral).
 - **On the Ling run, most errors were about where SciFact draws the NEI line.** Secondary checks
   on that run pointed away from retrieval and code: on 100 train claims, the paper SciFact cites
@@ -65,19 +65,23 @@ fallback if a call fails), and a free Nemotron 3 Ultra model on OpenRouter is th
   calibrating to its labelling convention, not a smarter system.
   [Diagnosis](docs/DETAILS.md#diagnosis-where-the-remaining-errors-come-from).
 - **The headline stays on the original labels.** A published 2026 audit corrects 11 of the 300
-  test labels; scored against it, accuracy is 0.767 (6 of the changed claims go wrong → right,
-  1 right → wrong), but the audit skipped NEI claims, so that is a one-sided sensitivity check.
+  test labels; scored against it, accuracy is 0.780 (7 of the changed claims go wrong → right,
+  none right → wrong), but the audit skipped NEI claims, so that is a one-sided sensitivity check.
   The LLM re-labellings are weaker evidence still: the annotators may share the generator's
   reading of the papers.
 - **The test set has been reused.** The verdict parser and the re-ask step were chosen on the
   Ling run with these same 300 claims in view, and several variants were scored on them, so they
   are no longer a clean held-out set; the re-ask's gain on Ling (7 fixed, 0 broken, raw
-  p = 0.016) is borderline after correction. The Mistral run is a single run of that existing
-  pipeline, with nothing tuned on it. [Details](docs/DETAILS.md#test-set-reuse).
-- **Mistral often skips the `Verdict:` line.** The re-ask step (one verdict-only follow-up call)
-  fired on 61 of 300 claims, against 16 on Ling, because ministral-14b often answers in prose
-  without the final verdict line; every re-ask returned a verdict (42 of 61 correct). Getting the
-  line on the first reply is an open next step, not something fixed here.
+  p = 0.016) is borderline after correction. The Mistral run is a single run. The one change
+  made for Mistral, a firmer verdict-line instruction in the prompt, was chosen on train claims,
+  not on these. [Details](docs/DETAILS.md#test-set-reuse).
+- **The verdict line now comes on the first reply.** Under the original prompt, ministral-14b
+  often answered in prose without the final `Verdict:` line (or added a caveat after it), so the
+  re-ask step (one verdict-only follow-up call) fired on 61 of 300 claims in the first Mistral run
+  (0.750). The prompt now says the line is required for every claim and that caveats belong in
+  the prose above it. On 100 train claims that cut the re-ask from 23 to 2 with accuracy within
+  noise. On test it fired on 2 of 300, and accuracy moved 0.750 → 0.757 (20 broken, 22 fixed,
+  McNemar p = 0.88): no change. [Details](docs/DETAILS.md#the-verdict-line-prompt-change).
 
 ## Tried, measured, not shipped
 
@@ -122,7 +126,7 @@ as `make eval` or `make index`.
 | `make eval` | Retrieval metrics on the 300 test claims → `eval/results/retrieval.md` (no key needed) |
 | `make analysis` | Re-score the cached retrieval runs by claim label → `eval/results/analysis.md` |
 | `make latency` | Per-query search time for every configuration → `eval/results/latency.md` |
-| `make eval-rag` | Answer-quality eval (needs both keys): 50 claims by default → `data/eval_runs/`. `SSR_RAG_N=all make eval-rag` runs all 300 (the canonical run made about 360 Mistral requests and 305 free OpenRouter judge requests) and is the only run that writes `eval/results/rag.md`; add `SSR_RAG_CHECK_QUOTA=1` to stop up front if today's free OpenRouter quota is short |
+| `make eval-rag` | Answer-quality eval (needs both keys): 50 claims by default → `data/eval_runs/`. `SSR_RAG_N=all make eval-rag` runs all 300 (the canonical run made about 300 Mistral requests and 305 free OpenRouter judge requests) and is the only run that writes `eval/results/rag.md`; add `SSR_RAG_CHECK_QUOTA=1` to stop up front if today's free OpenRouter quota is short |
 | `make rag-compare A=a/rag.json B=b/rag.json` | Claim-by-claim significance test (exact McNemar) between two answer runs |
 | `make rag-audit` | Re-score the answers under the published label audit (offline) → `eval/results/rag_label_audit.md` |
 | `make test` / `make lint` / `make ci` | Unit tests / ruff / both, as CI runs them |
