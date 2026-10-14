@@ -57,11 +57,6 @@ def is_within(path: str | os.PathLike[str], root: str | os.PathLike[str]) -> boo
     return False
 
 
-def is_under_results(path: str | os.PathLike[str], results: str | os.PathLike[str] | None = None) -> bool:
-    """`is_within(path, results)`, `results` defaulting to the repo's eval/results/."""
-    return is_within(path, RESULTS if results is None else results)
-
-
 def display_path(path: str | os.PathLike[str]) -> str:
     """`path` as recorded in a report: an absolute path inside the repo becomes
     repo-relative (so a committed artifact never carries the local checkout's absolute

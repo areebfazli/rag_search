@@ -141,7 +141,9 @@ def split_verdict(text: str) -> tuple[str, str | None]:
 
 # --- verdict recovery when the final Verdict line is missing -----------------------------
 #
-# Designed on the unparsed replies of a 100-claim beir/scifact/train run (never on test).
+# The patterns came from an error analysis of TEST failures (the earlier Ling generator's
+# unparsed replies) and were then refined and checked on beir/scifact/train, so the test
+# claims are not clean for them (docs/DETAILS.md, "Test-set reuse").
 # Both fallbacks are deliberately narrow, and both keep split_verdict's guarantee that
 # text quoted from a passage never counts as the model's own verdict:
 #
@@ -160,7 +162,6 @@ def split_verdict(text: str) -> tuple[str, str | None]:
 #   stance around or away from the claim (_STANCE_SCOPE: "support neither ... nor",
 #   "supports the opposite", "a different mechanism", "the claim is false", a ';' clause
 #   with a competing stance verb), and when a leading "No," / "Yes," contradicts it.
-VERDICT_SOURCES = ("line", "inline", "stance")
 _QUOTE_CHARS = "\"“”«»„"
 _INLINE_MARKUP = r"[\s*_`]*"  # no quotes: a quoted "Verdict: X" is a passage's, not ours
 _INLINE_VERDICT = re.compile(
@@ -792,8 +793,8 @@ class GeneratedAnswer(Answer):
     # served the final attempt (None when the backend doesn't say).
     cost_usd: float | None = None
     provider: str | None = None
-    # Which parse produced `verdict` (VERDICT_SOURCES: "line" | "inline" | "stance"), None
-    # when there is none; and the evidence-quote check (check_evidence_quote) — None when
+    # Which parse produced `verdict` ("line" | "inline" | "stance" from parse_verdict, or
+    # "reask"), None when there is none; and the evidence-quote check (check_evidence_quote) — None when
     # the reply quotes nothing. Measurements for the eval; the API does not expose them.
     verdict_source: str | None = None
     evidence_quote: EvidenceQuote | None = None
@@ -1013,7 +1014,7 @@ class LLMGenerator:
             return GeneratedAnswer(text="No relevant documents were found.", citations=[], hits=[])
         messages = [
             {"role": "system", "content": SYSTEM},
-            {"role": "user", "content": build_user_prompt(query, hits)},
+            {"role": "user", "content": build_user_prompt(query, hits, looks_like_claim(query))},
         ]
         costs: list[float | None] = []
         model_used, fallback_error = self.model, None

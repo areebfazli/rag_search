@@ -51,7 +51,7 @@ import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
-from app.core.config import settings
+from app.core.config import describe_non_default, non_default_settings, non_default_tag, settings
 from app.eval.retrieval_eval import CANONICAL_DATASET, CONFIGS, DEPTH, OUT, RUNS
 
 API_TOP_K = 8  # the /search endpoint's default top_k
@@ -153,13 +153,29 @@ def pick_queries(
     return sample, rest[:n_warmup]
 
 
+# Settings that change what this benchmark times: a run with any of them off its code
+# default is never canonical. Not here: rerank_top_k (every config passes top_k),
+# reranker_model (each config names its own), keys, URLs, paths and API limits.
+RESULT_SETTINGS = (
+    "rrf_k",
+    "dense_top_k",  # the API-shaped rows' candidate pool
+    "rerank_candidates",
+    "rerank_batch_size",  # no effect on scores, but on cross-encoder wall-clock
+    "embedding_model",
+    "embedding_query_prefix",
+)
+
+
 def output_dir(limit: int, n_queries: int, dataset: str | None = None) -> tuple[Path, bool]:
-    """eval/results/ for the canonical full run only; everything else to data/eval_runs/."""
+    """eval/results/ for the canonical full run only (canonical split, no limit, every
+    RESULT_SETTINGS on its code default); everything else to data/eval_runs/."""
     dataset = dataset or settings.eval_dataset
-    if not limit and dataset == CANONICAL_DATASET:
+    changed = non_default_settings(RESULT_SETTINGS, settings)
+    if not limit and dataset == CANONICAL_DATASET and not changed:
         return OUT, True
     slug = "".join(c if c.isalnum() else "-" for c in dataset).strip("-")
-    return RUNS / f"latency_{slug}_{n_queries}", False
+    name = f"latency_{slug}_{n_queries}" + (f"_{non_default_tag(changed, settings)}" if changed else "")
+    return RUNS / name, False
 
 
 # --- environment -----------------------------------------------------------------
@@ -311,8 +327,10 @@ def main() -> None:
         f"Latency: {settings.eval_dataset}, {len(all_queries)} first-stage queries, "
         f"{len(rerank_sample)} rerank queries, {len(warmup)} warm-up"
     )
+    if changed := non_default_settings(RESULT_SETTINGS, settings):
+        print(f"Non-default settings: {describe_non_default(changed, settings)}")
     if not canonical:
-        print(f"Non-canonical run (limit/dataset) — writing to {out}, not {OUT}")
+        print(f"Non-canonical run (limit/dataset/settings) — writing to {out}, not {OUT}")
 
     t0 = time.perf_counter()
     service = SearchService()

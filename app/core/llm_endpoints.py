@@ -424,7 +424,6 @@ class GuardedClient:
         self.endpoint = endpoint
         self.calls = 0
         self.cost_usd = 0.0
-        self.unreported_cost_calls = 0
         self.chat = _Chat(self._create)
 
     def _create(self, **kwargs):
@@ -434,10 +433,7 @@ class GuardedClient:
             kwargs["extra_body"] = body
         resp = self._client.chat.completions.create(**kwargs)
         self.calls += 1
-        cost = response_cost(resp)
-        if cost is None:
-            self.unreported_cost_calls += 1
-        else:
+        if (cost := response_cost(resp)) is not None:
             self.cost_usd += cost
         return resp
 

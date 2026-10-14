@@ -217,6 +217,32 @@ def test_generate_with_no_hits_has_no_verdict_and_no_llm_call():
     assert ans.verdict is None and gen.client.chat.completions.calls == 0
 
 
+_REMINDER = "If the question is a claim to check, end with the Verdict line."
+
+
+@pytest.mark.parametrize(
+    "query",
+    ["Does vitamin D reduce mortality?", "What causes insulin resistance?", "vitamin D mortality"],
+)
+def test_generate_omits_the_verdict_reminder_for_questions_and_keywords(query):
+    # Sent to every input, the reminder put a verdict line on 12 of 25 questions and keyword
+    # queries (0 once gated), so only an input that reads as a claim gets it.
+    gen = _generator("It does [1].")
+    gen.generate(query, _hits(2))
+    user = gen.client.chat.completions.requests[0]["messages"][1]["content"]
+    assert _REMINDER not in user
+    assert user.endswith(f'Question: """{query}"""\n\nAnswer (cite with [n]):')
+
+
+def test_generate_keeps_the_verdict_reminder_for_claims_byte_identical():
+    claim = "Vitamin D supplementation reduces all-cause mortality."
+    gen = _generator("It does [1].\nVerdict: SUPPORTED")
+    gen.generate(claim, _hits(2))
+    user = gen.client.chat.completions.requests[0]["messages"][1]["content"]
+    assert user == build_user_prompt(claim, _hits(2))  # the default: the eval's claim form
+    assert user.splitlines()[-2:] == [_REMINDER, "Answer (cite with [n]):"]
+
+
 def test_answer_response_verdict_is_optional():
     # Backward compatible: existing constructions (and clients) are unaffected.
     r = AnswerResponse(query="q", answer="a", citations=[], hits=[])

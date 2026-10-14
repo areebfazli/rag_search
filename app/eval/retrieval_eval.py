@@ -30,7 +30,7 @@ import os
 import time
 from pathlib import Path
 
-from app.core.config import Settings, settings
+from app.core.config import Settings, describe_non_default, non_default_settings, non_default_tag, settings
 from app.core.paths import RESULTS, assert_outside
 from app.ingest.build_index import MANIFEST_PATH
 from app.ingest.corpus import load_queries_qrels
@@ -75,6 +75,11 @@ CACHE = Path("data/eval_cache")
 # Only a full run on this split may write to OUT. Read off the Settings field default
 # rather than restated, so the two cannot drift apart.
 CANONICAL_DATASET = Settings.model_fields["eval_dataset"].default
+# Settings that change this harness's scores: a run with any of them off its code default
+# is never canonical. Not here: rerank_batch_size (a pure performance knob, see
+# _signature), dense_top_k and rerank_top_k (every query passes top_k = candidate_k =
+# DEPTH), reranker_model (each config names its own), keys, URLs, paths and API limits.
+RESULT_SETTINGS = ("rrf_k", "rerank_candidates", "embedding_model", "embedding_query_prefix")
 
 # Sentinel for "index built before manifests existed". It is NOT folded into the
 # payload: a missing manifest leaves the signature byte-identical to what pre-manifest
@@ -139,12 +144,16 @@ def _output_dir(limit: int, n_queries: int) -> tuple[Path, bool]:
 
     eval/results/ is the committed headline artifact, so only a full run on the
     canonical split may write there. Anything else — a smoke subset, another split —
-    goes to data/eval_runs/<dataset-slug>_<n>/, named so runs don't collide.
+    goes to data/eval_runs/<dataset-slug>_<n>/, named so runs don't collide. So does a
+    run with any RESULT_SETTINGS off its code default (directory suffix
+    _settings-<hash8>).
     """
-    if not limit and settings.eval_dataset == CANONICAL_DATASET:
+    changed = non_default_settings(RESULT_SETTINGS, settings)
+    if not limit and settings.eval_dataset == CANONICAL_DATASET and not changed:
         return OUT, True
     slug = "".join(c if c.isalnum() else "-" for c in settings.eval_dataset).strip("-")
-    return assert_outside(RUNS / f"{slug}_{n_queries}"), False
+    name = f"{slug}_{n_queries}" + (f"_{non_default_tag(changed, settings)}" if changed else "")
+    return assert_outside(RUNS / name), False
 
 
 def cached_run(
@@ -269,8 +278,10 @@ def main() -> None:
         f"Eval set: {settings.eval_dataset}, {len(queries)} queries, "
         f"{n_judg} relevance judgments"
     )
+    if changed := non_default_settings(RESULT_SETTINGS, settings):
+        print(f"Non-default settings: {describe_non_default(changed, settings)}")
     if not canonical:
-        print(f"Non-canonical run (limit/dataset) — writing to {out}, not {OUT}")
+        print(f"Non-canonical run (limit/dataset/settings) — writing to {out}, not {OUT}")
     print(f"Rerank slice: top-{settings.rerank_candidates} of {DEPTH} fused candidates\n")
 
     service = SearchService()

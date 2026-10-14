@@ -5,6 +5,9 @@ generator), OpenRouter's free tier (the default judge) or any OpenAI-compatible 
 """
 from __future__ import annotations
 
+import hashlib
+import json
+from collections.abc import Iterable
 from typing import Literal
 
 from pydantic import Field, SecretStr
@@ -26,7 +29,7 @@ class Settings(BaseSettings):
     # SSR_RERANKER_MODEL, but measure before assuming a bigger reranker helps.
     reranker_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
-    # --- Vector store (Qdrant local/embedded: on-disk path, or ":memory:") ---
+    # --- Vector store (Qdrant local/embedded: an on-disk path built by `make index`) ---
     qdrant_location: str = "./data/qdrant"
     qdrant_collection: str = "corpus"
     bm25_path: str = "./data/bm25s"
@@ -164,6 +167,32 @@ class Settings(BaseSettings):
     # RAG-eval judge on the "openai_compat" provider. Deliberately a different model FAMILY from the generator,
     # not just a smaller size: same-family judging compounds shared preferences.
     judge_model: str = "qwen/qwen3.8-27b"
+
+
+def non_default_settings(names: Iterable[str], current: Settings) -> list[str]:
+    """The fields in `names` whose value in `current` differs from the code default
+    (Settings.model_construct(): field defaults only, no env, no .env). The eval harnesses
+    pass their own allowlist of result-affecting fields; a run with any of them changed
+    is never canonical."""
+    default = Settings.model_construct()
+    return [n for n in names if getattr(current, n) != getattr(default, n)]
+
+
+def describe_non_default(names: Iterable[str], current: Settings) -> str:
+    """'SSR_RRF_K=30 (code default 60), ...' for a demotion notice. Only for non-secret
+    fields: the values are printed."""
+    default = Settings.model_construct()
+    return ", ".join(
+        f"SSR_{n.upper()}={getattr(current, n)!r} (code default {getattr(default, n)!r})"
+        for n in names
+    )
+
+
+def non_default_tag(names: Iterable[str], current: Settings) -> str:
+    """A short, stable directory suffix for a run under these non-default values, so it
+    cannot overwrite a default-settings run of the same size."""
+    payload = json.dumps({n: getattr(current, n) for n in names}, sort_keys=True)
+    return "settings-" + hashlib.sha256(payload.encode()).hexdigest()[:8]
 
 
 def secret_value(value: SecretStr | str) -> str:

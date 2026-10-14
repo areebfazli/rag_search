@@ -136,8 +136,9 @@ ran higher. Hybrid RRF is the default; reranking stays available as `mode=hybrid
 ### How an answer is made
 
 `GET /answer?q=...` runs hybrid retrieval and passes the top 5 abstracts to an OpenAI-compatible
-LLM with a grounded prompt (retrieved text is sanitized so it cannot forge the prompt's
-structure). Answers cite sources as `[n]`, mapped back to document ids, and the model is told to
+LLM with a grounded prompt. The user's question or claim is sanitized (collapsed to one line,
+quote runs shortened so it cannot close its `"""` block), so it cannot forge the prompt's
+structure; the passages are not sanitized, since they come from the fixed SciFact corpus. Answers cite sources as `[n]`, mapped back to document ids, and the model is told to
 **abstain when the context lacks the evidence** rather than guess. For a claim it ends with
 `Verdict: SUPPORTED | REFUTED | NOT ENOUGH EVIDENCE`; the prompt says this line is required for
 every claim and that any caveat goes in the prose above it, never on the line itself (see
@@ -294,6 +295,11 @@ So the fix is in the prompt, not the parser. The system prompt now adds that the
 sentences above it, never on the Verdict line itself", and the user turn ends with "If the
 question is a claim to check, end with the Verdict line." before `Answer (cite with [n]):`.
 The prompt hash moved from `d0921f4e` to `11034d39`; parser and re-ask are unchanged.
+Sent to every input, that reminder leaked onto ordinary use: on 20 biomedical questions and 5
+keyword queries (one Mistral reply each, no judge) it put a `Verdict:` line on 9 questions and 3
+keyword queries, against 3 and 0 under the old prompt. The generator now adds the reminder only
+when `looks_like_claim` accepts the input (all 300 test and the 100 train claims do, so their
+prompts and the hash are byte-identical); re-measured, 0 of the 25 replies carried a verdict line.
 
 **Chosen on train, not test.** On the same 100 train claims (seed 13; judge on; runs under
 `data/eval_runs/`), paired McNemar:
@@ -394,7 +400,9 @@ errors was done on Ling's 61.
 (gitignored), keyed by a signature of everything that affects the result, and checkpointed every
 20 queries, because a cross-encoder sweep is hours on a laptop CPU. `SSR_EVAL_REFRESH=1` ignores
 the cache, `SSR_EVAL_LIMIT=n` runs a smoke subset, and a corrupt checkpoint degrades to
-recompute. `make analysis` re-scores the cached runs by claim label (loading BM25 only, never
+recompute. Only a full test-split run with every result-affecting setting on its code default
+(`RESULT_SETTINGS` in `retrieval_eval.py` and `latency.py`) writes `eval/results/`; any other
+run goes to `data/eval_runs/` and prints why. `make analysis` re-scores the cached runs by claim label (loading BM25 only, never
 Qdrant) and replays RRF at other settings; `make latency` times every config.
 
 ### Answer harness and the canonical artifact
@@ -404,16 +412,21 @@ samples nest: the first 50 of the 300-claim run are exactly the 50-claim sample.
 `SSR_RAG_DATASET=beir/scifact/train` (809 claims, disjoint from test) is for prompt development.
 
 - **Only one kind of run writes the committed artifact.** `eval/results/rag.{md,json}` is
-  written only by a run over the whole test split (`SSR_RAG_N=all`), with no `SSR_EVAL_LIMIT`,
-  both roles on the code-default models, the re-ask on and no fallback answers. Every other run
-  (the default 50 claims, any train or limited run, another model, re-ask off) writes to
-  `data/eval_runs/rag_<dataset>_<n>_<prompt-hash8>[_<model-slug>][_noreask]/`. A canonical run
+  written only by a run over the whole test split (`SSR_RAG_N=all`; a number, even 300, does not
+  count), with no `SSR_EVAL_LIMIT`, both roles on the code-default models, every
+  result-affecting setting on its code default (`rag_eval.RESULT_SETTINGS`: RRF k, candidate
+  depth, embedding model and query prefix, corpus, token budget, reasoning effort), the re-ask
+  on and no fallback answers. Every other run (the default 50 claims, any train or limited run,
+  another model, a changed setting, re-ask off) writes to
+  `data/eval_runs/rag_<dataset>_<n>_<prompt-hash8>[_<model-slug>][_settings-<hash8>][_noreask]/`. A canonical run
   that ends with a claim missing or a failed re-ask refuses to write (finished rows stay
   checkpointed, so a re-run redoes only those); non-canonical runs write and name the missing
   claims.
 - **Checkpoint and resume.** Every completed row is saved at once under
   `data/eval_cache/rag/<signature>.json` (signature = dataset, n, seed, both endpoints, both
-  prompt hashes, top-k, mode, token budget, reasoning and retrieval settings). A daily-cap stop is
+  prompt hashes, top-k, mode, token budget, reasoning and retrieval settings; the temperature and
+  truncation-retry factor only when they differ from the committed run's, so its recorded
+  signature still reproduces). A daily-cap stop is
   resumed by re-running the same command; skipped rows are retried.
 - **Re-ask reply cache.** Re-ask replies are cached in `data/eval_cache/secondlook/`
   (`app/eval/reply_cache.py`), keyed by the exact request including provider, base URL and model,
@@ -728,7 +741,10 @@ consistency, not correctness.
   hits, `model_used` (the model that answered: the primary or its fallback) and `warnings`.
   Without a key (`SSR_MISTRAL_API_KEY` by default) it returns a clear 503 naming the missing
   variable (never its value); a provider failure is a 502, not a 500.
-- `GET /health`, and the UI at `/`.
+- `GET /health`, and the UI at `/`: one **Check claim** button calls `/answer` and `/search` in
+  parallel and shows a verdict card (icon, verdict, one-line meaning, cited answer with clickable
+  `[n]`) above the ranked papers, each score labelled for its method (keyword score, similarity
+  or fused score). If `/search` fails, the answer's cited sources are still listed.
 
 First run downloads the SciFact corpus (~9 MB via `ir_datasets`) and the embedding model (~130 MB
 from Hugging Face); indexing takes a few minutes. Search and `make eval` need no API key; `/answer` needs
@@ -823,9 +839,9 @@ digest-pinned and the install uses the exact `uv.lock`.
 - **The verdict line is a prompt instruction, not a guarantee.** Under the original prompt
   ministral-14b left out the `Verdict:` line often enough that the re-ask fired on 61 of 300
   claims. The firmer prompt cut that to 2, but both were a caveat on the verdict line, so the
-  re-ask stays as the safety net. A question (not a claim) now also sees a one-line reminder about
-  the verdict; the system prompt still tells the model to add none for a question, but that was
-  not re-measured (every eval input is a claim).
+  re-ask stays as the safety net. The closing verdict reminder goes only to inputs that
+  `looks_like_claim` accepts; a claim it misses (short, no final period) gets the question form,
+  and the 25-input check of that gate is one reply each, a smoke test rather than a measurement.
 - **The label checks are secondary.** The audit is one annotator, mostly LLM-flagged, with no NEI
   claims audited; the re-labellings use LLM annotators, not humans, and were run on Ling's
   errors, not Mistral's. Neither replaces the headline.
@@ -861,7 +877,7 @@ app/ingest     corpus (BEIR/SciFact via ir_datasets, + claim labels from the sou
 app/index      embedder (bge-small) · vector_store (Qdrant embedded) · lexical (bm25s)
 app/retrieve   dense · fusion (RRF) · service (SearchService, the single retrieval entry point)
 app/rerank     cross_encoder (MS-MARCO MiniLM default; bge-reranker-base evaluated)
-app/generate   generator (OpenAI-compatible client, ministral-8b fallback, verdict parser, re-ask) · prompts (grounded prompt + injection sanitizer)
+app/generate   generator (OpenAI-compatible client, ministral-8b fallback, verdict parser, re-ask) · prompts (grounded prompt + question sanitizer)
 app/eval       retrieval_eval · analysis · latency · rag_eval · reply_cache · rag_compare · rag_rescore · label_audit
 app/schemas    api (Pydantic request/response models)
 app/api        main (FastAPI: /search, /answer, rate-limited)

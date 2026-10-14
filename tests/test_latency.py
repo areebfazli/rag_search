@@ -126,6 +126,28 @@ def test_a_limited_run_never_writes_to_eval_results(monkeypatch):
     assert out.name.startswith("latency_") and out.name.endswith("_20")
 
 
+LATENCY_OVERRIDES = {
+    "rrf_k": 30,
+    "dense_top_k": 50,
+    "rerank_candidates": 16,
+    "rerank_batch_size": 32,
+    "embedding_model": "BAAI/bge-base-en-v1.5",
+    "embedding_query_prefix": "",
+}
+
+
+def test_latency_overrides_cover_every_result_setting():
+    assert set(LATENCY_OVERRIDES) == set(lat.RESULT_SETTINGS)
+
+
+@pytest.mark.parametrize("field", sorted(LATENCY_OVERRIDES))
+def test_a_non_default_result_setting_never_writes_to_eval_results(monkeypatch, field):
+    monkeypatch.setattr(settings, field, LATENCY_OVERRIDES[field])
+    out, canonical = lat.output_dir(0, 300, lat.CANONICAL_DATASET)
+    assert not canonical and out.parent == re_mod.RUNS
+    assert out.name.startswith("latency_beir-scifact-test_300_settings-")
+
+
 def test_a_different_dataset_never_writes_to_eval_results():
     out, canonical = lat.output_dir(0, 300, "beir/scifact/train")
     assert not canonical and out.parent == re_mod.RUNS

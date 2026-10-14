@@ -392,12 +392,14 @@ def _patch_main(
     monkeypatch.setattr(rag_eval, "REASK_CACHE", tmp_path / "reask_cache")
     monkeypatch.setattr(rag_eval, "load_documents", lambda: [dict(d) for d in CORPUS])
     monkeypatch.setattr(settings, "llm_reask", True)
-    # The code default: the re-ask cache's legacy-key migration depends on it.
+    # The code default: any other value makes the run non-canonical (RESULT_SETTINGS).
     monkeypatch.setattr(settings, "llm_reasoning_effort", "auto")
     monkeypatch.setattr(FakeGenerator, "reask_calls", [])
     monkeypatch.setattr(FakeGenerator, "init_kwargs", [])
     for var in RAG_ENV:
         monkeypatch.delenv(var, raising=False)
+    # Only SSR_RAG_N=all can be canonical (rag_eval.output_dir).
+    monkeypatch.setenv("SSR_RAG_N", "all")
     monkeypatch.setattr(rag_eval, "MODE", mode)
     monkeypatch.setattr(rag_eval, "THROTTLE_S", 0.0)
     monkeypatch.setattr(
@@ -572,7 +574,7 @@ def test_rag_json_run_provenance(rag_run):
     assert run["generator_model"] == rag_eval.GEN_MODEL
     assert run["judge_model"] == rag_eval.JUDGE_MODEL
     assert run["mode"] == rag_eval.MODE and run["reranker_model"] is None
-    assert run["n_requested"] == rag_eval.N and run["sample_seed"] == rag_eval.SEED
+    assert run["n_requested"] == "all" and run["sample_seed"] == rag_eval.SEED
     assert run["oracle"] == "rationale" and run["legacy_oracle"] == "qrels"
     assert "rationale" in run["oracle_definition"]
     assert run["label_source"]["loader"] == "app.ingest.corpus.load_claim_labels"
@@ -1007,6 +1009,7 @@ def test_a_partial_test_sample_is_never_canonical(monkeypatch, tmp_path):
 def test_default_n_on_a_larger_test_split_writes_a_run_dir_not_eval_results(tmp_path, monkeypatch, capsys):
     out = tmp_path / "results"
     _patch_main(tmp_path, monkeypatch, out)
+    monkeypatch.delenv("SSR_RAG_N")
     many = {str(i): f"Claim number {i} holds." for i in range(1, 61)}
     monkeypatch.setattr(rag_eval, "load_queries_qrels", lambda dataset=None: (many, {}))
     monkeypatch.setattr(rag_eval, "load_claim_labels",
@@ -1242,8 +1245,20 @@ def test_signature_tracks_everything_that_changes_a_row(monkeypatch):
         with monkeypatch.context() as m:
             m.setattr(settings, field, value)
             changed[field] = sig()
+    for attr, value in (("GENERATION_TEMPERATURE", 0.3), ("TRUNCATION_RETRY_FACTOR", 3)):
+        with monkeypatch.context() as m:
+            m.setattr(rag_eval, attr, value)
+            changed[attr] = sig()
     assert all(s != base for s in changed.values()), [k for k, s in changed.items() if s == base]
     assert len(set(changed.values())) == len(changed)
+    # Added after the committed run: at that run's values they stay out of the fields, so
+    # its recorded run.checkpoint_signature still reproduces.
+    fields = rag_eval.signature_fields("beir/scifact/test", 50, gen, judge_ep)
+    assert "generation_temperature" not in fields and "truncation_retry_factor" not in fields
+    assert rag_eval._SIGNATURE_BASELINE == {
+        "generation_temperature": rag_eval.GENERATION_TEMPERATURE,
+        "truncation_retry_factor": rag_eval.TRUNCATION_RETRY_FACTOR,
+    }
     # Git-independent: a new commit that changes none of the above keeps the checkpoint.
     monkeypatch.setattr(rag_eval, "_git_sha", lambda: "deadbeef")
     assert sig() == base
@@ -1445,6 +1460,63 @@ def test_output_dir_non_default_models_are_never_canonical(monkeypatch, tmp_path
     )
     assert not canonical and judged.parent == tmp_path / "runs"
     assert judged.name.endswith("_judge-qwen-qwen3-8-27b-free")
+
+
+RAG_OVERRIDES = {
+    "rrf_k": 30,
+    "dense_top_k": 50,
+    "embedding_model": "BAAI/bge-base-en-v1.5",
+    "embedding_query_prefix": "",
+    "corpus_dataset": "beir/nfcorpus",
+    "llm_max_completion_tokens": 1024,
+    "llm_reasoning_effort": "high",
+}
+
+
+def test_rag_overrides_cover_every_result_setting():
+    assert set(RAG_OVERRIDES) == set(rag_eval.RESULT_SETTINGS)
+
+
+def test_output_dir_default_settings_are_canonical(monkeypatch, tmp_path):
+    monkeypatch.setattr(rag_eval, "OUT", tmp_path / "results")
+    defaults = Settings.model_construct()
+    for field in rag_eval.RESULT_SETTINGS:
+        monkeypatch.setattr(settings, field, getattr(defaults, field))
+    assert rag_eval.non_default_result_settings() == []
+    assert rag_eval.output_dir(rag_eval.CANONICAL_DATASET, 0, 300, "ab" * 8, DEFAULT_GEN_EP,
+                               DEFAULT_JUDGE_EP, split_size=300) == (tmp_path / "results", True)
+
+
+@pytest.mark.parametrize("field", sorted(RAG_OVERRIDES))
+def test_output_dir_a_non_default_result_setting_is_never_canonical(monkeypatch, tmp_path, field):
+    monkeypatch.setattr(rag_eval, "OUT", tmp_path / "results")
+    monkeypatch.setattr(rag_eval, "RUNS", tmp_path / "runs")
+    monkeypatch.setattr(settings, field, RAG_OVERRIDES[field])
+    out, canonical = rag_eval.output_dir(rag_eval.CANONICAL_DATASET, 0, 300, "abcdef0123456789",
+                                         DEFAULT_GEN_EP, DEFAULT_JUDGE_EP, split_size=300)
+    assert not canonical and out.parent == tmp_path / "runs"
+    assert out.name.startswith("rag_beir-scifact-test_300_abcdef01_settings-")
+    assert rag_eval.non_default_result_settings() == [field]
+
+
+def test_an_equivalent_reasoning_effort_spelling_stays_canonical(monkeypatch):
+    # "off" and "" send nothing, exactly like the default "auto".
+    for spelling in ("off", ""):
+        monkeypatch.setattr(settings, "llm_reasoning_effort", spelling)
+        assert rag_eval.non_default_result_settings() == []
+
+
+def test_only_ssr_rag_n_all_is_canonical(monkeypatch, tmp_path):
+    # CLAUDE.md: only SSR_RAG_N=all writes eval/results/, never a number that happens to
+    # cover the split (300, or 1000 capped to it).
+    monkeypatch.setattr(rag_eval, "OUT", tmp_path / "results")
+    monkeypatch.setattr(rag_eval, "RUNS", tmp_path / "runs")
+    args = (rag_eval.CANONICAL_DATASET, 0, 300, "abcdef0123456789", DEFAULT_GEN_EP, DEFAULT_JUDGE_EP)
+    assert rag_eval.output_dir(*args, split_size=300, n_requested=None)[1] is True
+    assert rag_eval.parse_n("all") is None
+    for n in (300, 1000):
+        out, canonical = rag_eval.output_dir(*args, split_size=300, n_requested=n)
+        assert not canonical and out == tmp_path / "runs" / "rag_beir-scifact-test_300_abcdef01"
 
 
 def test_non_default_generator_on_full_test_split_writes_eval_runs(tmp_path, monkeypatch, capsys):
@@ -1653,7 +1725,6 @@ def test_reask_fires_once_per_claim_without_a_verdict_and_sets_it(tmp_path, monk
     assert r4["first_pass"]["predicted_label"] == "NONE" and r5["first_pass"]["predicted_label"] == "NONE"
     # Prose answers are kept as served; the judge's scores stay the first reply's.
     assert r4["answer"] == "Nothing here settles it." and r4["faithfulness"] == 0.9
-    assert rag_eval.first_pass_row(r4)["predicted_label"] == "NONE"
     assert blob["verdict_sources"]["reask"] == 2 and blob["reasked_answers"] == 2
     assert blob["verdict_accuracy"] == 0.8  # q5 (CONTRADICT) is fixed, q4 (SUPPORT) is not
     assert blob["run"]["reask"]["prompt_hash"] == reask_prompt_hash()
@@ -1861,7 +1932,6 @@ def test_apply_reask_flags_a_placeholder_and_recomputes_citations():
     prose = rag_eval.apply_reask({**base, "answer": "Passage [2] says so.", "cited_doc_ids": []}, rec)
     assert prose["judge_scored_placeholder"] is False and prose["cited_doc_ids"] == ["d2"]
     assert not rag_eval.judge_scored_placeholder(prose)
-    assert "judge_scored_placeholder" not in rag_eval.first_pass_row(prose)
 
 
 def test_quote_stats_count_rows_without_the_key_as_unknown():
@@ -1971,7 +2041,7 @@ def test_a_failed_reask_keeps_the_first_pass_and_is_retried_next_run(rate_limite
     assert len(FakeGenerator.reask_calls) == 2 and len(_reask_entries(tmp_path)) == 2
 
 
-def test_first_pass_row_undoes_the_reask():
+def test_apply_reask_keeps_the_first_pass_values():
     row = {"query_id": "1", "verdict": None, "verdict_source": None, "predicted_label": "NEI",
            "answered": False, "answered_source": "judge", "abstention_class": "false_abstention",
            "abstention_class_qrels": "false_abstention", "answer": TRUNCATED_ANSWER,
@@ -1979,10 +2049,9 @@ def test_first_pass_row_undoes_the_reask():
     out = rag_eval.apply_reask(row, {"raw": "Verdict: SUPPORTED [1]", "finish_reason": "stop"})
     assert out["verdict_source"] == "reask" and out["answer"] == REASK_NOTE
     assert out["abstention_class"] == "answered_with_evidence"
-    assert rag_eval.first_pass_row(out) == row
+    assert out["first_pass"] and all(out["first_pass"][k] == row[k] for k in out["first_pass"])
     unparsed = rag_eval.apply_reask(row, {"raw": "unsure", "finish_reason": "length"})
     assert unparsed["reask"]["parsed"] is None and unparsed["predicted_label"] == "NEI"
-    assert rag_eval.first_pass_row(unparsed) == row
 
 
 TRUNCATED_ANSWER = "[Answer truncated: the model ran out of its token budget.]"

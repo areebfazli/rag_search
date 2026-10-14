@@ -145,7 +145,13 @@ from pathlib import Path
 
 from openai import APIStatusError, OpenAI, OpenAIError, RateLimitError
 
-from app.core.config import Settings, settings
+from app.core.config import (
+    Settings,
+    describe_non_default,
+    non_default_settings,
+    non_default_tag,
+    settings,
+)
 from app.core.llm_endpoints import (
     OPENROUTER_BASE_URL,
     EmptyCompletionError,
@@ -168,6 +174,7 @@ from app.generate.generator import (
     REASK_NOTE,
     GENERATION_TEMPERATURE,
     TRUNCATION_NOTE,
+    TRUNCATION_RETRY_FACTOR,
     LLMGenerator,
     looks_like_claim,
     map_citations,
@@ -320,13 +327,13 @@ def default_throttle_s(gen: LLMEndpoint | None = None, judge: LLMEndpoint | None
 OUT = RESULTS  # canonical run only — the committed artifact (repo-anchored, not cwd)
 RUNS = Path("data/eval_runs")  # every other run (gitignored)
 CACHE = Path("data/eval_cache/rag")  # per-row resume checkpoints (gitignored)
-# Re-ask replies (one file per dataset), in ReplyCache format and keys (v2, with the
-# legacy-key migration in reask_lookup). The path is the one the archived post-hoc re-ask
-# experiment wrote: the replies it fetched (behind the committed rag.json) are hits here.
+# Re-ask replies (one file per dataset), in ReplyCache format with v2 keys only (the
+# older v1 keys are no longer read). The path is the one the archived post-hoc re-ask
+# experiment wrote (on the earlier Ling generator).
 REASK_CACHE = Path("data/eval_cache/secondlook")
 # Expected share of claims the re-ask fires on, for the up-front request estimate only:
-# 16 of 300 on the committed test run (15 before 3e360cc's scoring rules). A checkpoint's
-# own rate wins once it is big enough.
+# 16 of 300 on the earlier free-Ling canonical run (348c919). A checkpoint's own rate
+# wins once it is big enough.
 EXPECTED_REASK_RATE = 0.05
 
 # Expected share of generations that need the truncation retry, for the up-front request
@@ -717,15 +724,6 @@ def apply_reask(row: Mapping, rec: Mapping | None, error: str | None = None) -> 
     return out
 
 
-def first_pass_row(row: Mapping) -> dict:
-    """A row as the first pass left it (the re-ask undone): what the checkpoint stores and
-    what experiments built on the pre-re-ask answers read."""
-    out = {k: v for k, v in row.items() if k not in ("first_pass", "reask", "reask_attempted",
-                                                     "reask_error", "judge_scored_placeholder")}
-    out.update(row.get("first_pass") or {})
-    return out
-
-
 def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
@@ -744,10 +742,12 @@ def prompt_hash() -> str:
     rather than hashing its source: an edit to the wording or layout the model sees
     changes the hash, while a comment or refactor that leaves the prompt identical
     does not. (A change confined to the question sanitizer won't move it — that alters
-    only how real queries are cleaned, not the template.)
+    only how real queries are cleaned, not the template.) It renders the claim form of the
+    user turn (with the verdict reminder), the form every eval input gets; the question
+    form differs only by omitting that one line.
     """
     ph = SearchHit("{doc_id}", 0.0, "{text}", {"title": "{title}"})
-    return _sha256(SYSTEM + "\n\x00\n" + build_user_prompt("{question}", [ph, ph]))
+    return _sha256(SYSTEM + "\n\x00\n" + build_user_prompt("{question}", [ph, ph], verdict_reminder=True))
 
 
 def _git_sha() -> str | None:
@@ -1300,6 +1300,35 @@ def non_default_roles(gen: LLMEndpoint, judge_ep: LLMEndpoint) -> list[str]:
     ]
 
 
+# Settings that change a row (besides the two endpoints, compared by non_default_roles,
+# and SSR_LLM_REASK): a run with any of them off its code default is never canonical.
+# Not here: mistral_llm_fallback_model (a canonical run refuses any fallback answer),
+# reranker_model / rerank_candidates (MODE is plain hybrid), rerank_top_k (every query
+# passes TOP_K), keys, provider-fixed URLs, throttle, quota check, paths and API limits.
+RESULT_SETTINGS = (
+    "rrf_k",
+    "dense_top_k",
+    "embedding_model",
+    "embedding_query_prefix",
+    "corpus_dataset",  # the passages a resumed row's re-ask reads (load_documents)
+    "llm_max_completion_tokens",
+    "llm_reasoning_effort",
+)
+
+
+def non_default_result_settings() -> list[str]:
+    """The RESULT_SETTINGS off their code default ([] = defaults). The reasoning effort is
+    compared as resolved, like the checkpoint signature: "auto", "" and "off" all send
+    nothing."""
+    changed = non_default_settings(RESULT_SETTINGS, settings)
+    default_effort = Settings.model_construct().llm_reasoning_effort
+    if "llm_reasoning_effort" in changed and resolve_reasoning_effort(
+        settings.llm_reasoning_effort
+    ) == resolve_reasoning_effort(default_effort):
+        changed.remove("llm_reasoning_effort")
+    return changed
+
+
 def output_dir(
     dataset: str,
     limit: int,
@@ -1309,6 +1338,7 @@ def output_dir(
     judge_ep: LLMEndpoint | None = None,
     reask: bool = True,
     split_size: int | None = None,
+    n_requested: int | None = None,
 ) -> tuple[Path, bool]:
     """Where this run's rag.{md,json} go, and whether it is the canonical run.
 
@@ -1324,16 +1354,27 @@ def output_dir(
     None = the defaults, for callers that only vary the sample.) A run with the re-ask
     off (SSR_LLM_REASK=false) is not what the product serves: never canonical either,
     and its directory ends in ``_noreask``.
+
+    Two more conditions: SSR_RAG_N must be "all" (``n_requested`` None, as parse_n
+    returns it; a number, even one >= the split size, is not canonical), and every
+    RESULT_SETTINGS must be on its code default (otherwise the directory ends in
+    ``_settings-<hash8>``).
     """
     changed = non_default_roles(gen, judge_ep) if gen and judge_ep else []
-    whole_split = split_size is not None and n_sample == split_size
-    if not limit and dataset == CANONICAL_DATASET and whole_split and not changed and reask:
+    tweaked = non_default_result_settings()
+    whole_split = split_size is not None and n_sample == split_size and n_requested is None
+    if (
+        not limit and dataset == CANONICAL_DATASET and whole_split and not changed and reask
+        and not tweaked
+    ):
         return OUT, True
     name = f"rag_{_slug(dataset)}_{n_sample}_{phash[:8]}"
     if changed:
         name += f"_{_slug(gen.model)}"
         if "judge" in changed:
             name += f"_judge-{_slug(judge_ep.model)}"
+    if tweaked:
+        name += f"_{non_default_tag(tweaked, settings)}"
     if not reask:
         name += "_noreask"
     return assert_outside(RUNS / name), False
@@ -1402,13 +1443,19 @@ _CHECKPOINT_ROW_KEYS = (
 )
 
 
+# The values the committed canonical run (eval/results/rag.json) used for the fields
+# signature_fields adds only when they differ (see there).
+_SIGNATURE_BASELINE = {"generation_temperature": 0.1, "truncation_retry_factor": 2}
+
+
 def signature_fields(dataset: str, n_sample: int, gen: LLMEndpoint, judge_ep: LLMEndpoint) -> dict:
     """Everything that changes a row's content. Nothing git-specific: a commit that
     leaves every one of these alone must not invalidate hours of rate-limited work.
 
     The sample is fixed by (dataset, n_sample, seed); each row by the two endpoints
     (provider, base URL, model id, routing fields), both prompts, the generator's token
-    budget and reasoning setting, and the retrieval that produced its context.
+    budget, temperature, truncation-retry factor and reasoning setting, and the retrieval
+    that produced its context.
     """
     reranker = reranker_in_effect(MODE)
     fields: dict = {
@@ -1430,6 +1477,16 @@ def signature_fields(dataset: str, n_sample: int, gen: LLMEndpoint, judge_ep: LL
         "embedding_model": settings.embedding_model,
         "embedding_query_prefix": settings.embedding_query_prefix,
     }
+    # The generation temperature and the truncation retry's budget factor change a row
+    # too, but were added to the signature after the committed canonical run: they enter
+    # it only when they differ from the values that run used, so its recorded
+    # run.checkpoint_signature still reproduces and its checkpoint still resumes.
+    for key, value in (
+        ("generation_temperature", GENERATION_TEMPERATURE),
+        ("truncation_retry_factor", TRUNCATION_RETRY_FACTOR),
+    ):
+        if value != _SIGNATURE_BASELINE[key]:
+            fields[key] = value
     if (index := _index_fingerprint()) is not None:
         fields["index_manifest"] = index
     return fields
@@ -1753,9 +1810,13 @@ def main(argv: Sequence[str] = ()) -> None:
     reask_on = settings.llm_reask
     out, canonical = output_dir(
         dataset, limit, len(qids), phash, gen_ep, judge_ep, reask=reask_on, split_size=len(queries),
+        n_requested=n_req,
     )
     if changed := non_default_roles(gen_ep, judge_ep):
         print(_non_default_notice(changed, gen_ep, judge_ep), flush=True)
+    if tweaked := non_default_result_settings():
+        print(f"Non-default settings, so this run never writes {OUT}: "
+              f"{describe_non_default(tweaked, settings)}", flush=True)
     if not reask_on:
         print(f"SSR_LLM_REASK is off: no verdict-only re-ask, so this run never writes {OUT}",
               flush=True)
@@ -1771,6 +1832,12 @@ def main(argv: Sequence[str] = ()) -> None:
         print(
             f"  partial sample: {len(qids)} of {len(queries)} test claims, so this run is not "
             f"canonical; only SSR_RAG_N=all writes {OUT}",
+            flush=True,
+        )
+    elif dataset == CANONICAL_DATASET and not limit and n_req is not None:
+        print(
+            f"  SSR_RAG_N={n_req} covers the whole split but is not 'all', so this run is "
+            f"not canonical; only SSR_RAG_N=all writes {OUT}",
             flush=True,
         )
     replacing = None
@@ -1873,7 +1940,7 @@ def main(argv: Sequence[str] = ()) -> None:
     print(_estimate_line(len(retrieved), gen_ep, judge_ep, throttle), flush=True)
     observed = observed_retry_rate(list(done.values()))
     retry_rate = EXPECTED_RETRY_RATE if observed is None else observed
-    retry_src = "committed-run rate" if observed is None else f"observed on {len(done)} rows"
+    retry_src = "assumed, earlier Ling run" if observed is None else f"observed on {len(done)} rows"
     est = request_estimate(
         len(retrieved), gen_ep, judge_ep, throttle, retry_rate,
         reask_rate=reask_rate, reask_pending=len(reask_missing), reask=reask_on,

@@ -414,11 +414,6 @@
       applyCitations();
     }
 
-    function showWarnings(data) {
-      if (!Array.isArray(data.warnings) || !data.warnings.length) return;
-      statusEl.appendChild(el('div', 'warn', data.warnings.join(' ')));
-    }
-
     function setStatusHeading(title, sub) {
       const head = el('div', 'sec-head');
       head.append(el('h2', null, title));
@@ -429,7 +424,12 @@
     function params() {
       const q = qEl.value.trim();
       const mode = document.getElementById('mode').value;
-      const k = document.getElementById('k').value || 8;
+      // The examples call runCheck() directly, bypassing the form's min/max: clamp here
+      // (1-20, 8 when empty or invalid) and show the value actually used.
+      const kEl = document.getElementById('k');
+      const n = Math.round(Number(kEl.value));
+      const k = kEl.value.trim() === '' || !Number.isFinite(n) ? 8 : Math.min(20, Math.max(1, n));
+      kEl.value = String(k);
       return { q, mode, k };
     }
 
@@ -558,13 +558,13 @@
         if (id !== reqId) return;
         const n = data.hits.length;
         setStatusHeading('Papers found', `${n} · ${Math.round(performance.now() - t0)} ms · ${MODE_NAMES[data.mode] || data.mode}`);
-        showWarnings(data);
         searchSettled = true;
         renderHits(data.hits, mode);  // mode as requested, not the current select value
       }, err => {
         if (id !== reqId) return;
         searchSettled = true;
         statusEl.replaceChildren(el('div', 'status-err', `Search error: ${err.message}`));
+        applyCitations();  // no results list: show the answer's own sources if it cited any
       });
       const answerDone = answerP.then(data => {
         if (id !== reqId) return;

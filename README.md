@@ -11,10 +11,11 @@ from free models, so running it costs $0, and every headline number is measured 
 benchmark's expert labels.
 
 In the UI you type a claim (or click one of three examples) and press **Check claim**: one click
-returns a colour-coded verdict card (the verdict, a cited explanation whose [n] links jump to the
-paper, and the model that answered) above the ranked list of matching papers.
+returns a colour-coded verdict card (the verdict with a one-line meaning, a cited explanation whose
+[n] links jump to the paper, and the model that answered) above the ranked list of papers found,
+each scored in its search method's own terms (keyword score, similarity or fused score).
 
-![The UI after checking the example claim "Bariatric surgery has a positive impact on mental health.": the claim box with its Check claim button and search settings, three example claims, a green Supported verdict card answered by ministral-14b-latest with clickable numbered citations, and the first of the papers found, marked cited](docs/ui.png)
+![The UI after checking the example claim "Bariatric surgery has a positive impact on mental health.": the header with measured-result pills (76% correct verdicts on 300 test claims), the claim box with its Check claim button and labelled search settings, three example claims, a green Supported verdict card answered by ministral-14b-latest with clickable numbered citations, and the first of the papers found, ranked 1 with its fused score and marked cited](docs/ui.png)
 
 ## Results
 
@@ -81,7 +82,9 @@ fallback if a call fails), and a free Nemotron 3 Ultra model on OpenRouter is th
   (0.750). The prompt now says the line is required for every claim and that caveats belong in
   the prose above it. On 100 train claims that cut the re-ask from 23 to 2 with accuracy within
   noise. On test it fired on 2 of 300, and accuracy moved 0.750 → 0.757 (20 broken, 22 fixed,
-  McNemar p = 0.88): no change. [Details](docs/DETAILS.md#the-verdict-line-prompt-change).
+  McNemar p = 0.88): no change. The closing verdict reminder is sent only for inputs that read as
+  claims, so plain questions don't get a verdict line.
+  [Details](docs/DETAILS.md#the-verdict-line-prompt-change).
 
 ## Tried, measured, not shipped
 
@@ -126,7 +129,7 @@ as `make eval` or `make index`.
 | `make eval` | Retrieval metrics on the 300 test claims → `eval/results/retrieval.md` (no key needed) |
 | `make analysis` | Re-score the cached retrieval runs by claim label → `eval/results/analysis.md` |
 | `make latency` | Per-query search time for every configuration → `eval/results/latency.md` |
-| `make eval-rag` | Answer-quality eval (needs both keys): 50 claims by default → `data/eval_runs/`. `SSR_RAG_N=all make eval-rag` runs all 300 (the canonical run made about 300 Mistral requests and 305 free OpenRouter judge requests) and is the only run that writes `eval/results/rag.md`; add `SSR_RAG_CHECK_QUOTA=1` to stop up front if today's free OpenRouter quota is short |
+| `make eval-rag` | Answer-quality eval (needs both keys): 50 claims by default → `data/eval_runs/`. `SSR_RAG_N=all make eval-rag` runs all 300 (the canonical run made about 300 Mistral requests and 305 free OpenRouter judge requests) and is the only run that writes `eval/results/rag.md` (and only with default models and settings; `SSR_RAG_N=300` does not count); add `SSR_RAG_CHECK_QUOTA=1` to stop up front if today's free OpenRouter quota is short |
 | `make rag-compare A=a/rag.json B=b/rag.json` | Claim-by-claim significance test (exact McNemar) between two answer runs |
 | `make rag-audit` | Re-score the answers under the published label audit (offline) → `eval/results/rag_label_audit.md` |
 | `make test` / `make lint` / `make ci` | Unit tests / ruff / both, as CI runs them |
@@ -152,9 +155,10 @@ claim ─┬─► BM25 (bm25s)            top-100 ─┐
 
 - `app/retrieve`: BM25, dense and hand-written RRF fusion behind one `SearchService`, shared by
   the API and the eval harness so both run identical code.
-- `app/generate`: OpenAI-compatible client, grounded prompt with an injection sanitizer, verdict
-  parser, re-ask and a one-shot fallback to `ministral-8b-latest`. Each key only goes to its own
-  provider, and OpenRouter requests pass a free-only guard (`app/core/llm_endpoints.py`).
+- `app/generate`: OpenAI-compatible client, grounded prompt (the user's input is sanitized;
+  passages come from the fixed SciFact corpus), verdict parser, re-ask and a one-shot fallback to
+  `ministral-8b-latest`. Each key only goes to its own provider, and OpenRouter requests pass a
+  free-only guard (`app/core/llm_endpoints.py`).
 - `app/eval`: retrieval eval (ranx, paired significance tests), answer eval (verdicts scored
   against SciFact labels; a free Nemotron 3 Ultra judge on OpenRouter, from a different model
   family (Nvidia) than the Mistral generator, for faithfulness), McNemar comparisons, label

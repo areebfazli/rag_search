@@ -241,3 +241,35 @@ def test_other_dataset_never_touches_results(sandbox, monkeypatch):
     assert not out.exists()
     header = (runs / f"beir-scifact-train_{len(QUERIES)}" / "retrieval.md").read_text()
     assert header.startswith(f"# Retrieval evaluation — beir/scifact/train ({len(QUERIES)} queries")
+
+
+# --- a non-default result-affecting setting is never canonical ---------------
+
+
+RETRIEVAL_OVERRIDES = {
+    "rrf_k": 30,
+    "rerank_candidates": 16,
+    "embedding_model": "BAAI/bge-base-en-v1.5",
+    "embedding_query_prefix": "",
+}
+
+
+def test_retrieval_overrides_cover_every_result_setting():
+    assert set(RETRIEVAL_OVERRIDES) == set(re_mod.RESULT_SETTINGS)
+
+
+def test_default_settings_are_canonical(monkeypatch):
+    monkeypatch.setattr(settings, "eval_dataset", re_mod.CANONICAL_DATASET)
+    assert re_mod._output_dir(0, 300) == (re_mod.OUT, True)
+
+
+@pytest.mark.parametrize("field", sorted(RETRIEVAL_OVERRIDES))
+def test_a_non_default_result_setting_never_touches_results(sandbox, monkeypatch, capsys, field):
+    out, runs = sandbox
+    monkeypatch.setattr(settings, field, RETRIEVAL_OVERRIDES[field])
+    re_mod.main()
+    assert not out.exists()
+    (run_dir,) = runs.iterdir()
+    assert run_dir.name.startswith(f"beir-scifact-test_{len(QUERIES)}_settings-")
+    assert "non-canonical" in (run_dir / "retrieval.md").read_text().splitlines()[0]
+    assert f"SSR_{field.upper()}=" in capsys.readouterr().out
