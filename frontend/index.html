@@ -222,6 +222,10 @@
       .hit { gap: var(--s3); }
       .v-title { font-size: 23px; }
     }
+    @media (max-width: 420px) {
+      .field-k { flex-direction: row; align-items: center; justify-content: space-between; gap: var(--s3); }
+      .settings .field-k input[type=number] { width: 96px; flex: none; }
+    }
     @media (prefers-reduced-motion: reduce) {
       .skeleton i, .answer.pending .v-icon { animation: none; opacity: .6; }
       .hit.flash { animation: none; border-color: var(--accent-2); box-shadow: 0 0 0 3px rgba(126, 226, 184, .35); }
@@ -235,7 +239,7 @@
       <h1>Scientific <span class="accent">Claim Checker</span></h1>
       <p class="lede">Checks a health or science claim against 5,183 research abstracts and says whether the papers support it, refute it, or don't say — with citations.</p>
       <ul class="stats" aria-label="Measured results">
-        <li><b>75%</b> correct verdicts on 300 test claims</li>
+        <li><b>76%</b> correct verdicts on 300 test claims</li>
         <li>right paper in top 10 for <b>86%</b> of claims</li>
         <li><b>0.12 s</b> search</li>
         <li><b>$0</b> to run</li>
@@ -256,7 +260,7 @@
             <option value="dense">Meaning only (embeddings)</option>
           </select>
         </div>
-        <div class="field">
+        <div class="field field-k">
           <label for="k">Papers to show</label>
           <input id="k" type="number" min="1" max="20" value="8" title="Papers to show" />
         </div>
@@ -350,8 +354,20 @@
       }
     }
 
+    // Score label/format per search method: the /search scales differ (BM25 raw, dense cosine, RRF fused).
+    const SCORE_FMT = {
+      bm25: { label: 'keyword score', digits: 1 },
+      dense: { label: 'similarity', digits: 2 },
+      hybrid: { label: 'fused score', digits: 4 },
+      hybrid_rerank: { label: 'rerank score', digits: 3 },
+    };
+    function scoreText(score, mode) {
+      const fmt = Object.prototype.hasOwnProperty.call(SCORE_FMT, mode) ? SCORE_FMT[mode] : { label: 'score', digits: 4 };
+      return `${fmt.label} ${Number(score).toFixed(fmt.digits)}`;
+    }
+
     // Built with DOM APIs + textContent only: hit text is never parsed as HTML.
-    function buildHitCard(h, i) {
+    function buildHitCard(h, i, mode) {
       const card = el('div', 'card hit');
       card.dataset.doc = String(h.doc_id);
       const rank = el('div', 'rank', String(i + 1));
@@ -359,8 +375,8 @@
       const main = el('div', 'main');
       const title = el('div', 'title', h.title || '(untitled)');
       const meta = el('div', 'meta');
-      const score = el('span', 'score', `relevance ${Number(h.score).toFixed(4)}`);
-      score.title = 'Retrieval score (higher is more relevant; scale depends on the search method)';
+      const score = el('span', 'score', scoreText(h.score, mode));
+      score.title = 'Scores are on different scales for each search method, so only the order matters, not the number.';
       meta.append(el('span', 'docid', `doc ${h.doc_id}`), score);
       const snippet = el('div', 'snippet', h.text || '');
       main.append(title, meta, snippet);
@@ -392,8 +408,8 @@
     }
     window.addEventListener('resize', setupClamps);
 
-    function renderHits(hits) {
-      resultsEl.replaceChildren(...hits.map(buildHitCard));
+    function renderHits(hits, mode) {
+      resultsEl.replaceChildren(...hits.map((h, i) => buildHitCard(h, i, mode)));
       setupClamps();
       applyCitations();
     }
@@ -544,7 +560,7 @@
         setStatusHeading('Papers found', `${n} · ${Math.round(performance.now() - t0)} ms · ${MODE_NAMES[data.mode] || data.mode}`);
         showWarnings(data);
         searchSettled = true;
-        renderHits(data.hits);
+        renderHits(data.hits, mode);  // mode as requested, not the current select value
       }, err => {
         if (id !== reqId) return;
         searchSettled = true;
